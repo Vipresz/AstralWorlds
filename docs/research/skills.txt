@@ -1,0 +1,41 @@
+COMBAT
+
+types 
+
+we want melee
+we want projectile
+we want stealth
+we want magtech
+we want siege
+
+All the skills have cross-dependance
+
+Player Archetype	        Combat Style	Skill Progression	Tech / Relic Integration	Key Rewards / Growth
+Warrior / Knight	        Melee-focused: swords, polearms, axes	Timing, blocking, combo chaining, counter attacks	Energy blades, adaptive armor, shield drones	Unlock advanced weapon mods, increased damage, new combat stances, tactical abilities
+Ranger / Sharpshooter	    Ranged combat: bows, crossbows, rifles	Aim precision, positioning, stealth shots	Homing bolts, plasma projectiles, terrain-piercing ammo	Unlock new ammo types, scope upgrades, environmental shot tricks
+Technomancer / Relic User	Tech abilities: “magic-like” relic powers	Resource management, targeting, comboing powers	Gravity manipulation, cloaking, time dilation pulses	Unlock new abilities, increase power efficiency, combine powers creatively
+Tactician / Assassin	        Stealth and sabotage	Timing, movement, trap placement, silent takedowns	Holo-decoys, cloaking tech, silent drones	Unlock new infiltration tools, improved stealth movement, assassination perks
+Engineer / Tinkerer	        Environmental / gadget combat	Construction of turrets, traps, and defensive devices	Deployable force fields, automated drones, environmental control devices	Unlock advanced gadgets, modify battlefield elements, create emergent combat strategies
+Commander / Leader	        Large-scale / squad combat	Unit coordination, strategy, siege mechanics	Planetary siege engines, orbital artillery, AI squad control	Unlock larger projects, stronger troops, tactical upgrades, improved leadership bonuses
+
+Gathering
+-> fishing
+-> herblore
+-> woodcutting
+-> hunting
+-> mining
+
+Processing
+-> Cooking
+-> machining
+-> woodworking
+-> crafting (higher level skill that often requires metalwork, woodwork, machining)
+-> metalwork 
+-> Electroncs
+
+Technology
+-> Energy (enables everything)
+-> Robotics (automation)
+-> Vehicles (transportation)
+-> Weapons (Fighting)
+
