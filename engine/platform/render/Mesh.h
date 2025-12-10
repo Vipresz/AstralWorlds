@@ -21,6 +21,11 @@ public:
     void RenderMesh();
     void ClearMesh();
     
+    // Update vertex positions (for animation/skinning)
+    // vertices: array of vertex data (position, UV, normal) - same format as CreateMesh
+    // numOfVertices: number of vertices (not floats, actual vertex count)
+    void UpdateVertexPositions(GLfloat* vertices, unsigned int numOfVertices);
+    
     bool HasBoneData() const { return m_hasBoneData; }
     
     ~Mesh();

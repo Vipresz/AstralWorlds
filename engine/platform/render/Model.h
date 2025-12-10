@@ -53,6 +53,12 @@ public:
     // Get the number of bones in the model (max mesh bone index + 1)
     size_t GetBoneCount() const { return m_boneNames.size(); }
     
+    // Update vertex positions for animation (applies to all meshes)
+    // vertexData: array of vertex data (position, UV, normal) per mesh
+    // meshVertexCounts: number of vertices per mesh
+    void UpdateVertexPositions(std::vector<std::vector<GLfloat>>& vertexData, 
+                               const std::vector<unsigned int>& meshVertexCounts);
+    
     ~Model();
 
 private:

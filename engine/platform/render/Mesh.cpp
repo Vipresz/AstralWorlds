@@ -91,6 +91,17 @@ void Mesh::CreateMeshWithBones(GLfloat* vertices, unsigned int* indices,
     
 }
 
+void Mesh::UpdateVertexPositions(GLfloat* vertices, unsigned int numOfVertices) {
+    if (VBO == 0 || !vertices || numOfVertices == 0) {
+        return;
+    }
+    
+    // Update vertex buffer with new positions
+    glBindBuffer(GL_ARRAY_BUFFER, VBO);
+    glBufferSubData(GL_ARRAY_BUFFER, 0, sizeof(vertices[0]) * numOfVertices * 8, vertices);
+    glBindBuffer(GL_ARRAY_BUFFER, 0);
+}
+
 void Mesh::RenderMesh() {
     if (VAO == 0 || IBO == 0 || indexCount == 0) {
         return;

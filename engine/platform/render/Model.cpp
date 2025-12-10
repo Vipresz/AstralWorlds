@@ -71,7 +71,7 @@ void Model::LoadNode(aiNode* node, const aiScene* scene) {
     }
 }
 
-void Model::LoadMesh(aiMesh* mesh, const aiScene* scene) {
+void Model::LoadMesh(aiMesh* mesh, const aiScene* /*scene*/) {
     std::vector<GLfloat> vertices;
     std::vector<unsigned int> indices;
     
@@ -361,6 +361,21 @@ std::string Model::GetBoneNameByIndex(unsigned int meshBoneIndex) const {
         return m_boneNames[meshBoneIndex];
     }
     return std::string(); // Return empty string if index is invalid
+}
+
+void Model::UpdateVertexPositions(std::vector<std::vector<GLfloat>>& vertexData,
+                                   const std::vector<unsigned int>& meshVertexCounts) {
+    if (vertexData.size() != m_meshList.size() || meshVertexCounts.size() != m_meshList.size()) {
+        LOG_WARNING_FMT("Model", "Vertex data count mismatch: %zu meshes, %zu vertex data arrays", 
+                        m_meshList.size(), vertexData.size());
+        return;
+    }
+    
+    for (size_t i = 0; i < m_meshList.size() && i < vertexData.size(); i++) {
+        if (!vertexData[i].empty() && meshVertexCounts[i] > 0) {
+            m_meshList[i]->UpdateVertexPositions(vertexData[i].data(), meshVertexCounts[i]);
+        }
+    }
 }
 
 Model::~Model() {

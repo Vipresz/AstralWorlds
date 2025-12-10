@@ -44,6 +44,11 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/src/CMakeLists.txt")
     add_subdirectory(src)
 endif()
 
+# Build skeleton editor
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/editors/skeleton/CMakeLists.txt")
+    add_subdirectory(editors/skeleton)
+endif()
+
 message(STATUS "")
 message(STATUS "Game Engine Build Configuration:")
 message(STATUS "  Build type: ${CMAKE_BUILD_TYPE}")

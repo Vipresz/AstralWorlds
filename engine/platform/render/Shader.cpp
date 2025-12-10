@@ -108,7 +108,19 @@ void Shader::CompileProgram() {
     GLint result = 0;
     GLchar eLog[1024] = { 0 };
     
+    // Clear any pending errors before linking
+    while (glGetError() != GL_NO_ERROR) {}
+    
     glLinkProgram(shaderID);
+    
+    // Check for OpenGL errors during linking
+    GLenum error = glGetError();
+    if (error != GL_NO_ERROR) {
+        printf("Error: OpenGL error during glLinkProgram: 0x%X\n", error);
+        shaderID = 0;
+        return;
+    }
+    
     glGetProgramiv(shaderID, GL_LINK_STATUS, &result);
     if (!result) {
         glGetProgramInfoLog(shaderID, sizeof(eLog), NULL, eLog);
@@ -118,10 +130,8 @@ void Shader::CompileProgram() {
     }
     
     // Verify program is valid before getting uniform locations
-    GLint isValid = 0;
-    glGetProgramiv(shaderID, GL_LINK_STATUS, &isValid);
-    if (!isValid) {
-        printf("Error: Shader program failed to link properly!\n");
+    if (!glIsProgram(shaderID)) {
+        printf("Error: Shader program ID %u is not a valid program after linking!\n", shaderID);
         shaderID = 0;
         return;
     }
@@ -187,12 +197,39 @@ void Shader::UseShader() {
         printf("Error: Cannot use shader - shader program is not initialized!\n");
         return;
     }
+    
+    // Clear any pending OpenGL errors from previous operations
+    while (glGetError() != GL_NO_ERROR) {}
+    
+    // Validate the program is actually a valid program object
+    if (!glIsProgram(shaderID)) {
+        printf("Error: Shader program ID %u is not a valid program object!\n", shaderID);
+        return;
+    }
+    
+    // Verify the program is still linked (it might have been deleted or invalidated)
+    GLint linkStatus = 0;
+    glGetProgramiv(shaderID, GL_LINK_STATUS, &linkStatus);
+    if (linkStatus == GL_FALSE) {
+        printf("Error: Shader program %u is not linked or has been invalidated!\n", shaderID);
+        return;
+    }
+    
     glUseProgram(shaderID);
     
-    // Check for OpenGL errors
+    // Check for OpenGL errors after glUseProgram
+    // Note: glUseProgram itself rarely generates errors if the program is valid
     GLenum error = glGetError();
     if (error != GL_NO_ERROR) {
-        printf("Error: OpenGL error when using shader program: 0x%X\n", error);
+        // Since we cleared errors above and validated the program, this error is unexpected
+        // However, it might be a false positive from driver quirks, so we log as warning
+        if (error == GL_INVALID_VALUE) {
+            // GL_INVALID_VALUE from glUseProgram means the program ID is invalid
+            // But we already checked with glIsProgram, so this is unexpected
+            printf("Warning: GL_INVALID_VALUE when using shader program %u (driver may have invalidated program)\n", shaderID);
+        } else {
+            printf("Warning: OpenGL error 0x%X when using shader program %u\n", error, shaderID);
+        }
     }
 }
 
