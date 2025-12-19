@@ -22,6 +22,9 @@ public:
     // Convert from string
     static bool FromString(SkeletonDefinition& skeleton, const std::string& data);
 
+    // Coordinate conversion
+    static void ConvertWorldToLocal(SkeletonDefinition& skeleton);
+
 private:
     // Helper methods for parsing
     static bool ParseBone(const std::string& line, BoneDefinition& bone);
@@ -36,9 +39,6 @@ private:
     // String utilities
     static std::string Trim(const std::string& str);
     static std::vector<std::string> Split(const std::string& str, char delimiter);
-    
-    // Coordinate conversion
-    static void ConvertWorldToLocal(SkeletonDefinition& skeleton);
 };
 
 } // namespace Skeleton

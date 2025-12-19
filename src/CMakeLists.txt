@@ -20,11 +20,27 @@ endif()
 # Create game executable
 add_executable(Game ${GAME_SOURCES})
 
+# Add src directory to include path so game systems can be included
+target_include_directories(Game PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}
+)
+
 # Link to engine and platform libraries
 target_link_libraries(Game PRIVATE 
     Engine
     Platform
 )
+
+# Copy GLEW DLL to Game executable directory (Game links to Platform which uses GLEW)
+set(GLEW_DLL_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../../game_libs/glew-2.1.0/bin/Release/x64")
+if(EXISTS "${GLEW_DLL_DIR}/glew32.dll")
+    add_custom_command(TARGET Game POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        "${GLEW_DLL_DIR}/glew32.dll"
+        "${CMAKE_BINARY_DIR}/bin/$<CONFIG>"
+        COMMENT "Copying GLEW DLL to Game output directory"
+    )
+endif()
 
 # Set output name - CMake automatically adds .exe on Windows
 set_target_properties(Game PROPERTIES

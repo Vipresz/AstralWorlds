@@ -6,6 +6,7 @@ layout (location = 2) in vec3 norm;
 // Bone data (if available - will be 0,0,0,0 and 0.0,0.0,0.0,0.0 if not used)
 layout (location = 3) in ivec4 boneIDs;      // Bone indices (which bones influence this vertex)
 layout (location = 4) in vec4 boneWeights;   // Bone weights (how much each bone influences)
+layout (location = 5) in vec3 vertexColor;  // Vertex color (if available)
 
 out vec4 vCol;
 out vec2 TexCoord;
@@ -57,7 +58,12 @@ void main()
 	gl_Position = projection * view * model * finalPosition;
 	DirectionalLightSpacePos = directionalLightTransform * model * finalPosition;
 	
-	vCol = vec4(clamp(pos, 0.0f, 1.0f), 1.0f);
+	// Use vertex color if available, otherwise use position-based color
+	if (length(vertexColor) > 0.001) {
+		vCol = vec4(vertexColor, 1.0f);
+	} else {
+		vCol = vec4(clamp(pos, 0.0f, 1.0f), 1.0f);
+	}
 	
 	TexCoord = tex;
 	

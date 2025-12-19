@@ -65,25 +65,9 @@ int main(int argc, char* argv[]) {
         }
     }
     
-    // If skeleton path not specified, generate from mesh path
-    if (!inputMeshPath.empty() && outputSkeletonPath.empty()) {
-        outputSkeletonPath = inputMeshPath;
-        size_t lastDot = outputSkeletonPath.find_last_of('.');
-        size_t lastSlash = outputSkeletonPath.find_last_of("/\\");
-        
-        if (lastDot != std::string::npos && (lastSlash == std::string::npos || lastDot > lastSlash)) {
-            // Has extension, replace it
-            outputSkeletonPath = outputSkeletonPath.substr(0, lastDot) + ".skel";
-        } else {
-            // No extension, append .skel
-            outputSkeletonPath += ".skel";
-        }
-    }
-    
-    // If still no skeleton path, use default
-    if (outputSkeletonPath.empty()) {
-        outputSkeletonPath = "skeleton.skel";
-    }
+    // DO NOT auto-generate skeleton path from mesh path
+    // Skeleton should only be loaded when explicitly passed via --skel or selected from dropdown
+    // If skeleton path is empty, we'll use a default name for saving, but won't try to load it
     
     LOG_INFO("VisualEditor", "Input mesh: " + inputMeshPath);
     LOG_INFO("VisualEditor", "Output skeleton: " + outputSkeletonPath);
@@ -128,7 +112,9 @@ int main(int argc, char* argv[]) {
             LOG_INFO("VisualEditor", "No mesh file provided, editor will open with grid only");
         }
         
-        // Load or create skeleton file
+        // Only load skeleton if explicitly passed via --skel argument
+        // DO NOT auto-load skeleton files even if mesh is provided
+        // Skeleton can be loaded later via dropdown menu in the editor
         if (!outputSkeletonPath.empty()) {
             // Convert to absolute path
             std::filesystem::path skelPath(outputSkeletonPath);
@@ -142,39 +128,20 @@ int main(int argc, char* argv[]) {
                 // Use original path if filesystem operations fail
             }
             
-            // Try to load skeleton, create if it doesn't exist
-            if (!editor.LoadRig(outputSkeletonPath)) {
-                LOG_INFO_FMT("VisualEditor", "Skeleton file not found, creating: %s", outputSkeletonPath.c_str());
-                std::cout << "Creating skeleton file: " << outputSkeletonPath << std::endl;
-                
-                // Create parent directory if needed
-                try {
-                    std::filesystem::path parentDir = std::filesystem::path(outputSkeletonPath).parent_path();
-                    if (!parentDir.empty() && !std::filesystem::exists(parentDir)) {
-                        std::filesystem::create_directories(parentDir);
-                        LOG_INFO_FMT("VisualEditor", "Created directory: %s", parentDir.string().c_str());
-                    }
-                } catch (...) {
-                    // Continue even if directory creation fails
-                }
-                
-                // Create empty skeleton file
-                if (editor.SaveRig(outputSkeletonPath)) {
-                    LOG_INFO_FMT("VisualEditor", "Created empty skeleton file: %s", outputSkeletonPath.c_str());
-                    std::cout << "✓ Created skeleton file" << std::endl;
-                } else {
-                    LOG_WARNING_FMT("VisualEditor", "Could not create skeleton file: %s", outputSkeletonPath.c_str());
-                    std::cerr << "Warning: Could not create skeleton file" << std::endl;
-                }
-            } else {
+            // Try to load skeleton (don't create if it doesn't exist)
+            if (editor.LoadRig(outputSkeletonPath)) {
                 LOG_INFO_FMT("VisualEditor", "Loaded skeleton from: %s", outputSkeletonPath.c_str());
                 std::cout << "✓ Loaded skeleton file" << std::endl;
-            }
             
             // Set output path for future saves
             editor.SetOutputPath(outputSkeletonPath);
-            std::cout << "Skeleton will be saved to: " << outputSkeletonPath << std::endl;
-            std::cout << "Press 'S' to manually save, or bones will auto-save as you place them" << std::endl;
+            } else {
+                LOG_WARNING_FMT("VisualEditor", "Skeleton file not found: %s", outputSkeletonPath.c_str());
+                std::cerr << "Warning: Skeleton file not found. Use the dropdown menu in the editor to select a skeleton file." << std::endl;
+            }
+        } else {
+            // No skeleton path provided - use default for saving, but don't try to load
+            editor.SetOutputPath("skeleton.skel");
         }
         
         // Load animations if path provided

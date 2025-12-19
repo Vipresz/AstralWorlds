@@ -1,4 +1,8 @@
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
 #include "VisualSkeletonEditor.h"
+#include "LibIGLWrapper.h"
 #include "../../engine/platform/render/Window.h"
 #include "../../engine/platform/render/Shader.h"
 #include "../../engine/platform/render/Model.h"
@@ -6,7 +10,6 @@
 #include "../../engine/platform/Logger.h"
 #include <filesystem>
 
-// Include Nuklear header (without NK_IMPLEMENTATION - that's in NuklearImpl.cpp)
 #define NK_INCLUDE_FIXED_TYPES
 #define NK_INCLUDE_STANDARD_IO
 #define NK_INCLUDE_STANDARD_VARARGS
@@ -29,6 +32,7 @@
 #include <map>
 #include <set>
 #include <cstring>
+#include <cctype>
 #include <filesystem>
 
 using namespace Engine::Platform;
@@ -157,6 +161,7 @@ VisualSkeletonEditor::VisualSkeletonEditor()
     , m_contoursVisible(false)
     , m_contourInterval(1.0f)
     , m_boneMarkerSize(8.0f)
+    , m_libiglWrapper(nullptr)
     , m_showBoneConnections(false)
     , m_scrollY(0.0)
     , m_nuklear(nullptr)
@@ -165,6 +170,8 @@ VisualSkeletonEditor::VisualSkeletonEditor()
     , m_showResetDialog(false)
     , m_animationsLoaded(false)
     , m_lastFrameTime(0.0)
+    , m_selectedSkeletonIndex(-1)
+    , m_selectedWeightsIndex(-1)
 {
     memset(m_meshFileInput, 0, sizeof(m_meshFileInput));
     memset(m_skeletonFileInput, 0, sizeof(m_skeletonFileInput));
@@ -176,6 +183,10 @@ VisualSkeletonEditor::VisualSkeletonEditor()
 }
 
 VisualSkeletonEditor::~VisualSkeletonEditor() {
+    if (m_libiglWrapper) {
+        delete m_libiglWrapper;
+        m_libiglWrapper = nullptr;
+    }
     ShutdownNuklear();
     Cleanup();
 }
@@ -470,24 +481,13 @@ bool VisualSkeletonEditor::LoadMesh(const std::string& filePath) {
             }
         }
         
-        // Store mesh file path as absolute path
-        try {
-            std::filesystem::path path(filePath);
-            if (path.is_relative()) {
-                path = std::filesystem::absolute(path);
-            }
-            // Normalize the path (remove redundant separators, resolve . and ..)
-            path = path.lexically_normal();
-            m_meshFilePath = path.string();
-        } catch (...) {
-            // If filesystem operations fail, use original path
-            m_meshFilePath = filePath;
-        }
+        m_meshFilePath = NormalizeFilePath(filePath);
         
         // Don't update input field here - let user edit it freely
         // Only update after explicit load action
         
-        // Try to auto-load skeleton backup from same location
+        // Set default skeleton path (but don't auto-load)
+        // Skeleton will only be loaded if passed through argument list
         std::string backupPath = filePath;
         size_t lastDot = backupPath.find_last_of('.');
         if (lastDot != std::string::npos) {
@@ -496,54 +496,16 @@ bool VisualSkeletonEditor::LoadMesh(const std::string& filePath) {
             backupPath += ".skel";
         }
         
-        // Convert backup path to absolute and store
-        try {
-            std::filesystem::path path(backupPath);
-            if (path.is_relative()) {
-                path = std::filesystem::absolute(path);
-            }
-            path = path.lexically_normal();
-            backupPath = path.string();
-            m_skeletonFilePath = backupPath;
-        } catch (...) {
-            m_skeletonFilePath = backupPath;
-        }
-        
-        // Try to load existing skeleton
-        if (LoadRig(backupPath)) {
-            LOG_INFO_FMT("VisualEditor", "Auto-loaded skeleton from: %s", m_skeletonFilePath.c_str());
-            StoreBindPose(); // Store bind pose after loading skeleton
-            UpdateVisualBones();
-        } else {
-            LOG_INFO_FMT("VisualEditor", "No existing skeleton found at: %s", backupPath.c_str());
-            // Create empty skeleton file if it doesn't exist
-            try {
-                std::filesystem::path skelPath(backupPath);
-                std::filesystem::path parentDir = skelPath.parent_path();
-                
-                // Create parent directory if it doesn't exist
-                if (!parentDir.empty() && !std::filesystem::exists(parentDir)) {
-                    std::filesystem::create_directories(parentDir);
-                    LOG_INFO_FMT("VisualEditor", "Created directory: %s", parentDir.string().c_str());
-                }
-                
-                // Create empty skeleton file using SkeletonSerializer
-                // This ensures the file format is correct
-                if (m_skeletonEditor.SaveSkeleton(backupPath)) {
-                    LOG_INFO_FMT("VisualEditor", "Created empty skeleton file: %s", backupPath.c_str());
-                } else {
-                    LOG_WARNING_FMT("VisualEditor", "Could not create skeleton file: %s", backupPath.c_str());
-                }
-            } catch (const std::exception& e) {
-                LOG_ERROR_FMT("VisualEditor", "Exception creating skeleton file: %s", e.what());
-            }
+        m_skeletonFilePath = NormalizeFilePath(backupPath);
             
             // Update input field with full path only if not currently being edited
             // Use safe string copy to ensure null termination
             size_t copyLen = std::min(m_skeletonFilePath.length(), sizeof(m_skeletonFileInput) - 1);
             memcpy(m_skeletonFileInput, m_skeletonFilePath.c_str(), copyLen);
             m_skeletonFileInput[copyLen] = '\0';
-        }
+        
+        // Scan for skeleton and weights files in the mesh directory
+        ScanForSkeletonFiles();
         
         return true;
     } catch (const std::exception& e) {
@@ -1474,11 +1436,14 @@ PickResult VisualSkeletonEditor::PickMesh(double mouseX, double mouseY) {
         
         if (foundHit) {
             result.hit = true;
+            // The hit point is in world space, which matches the mesh coordinate space
+            // since the mesh is rendered with identity model matrix.
+            // This ensures bones are placed in the same coordinate space as the mesh vertices.
             result.worldPos = closestHit;
             result.normal = closestNormal;
             result.distance = closestT;
             result.vertexIndex = closestVertexIndex;
-            LOG_INFO_FMT("VisualEditor", "Ray hit mesh at (%.2f, %.2f, %.2f)", 
+            LOG_INFO_FMT("VisualEditor", "Ray hit mesh at (%.3f, %.3f, %.3f) - bone will be placed in mesh coordinate space", 
                         closestHit.x, closestHit.y, closestHit.z);
         }
     } else {
@@ -1583,10 +1548,11 @@ void VisualSkeletonEditor::PlaceBoneAtPosition(const glm::vec3& worldPos) {
         parentName = m_parentBoneName;
     }
     
-    LOG_INFO_FMT("VisualEditor", "Placing bone '%s' at position (%.2f, %.2f, %.2f)", 
+    LOG_INFO_FMT("VisualEditor", "Placing bone '%s' at click position (%.3f, %.3f, %.3f)", 
                  boneName.c_str(), worldPos.x, worldPos.y, worldPos.z);
     
     // Check if parent exists - if not, we need to place the parent first
+    // But if parent is not in expected order, allow placing the bone anyway (it will be a root bone or use empty parent)
     if (!parentName.empty()) {
         const BoneDefinition* parentBone = m_skeletonEditor.GetSkeleton()->GetBone(parentName);
         if (!parentBone) {
@@ -1600,25 +1566,34 @@ void VisualSkeletonEditor::PlaceBoneAtPosition(const glm::vec3& worldPos) {
                     return; // Don't place this bone yet, place parent first
                 }
             }
-            LOG_WARNING_FMT("VisualEditor", "Parent '%s' not found and not in expected bone order, cannot place '%s'", 
+            // Parent is not in expected order - allow placing the bone anyway, but use empty parent
+            // This handles cases where bones are placed out of order or in libigl mode with different hierarchy
+            LOG_INFO_FMT("VisualEditor", "Parent '%s' not found and not in expected bone order, placing '%s' as root bone", 
                            parentName.c_str(), boneName.c_str());
-            return;
+            parentName = ""; // Make it a root bone
         }
     }
     
     // Try to add bone (or update if it already exists)
+    // Note: worldPos is in world space, which matches the mesh coordinate space
+    // since the mesh is rendered with identity model matrix.
+    // We store bones in WORLD coordinates during editing for simplicity.
+    // They will be converted to local coordinates when saving.
     bool boneAdded = false;
     const BoneDefinition* existingBone = m_skeletonEditor.GetSkeleton()->GetBone(boneName);
+    
     if (existingBone) {
-        // Bone already exists - just update position
+        // Bone already exists - just update position (store as world position)
         m_skeletonEditor.SetBonePosition(boneName, worldPos.x, worldPos.y, worldPos.z);
         boneAdded = true;
-        LOG_INFO_FMT("VisualEditor", "Bone '%s' already exists, updated position", boneName.c_str());
+        LOG_INFO_FMT("VisualEditor", "Bone '%s' already exists, updated position to (%.3f, %.3f, %.3f)", 
+                     boneName.c_str(), worldPos.x, worldPos.y, worldPos.z);
     } else if (m_skeletonEditor.AddBone(boneName, parentName)) {
-        // Bone doesn't exist - add it
+        // Bone doesn't exist - add it (store as world position)
         m_skeletonEditor.SetBonePosition(boneName, worldPos.x, worldPos.y, worldPos.z);
         boneAdded = true;
-        LOG_INFO_FMT("VisualEditor", "Bone '%s' added successfully", boneName.c_str());
+        LOG_INFO_FMT("VisualEditor", "Bone '%s' added successfully at (%.3f, %.3f, %.3f)", 
+                     boneName.c_str(), worldPos.x, worldPos.y, worldPos.z);
     } else {
         LOG_WARNING_FMT("VisualEditor", "Failed to add bone '%s'", boneName.c_str());
         return;
@@ -1639,12 +1614,18 @@ void VisualSkeletonEditor::PlaceBoneAtPosition(const glm::vec3& worldPos) {
         // Mark this bone as placed using the actual index
         if (actualIndex >= 0 && actualIndex < static_cast<int>(m_bonesPlaced.size())) {
             m_bonesPlaced[actualIndex] = true;
+            LOG_INFO_FMT("VisualEditor", "Marked bone '%s' as placed at index %d", boneName.c_str(), actualIndex);
         } else if (actualIndex >= 0) {
             // Index is valid but m_bonesPlaced is too small - resize it
             if (actualIndex >= static_cast<int>(m_bonesPlaced.size())) {
                 m_bonesPlaced.resize(actualIndex + 1, false);
                 m_bonesPlaced[actualIndex] = true;
+                LOG_INFO_FMT("VisualEditor", "Resized bonesPlaced and marked bone '%s' as placed at index %d", boneName.c_str(), actualIndex);
             }
+        } else {
+            // Bone is not in expected order (e.g., libigl mode with different bone names)
+            // This is okay - the bone is still added to the skeleton, just not tracked in m_bonesPlaced
+            LOG_INFO_FMT("VisualEditor", "Bone '%s' added but not in expected bone order (index: %d)", boneName.c_str(), actualIndex);
         }
         
         // Remove from stored removed positions if it was there (bone has been restored)
@@ -1659,6 +1640,11 @@ void VisualSkeletonEditor::PlaceBoneAtPosition(const glm::vec3& worldPos) {
         
         // Always update visual bones to reflect changes
         UpdateVisualBones();
+        
+        // Ensure mesh stays in original bind pose during editing
+        if (!m_animateMesh) {
+            ResetMeshToOriginal();
+        }
         
         // Auto-save skeleton after each bone placement (if enabled)
         if (m_autoSave) {
@@ -1875,24 +1861,13 @@ glm::vec3 VisualSkeletonEditor::CalculateBoneWorldPosition(const std::string& bo
     const SkeletonDefinition* skeleton = m_skeletonEditor.GetSkeleton();
     if (!skeleton) return glm::vec3(0.0f);
     
-    glm::mat4 worldTransform = glm::mat4(1.0f);
+    const BoneDefinition* bone = skeleton->GetBone(boneName);
+    if (!bone) return glm::vec3(0.0f);
     
-    // Traverse up the hierarchy from this bone to root
-    std::string currentBone = boneName;
-    while (!currentBone.empty()) {
-        const BoneDefinition* bone = skeleton->GetBone(currentBone);
-        if (!bone) break;
-        
-        // Get local transform and accumulate
-        glm::mat4 localTransform = bone->GetLocalTransform();
-        worldTransform = localTransform * worldTransform;
-        
-        // Move to parent
-        currentBone = bone->parentName;
-    }
-    
-    // Extract position from world transform matrix
-    return glm::vec3(worldTransform[3]);
+    // During editing, we store bones in world coordinates directly
+    // So we can just return the stored position
+    // (No need to accumulate transforms since positions are already in world space)
+    return bone->position;
 }
 
 void VisualSkeletonEditor::UpdateVisualBones() {
@@ -1971,13 +1946,13 @@ void VisualSkeletonEditor::GetVerticesInRadius(const glm::vec3& center, float ra
     float radiusSq = radius * radius;
     for (size_t i = 0; i < m_meshTriangles.size(); i++) {
         const Triangle& tri = m_meshTriangles[i];
-        if (glm::length2(tri.v0 - center) <= radiusSq) {
+        if (glm::dot(tri.v0 - center, tri.v0 - center) <= radiusSq) {
             vertexIndices.push_back(i * 3 + 0);
         }
-        if (glm::length2(tri.v1 - center) <= radiusSq) {
+        if (glm::dot(tri.v1 - center, tri.v1 - center) <= radiusSq) {
             vertexIndices.push_back(i * 3 + 1);
         }
-        if (glm::length2(tri.v2 - center) <= radiusSq) {
+        if (glm::dot(tri.v2 - center, tri.v2 - center) <= radiusSq) {
             vertexIndices.push_back(i * 3 + 2);
         }
     }
@@ -2291,6 +2266,108 @@ void VisualSkeletonEditor::RenderBonePlacementSphere(const glm::vec3& position) 
     glBindVertexArray(0);
 }
 
+void VisualSkeletonEditor::RenderSuggestedBonePosition(const glm::vec3& position) {
+    // Similar to RenderBonePlacementSphere but with a different color (yellow/cyan for hints)
+    if (!m_boneShader || !m_buffersInitialized) return;
+    
+    // Project position to check if behind camera
+    glm::vec4 clipPos = m_projection * m_view * glm::vec4(position, 1.0f);
+    if (clipPos.w <= 0.0f) return; // Behind camera
+    
+    // Calculate sphere radius (slightly smaller than placement sphere)
+    float radius = CalculateSphereRadius(position) * 0.8f;
+    
+    m_boneShader->UseShader();
+    GLuint shaderID = m_boneShader->GetShaderID();
+    if (shaderID == 0) return;
+    
+    GLint projLoc = glGetUniformLocation(shaderID, "projection");
+    GLint viewLoc = glGetUniformLocation(shaderID, "view");
+    GLint modelLoc = glGetUniformLocation(shaderID, "model");
+    GLint colorLoc = glGetUniformLocation(shaderID, "color");
+    
+    if (projLoc == -1 || viewLoc == -1 || modelLoc == -1 || colorLoc == -1) return;
+    
+    // Create a simple sphere (same as RenderBonePlacementSphere)
+    const int segments = 8;
+    std::vector<float> vertices;
+    
+    for (int i = 0; i <= segments; i++) {
+        float theta = static_cast<float>(i) * 3.14159f / static_cast<float>(segments);
+        float sinTheta = sinf(theta);
+        float cosTheta = cosf(theta);
+        
+        for (int j = 0; j <= segments; j++) {
+            float phi = static_cast<float>(j) * 2.0f * 3.14159f / static_cast<float>(segments);
+            float sinPhi = sinf(phi);
+            float cosPhi = cosf(phi);
+            
+            float x = cosPhi * sinTheta;
+            float y = cosTheta;
+            float z = sinPhi * sinTheta;
+            
+            vertices.push_back(position.x + x * radius);
+            vertices.push_back(position.y + y * radius);
+            vertices.push_back(position.z + z * radius);
+        }
+    }
+    
+    std::vector<unsigned int> indices;
+    for (int i = 0; i < segments; i++) {
+        for (int j = 0; j < segments; j++) {
+            int first = i * (segments + 1) + j;
+            int second = first + segments + 1;
+            
+            indices.push_back(first);
+            indices.push_back(second);
+            indices.push_back(first + 1);
+            
+            indices.push_back(second);
+            indices.push_back(second + 1);
+            indices.push_back(first + 1);
+        }
+    }
+    
+    glm::mat4 model = glm::mat4(1.0f);
+    glm::vec3 color = glm::vec3(1.0f, 1.0f, 0.0f); // Yellow for suggested position
+    
+    glUniformMatrix4fv(projLoc, 1, GL_FALSE, glm::value_ptr(m_projection));
+    glUniformMatrix4fv(viewLoc, 1, GL_FALSE, glm::value_ptr(m_view));
+    glUniformMatrix4fv(modelLoc, 1, GL_FALSE, glm::value_ptr(model));
+    glUniform3fv(colorLoc, 1, glm::value_ptr(color));
+    
+    glBindVertexArray(m_boneVAO);
+    glBindBuffer(GL_ARRAY_BUFFER, m_boneVBO);
+    glBufferData(GL_ARRAY_BUFFER, vertices.size() * sizeof(float), vertices.data(), GL_DYNAMIC_DRAW);
+    
+    std::vector<float> triangleVertices;
+    for (size_t i = 0; i < indices.size(); i += 3) {
+        int idx0 = indices[i] * 3;
+        int idx1 = indices[i + 1] * 3;
+        int idx2 = indices[i + 2] * 3;
+        
+        triangleVertices.push_back(vertices[idx0]);
+        triangleVertices.push_back(vertices[idx0 + 1]);
+        triangleVertices.push_back(vertices[idx0 + 2]);
+        triangleVertices.push_back(vertices[idx1]);
+        triangleVertices.push_back(vertices[idx1 + 1]);
+        triangleVertices.push_back(vertices[idx1 + 2]);
+        triangleVertices.push_back(vertices[idx2]);
+        triangleVertices.push_back(vertices[idx2 + 1]);
+        triangleVertices.push_back(vertices[idx2 + 2]);
+    }
+    
+    glBufferData(GL_ARRAY_BUFFER, triangleVertices.size() * sizeof(float), triangleVertices.data(), GL_DYNAMIC_DRAW);
+    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 3 * sizeof(float), (void*)0);
+    glEnableVertexAttribArray(0);
+    
+    glPolygonMode(GL_FRONT_AND_BACK, GL_LINE); // Wireframe mode
+    glDrawArrays(GL_TRIANGLES, 0, static_cast<GLsizei>(triangleVertices.size() / 3));
+    glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
+    
+    glBindVertexArray(0);
+}
+
 void VisualSkeletonEditor::RenderRightPanel() {
     if (!m_nuklearInitialized || !m_nkContext || !m_window) return;
     
@@ -2315,7 +2392,9 @@ void VisualSkeletonEditor::RenderRightPanel() {
         NK_WINDOW_BORDER | NK_WINDOW_TITLE | NK_WINDOW_MOVABLE | NK_WINDOW_SCALABLE)) {
         
         // Stack all controls vertically in the right panel
-        nk_layout_row_dynamic(m_nkContext, 30, 1);
+        // Use fixed width for all buttons to ensure consistent sizing
+        const float buttonWidth = 300.0f; // Fixed button width
+        nk_layout_row_static(m_nkContext, 30, static_cast<int>(buttonWidth), 1);
         
         // Mesh toggle button
         if (nk_button_label(m_nkContext, m_meshVisible ? "Mesh: ON (Ctrl+M)" : "Mesh: OFF (Ctrl+M)")) {
@@ -2324,18 +2403,117 @@ void VisualSkeletonEditor::RenderRightPanel() {
         }
         
         // Contours toggle button
+        nk_layout_row_static(m_nkContext, 30, static_cast<int>(buttonWidth), 1);
         if (nk_button_label(m_nkContext, m_contoursVisible ? "Contours: ON (Ctrl+V)" : "Contours: OFF (Ctrl+V)")) {
             m_contoursVisible = !m_contoursVisible;
             LOG_INFO_FMT("VisualEditor", "Contours visibility: %s", m_contoursVisible ? "ON" : "OFF");
         }
         
         // Auto-Save toggle button
+        nk_layout_row_static(m_nkContext, 30, static_cast<int>(buttonWidth), 1);
         if (nk_button_label(m_nkContext, m_autoSave ? "Auto-Save: ON" : "Auto-Save: OFF")) {
             m_autoSave = !m_autoSave;
             LOG_INFO_FMT("VisualEditor", "Auto-save: %s", m_autoSave ? "ON" : "OFF");
         }
         
+        // File Selection Section
+        nk_layout_row_dynamic(m_nkContext, 15, 1);
+        nk_spacing(m_nkContext, 1);
+        
+        nk_layout_row_dynamic(m_nkContext, 25, 1);
+        nk_label(m_nkContext, "File Selection:", NK_TEXT_LEFT);
+        
+        // Skeleton file dropdown
+        nk_layout_row_dynamic(m_nkContext, 25, 1);
+        nk_label(m_nkContext, "Skeleton File:", NK_TEXT_LEFT);
+        nk_layout_row_static(m_nkContext, 30, static_cast<int>(buttonWidth), 1);
+        
+        if (m_availableSkeletonFiles.empty() && !m_meshFilePath.empty()) {
+            // Scan for skeleton files if not already scanned
+            ScanForSkeletonFiles();
+        }
+        
+        if (!m_availableSkeletonFiles.empty()) {
+            // Find current selection index
+            if (m_selectedSkeletonIndex < 0 || m_selectedSkeletonIndex >= static_cast<int>(m_availableSkeletonFiles.size())) {
+                // Try to find current skeleton file in list
+                if (!m_skeletonFilePath.empty()) {
+                    for (size_t i = 0; i < m_availableSkeletonFiles.size(); i++) {
+                        if (m_availableSkeletonFiles[i] == m_skeletonFilePath) {
+                            m_selectedSkeletonIndex = static_cast<int>(i);
+                            break;
+                        }
+                    }
+                }
+                if (m_selectedSkeletonIndex < 0) {
+                    m_selectedSkeletonIndex = 0;
+                }
+            }
+            
+            std::string currentSkel = (m_selectedSkeletonIndex >= 0 && m_selectedSkeletonIndex < static_cast<int>(m_availableSkeletonFiles.size())) 
+                ? std::filesystem::path(m_availableSkeletonFiles[m_selectedSkeletonIndex]).filename().string() 
+                : "Select Skeleton";
+            
+            if (nk_combo_begin_label(m_nkContext, currentSkel.c_str(), nk_vec2(static_cast<int>(buttonWidth), 200))) {
+                nk_layout_row_dynamic(m_nkContext, 25, 1);
+                for (size_t i = 0; i < m_availableSkeletonFiles.size(); i++) {
+                    std::string filename = std::filesystem::path(m_availableSkeletonFiles[i]).filename().string();
+                    if (nk_combo_item_label(m_nkContext, filename.c_str(), NK_TEXT_LEFT)) {
+                        m_selectedSkeletonIndex = static_cast<int>(i);
+                        m_skeletonFilePath = m_availableSkeletonFiles[i];
+                        LoadSelectedSkeleton();
+                    }
+                }
+                nk_combo_end(m_nkContext);
+            }
+        } else {
+            nk_label_colored(m_nkContext, "No skeleton files found", NK_TEXT_LEFT, nk_rgb(150, 150, 150));
+        }
+        
+        // Weights file dropdown
+        nk_layout_row_dynamic(m_nkContext, 25, 1);
+        nk_label(m_nkContext, "Weights File:", NK_TEXT_LEFT);
+        nk_layout_row_static(m_nkContext, 30, static_cast<int>(buttonWidth), 1);
+        
+        if (!m_availableWeightsFiles.empty()) {
+            // Find current selection index
+            if (m_selectedWeightsIndex < 0 || m_selectedWeightsIndex >= static_cast<int>(m_availableWeightsFiles.size())) {
+                // Try to find current weights file in list
+                if (!m_weightsFilePath.empty()) {
+                    for (size_t i = 0; i < m_availableWeightsFiles.size(); i++) {
+                        if (m_availableWeightsFiles[i] == m_weightsFilePath) {
+                            m_selectedWeightsIndex = static_cast<int>(i);
+                            break;
+                        }
+                    }
+                }
+                if (m_selectedWeightsIndex < 0) {
+                    m_selectedWeightsIndex = 0;
+                }
+            }
+            
+            std::string currentWeights = (m_selectedWeightsIndex >= 0 && m_selectedWeightsIndex < static_cast<int>(m_availableWeightsFiles.size())) 
+                ? std::filesystem::path(m_availableWeightsFiles[m_selectedWeightsIndex]).filename().string() 
+                : "Select Weights";
+            
+            if (nk_combo_begin_label(m_nkContext, currentWeights.c_str(), nk_vec2(static_cast<int>(buttonWidth), 200))) {
+                nk_layout_row_dynamic(m_nkContext, 25, 1);
+                for (size_t i = 0; i < m_availableWeightsFiles.size(); i++) {
+                    std::string filename = std::filesystem::path(m_availableWeightsFiles[i]).filename().string();
+                    if (nk_combo_item_label(m_nkContext, filename.c_str(), NK_TEXT_LEFT)) {
+                        m_selectedWeightsIndex = static_cast<int>(i);
+                        m_weightsFilePath = m_availableWeightsFiles[i];
+                        LoadSelectedWeights();
+                    }
+                }
+                nk_combo_end(m_nkContext);
+            }
+        } else {
+            nk_label_colored(m_nkContext, "No weights files found", NK_TEXT_LEFT, nk_rgb(150, 150, 150));
+        }
+        
         // Save Skeleton button
+        nk_layout_row_static(m_nkContext, 30, static_cast<int>(buttonWidth), 1);
         if (nk_button_label(m_nkContext, "Save Skeleton (Ctrl+S)")) {
             if (!m_skeletonFilePath.empty()) {
                 if (SaveRig(m_skeletonFilePath)) {
@@ -2364,11 +2542,13 @@ void VisualSkeletonEditor::RenderRightPanel() {
         }
         
         // Reset All button
+        nk_layout_row_static(m_nkContext, 30, static_cast<int>(buttonWidth), 1);
         if (nk_button_label(m_nkContext, "Reset All")) {
             m_showResetDialog = true;
         }
         
         // Connections toggle button
+        nk_layout_row_static(m_nkContext, 30, static_cast<int>(buttonWidth), 1);
         if (nk_button_label(m_nkContext, m_showBoneConnections ? "Connections: ON" : "Connections: OFF")) {
             m_showBoneConnections = !m_showBoneConnections;
             LOG_INFO_FMT("VisualEditor", "Bone connections: %s", m_showBoneConnections ? "ON" : "OFF");
@@ -2394,7 +2574,7 @@ void VisualSkeletonEditor::RenderRightPanel() {
         snprintf(boneStatusText, sizeof(boneStatusText), "Bones placed: %d / %d", bonesPlacedCount, totalBonesCount);
         nk_label(m_nkContext, boneStatusText, NK_TEXT_LEFT);
         
-        nk_layout_row_dynamic(m_nkContext, 30, 1);
+        nk_layout_row_static(m_nkContext, 30, static_cast<int>(buttonWidth), 1);
         if (allBonesPlaced && m_meshDataLoaded) {
             if (nk_button_label(m_nkContext, "Generate Weights from Mesh")) {
                 GenerateWeightsFromMesh();
@@ -2409,6 +2589,45 @@ void VisualSkeletonEditor::RenderRightPanel() {
             } else if (!m_meshDataLoaded) {
                 nk_label_colored(m_nkContext, "⚠ Mesh must be loaded first", NK_TEXT_LEFT, nk_rgb(255, 200, 0));
             }
+        }
+        
+        // Skeleton Extraction Section
+        nk_layout_row_dynamic(m_nkContext, 15, 1);
+        nk_spacing(m_nkContext, 1);
+        
+        nk_layout_row_dynamic(m_nkContext, 25, 1);
+        nk_label(m_nkContext, "Skeleton Extraction:", NK_TEXT_LEFT);
+        
+        nk_layout_row_static(m_nkContext, 30, static_cast<int>(buttonWidth), 1);
+        if (m_meshDataLoaded) {
+            if (nk_button_label(m_nkContext, "Extract Skeleton")) {
+                ExtractSkeletonGeneric();
+            }
+        } else {
+            nk_label_colored(m_nkContext, "Extract Skeleton (Disabled)", NK_TEXT_LEFT, nk_rgb(150, 150, 150));
+        }
+        
+        // Add libigl buttons
+        nk_layout_row_static(m_nkContext, 30, static_cast<int>(buttonWidth), 1);
+        if (!m_libiglWrapper) {
+            m_libiglWrapper = new LibIGLWrapper();
+        }
+        
+        if (m_libiglWrapper->IsAvailable()) {
+            if (nk_button_label(m_nkContext, "Extract Skeleton with libigl")) {
+                ExtractSkeletonWithLibIGL();
+            }
+            nk_layout_row_static(m_nkContext, 5, static_cast<int>(buttonWidth), 1); // Small spacing
+            nk_layout_row_static(m_nkContext, 30, static_cast<int>(buttonWidth), 1);
+            if (nk_button_label(m_nkContext, "Generate Weights with libigl")) {
+                GenerateWeightsWithLibIGL();
+            }
+        } else {
+            nk_label_colored(m_nkContext, "libigl (Not Available)", NK_TEXT_LEFT, nk_rgb(150, 150, 150));
+            nk_layout_row_dynamic(m_nkContext, 15, 1);
+            char libiglStatus[256];
+            snprintf(libiglStatus, sizeof(libiglStatus), "Status: %s", m_libiglWrapper->GetLastError().c_str());
+            nk_label_colored(m_nkContext, libiglStatus, NK_TEXT_LEFT, nk_rgb(200, 150, 150));
         }
         
         // Spacing before sliders
@@ -2804,6 +3023,16 @@ void VisualSkeletonEditor::ResetAllBones() {
 }
 
 void VisualSkeletonEditor::RenderNextBoneIndicator() {
+    // Render suggested position hint if available
+    if (m_nextBoneIndex < static_cast<int>(m_expectedBoneOrder.size())) {
+        std::string nextBone = ExtractBaseBoneName(m_expectedBoneOrder[m_nextBoneIndex]);
+        auto it = m_suggestedBonePositions.find(nextBone);
+        if (it != m_suggestedBonePositions.end()) {
+            // Render a hint sphere at suggested position
+            RenderSuggestedBonePosition(it->second);
+        }
+    }
+    
     if (!m_nuklearInitialized || !m_nkContext || !m_window) {
         GLFWwindow* window = glfwGetCurrentContext();
         if (window) {
@@ -3199,11 +3428,28 @@ bool VisualSkeletonEditor::SaveRig(const std::string& filePath) {
     
     CalculateBindPoses();
     
+    // Convert world positions to local positions before saving
+    // (During editing, we store bones in world coordinates for simplicity)
+    SkeletonDefinition* skeleton = m_skeletonEditor.GetSkeleton();
+    if (skeleton) {
+        SkeletonSerializer::ConvertWorldToLocal(*skeleton);
+    }
+    
     LOG_INFO_FMT("VisualEditor", "Saving skeleton to: %s", filePath.c_str());
     if (!m_skeletonEditor.SaveSkeleton(filePath)) {
         LOG_ERROR("VisualEditor", "Failed to save skeleton");
+        // Convert back to world coordinates for continued editing
+        if (skeleton) {
+            ConvertLocalToWorld(*skeleton);
+        }
         return false;
     }
+    
+    // Convert back to world coordinates for continued editing
+    if (skeleton) {
+        ConvertLocalToWorld(*skeleton);
+    }
+    
     LOG_INFO("VisualEditor", "Skeleton saved successfully");
     
     std::string weightsPath = filePath;
@@ -3228,12 +3474,12 @@ bool VisualSkeletonEditor::SaveRig(const std::string& filePath) {
         file << "# Format: vertexIndex|boneID1:weight1,boneID2:weight2,...\n\n";
         
         // Get skeleton to validate bone IDs before saving
-        const SkeletonDefinition* skeleton = m_skeletonEditor.GetSkeleton();
+        const SkeletonDefinition* skeletonDef = m_skeletonEditor.GetSkeleton();
         std::set<int> validBoneIDs;
-        if (skeleton) {
-            auto boneNames = skeleton->GetAllBoneNames();
+        if (skeletonDef) {
+            auto boneNames = skeletonDef->GetAllBoneNames();
             for (const std::string& boneName : boneNames) {
-                const BoneDefinition* bone = skeleton->GetBone(boneName);
+                const BoneDefinition* bone = skeletonDef->GetBone(boneName);
                 if (bone) {
                     validBoneIDs.insert(bone->id);
                 }
@@ -3243,13 +3489,13 @@ bool VisualSkeletonEditor::SaveRig(const std::string& filePath) {
         size_t weightCount = 0;
         size_t invalidBoneIDCount = 0;
         for (size_t i = 0; i < m_weights.GetVertexCount(); i++) {
-            auto weights = m_weights.GetVertexWeights(i);
-            if (weights.empty()) continue;
+            auto vertexWeights = m_weights.GetVertexWeights(i);
+            if (vertexWeights.empty()) continue;
             
             // Filter out invalid bone IDs before saving
             std::vector<VertexWeight> validWeights;
             float totalValidWeight = 0.0f;
-            for (const auto& w : weights) {
+            for (const auto& w : vertexWeights) {
                 if (validBoneIDs.find(w.boneID) != validBoneIDs.end()) {
                     validWeights.push_back(w);
                     totalValidWeight += w.weight;
@@ -3319,11 +3565,14 @@ bool VisualSkeletonEditor::LoadRig(const std::string& filePath) {
     LOG_INFO_FMT("VisualEditor", "Skeleton loaded successfully (%zu bones)", 
                  m_skeletonEditor.GetSkeleton()->GetBoneCount());
     
+    // Convert loaded local positions to world positions for editing
+    SkeletonDefinition* skeleton = m_skeletonEditor.GetSkeleton();
+    if (skeleton) {
+        ConvertLocalToWorld(*skeleton);
+    }
+    
     // Store bind pose (original bone positions/rotations)
     StoreBindPose();
-    
-    // Note: SkeletonSerializer now handles world-to-local conversion automatically
-    // based on the description field, so we don't need to do it here anymore
     
     // Update input field with full absolute path only if not currently being edited
     // Use safe string copy to ensure null termination
@@ -3361,7 +3610,7 @@ bool VisualSkeletonEditor::LoadRig(const std::string& filePath) {
     
     m_weights.Clear();
     
-    const SkeletonDefinition* skeleton = m_skeletonEditor.GetSkeleton();
+    const SkeletonDefinition* skeletonDef = m_skeletonEditor.GetSkeleton();
     
     size_t weightCount = 0;
     size_t totalWeightEntries = 0;
@@ -3386,8 +3635,8 @@ bool VisualSkeletonEditor::LoadRig(const std::string& filePath) {
             int boneID = std::stoi(weightPair.substr(0, colonPos));
             float weight = std::stof(weightPair.substr(colonPos + 1));
             
-            if (skeleton) {
-                const BoneDefinition* bone = skeleton->GetBone(boneID);
+            if (skeletonDef) {
+                const BoneDefinition* bone = skeletonDef->GetBone(boneID);
                 if (!bone) {
                     mismatchedBoneIDs++;
                     static std::set<int> loggedMissingIDs;
@@ -3611,29 +3860,12 @@ void VisualSkeletonEditor::ApplyAnimationToSkeleton() {
     }
     
     // Helper function to normalize bone names for matching
-    auto normalizeBoneName = [](const std::string& name) -> std::string {
-        std::string normalized = name;
-        // Convert to lowercase
-        std::transform(normalized.begin(), normalized.end(), normalized.begin(), ::tolower);
-        // Remove common prefixes/suffixes that FBX might add
-        // Remove "mixamorig:" prefix (common in Mixamo exports)
-        if (normalized.find("mixamorig:") == 0) {
-            normalized = normalized.substr(10);
-        }
-        return normalized;
-    };
-    
-    // Get animation bone names for matching
     std::vector<std::string> animBoneNames = m_animationPlayer.GetAnimationBoneNames(currentAnim);
-    
-    // Build a map of normalized animation bone names to actual names
-    std::map<std::string, std::string> animBoneMap; // normalized -> actual
+    std::map<std::string, std::string> animBoneMap;
     for (const std::string& animBone : animBoneNames) {
-        std::string normalized = normalizeBoneName(animBone);
-        animBoneMap[normalized] = animBone;
+        animBoneMap[NormalizeBoneName(animBone)] = animBone;
     }
     
-    // Log bone matching on first frame (for debugging)
     static bool loggedBoneMatching = false;
     if (!loggedBoneMatching) {
         LOG_INFO_FMT("VisualEditor", "Applying animation '%s' to skeleton with %zu bones", 
@@ -3642,84 +3874,136 @@ void VisualSkeletonEditor::ApplyAnimationToSkeleton() {
         loggedBoneMatching = true;
     }
     
-    int matchedBones = 0;
-    int totalBones = 0;
+    std::map<std::string, glm::vec3> animLocalPositions;
+    std::map<std::string, glm::quat> animLocalRotations;
+    std::map<std::string, glm::vec3> animLocalScales;
     
-    // Apply animation transforms to each bone
+    int matchedBones = 0;
     for (const std::string& boneName : boneNames) {
-        totalBones++;
         glm::vec3 animPosition;
         glm::quat animRotation;
         glm::vec3 animScale;
         
-        // Try exact match first
-        bool found = m_animationPlayer.GetBoneTransform(boneName, animPosition, animRotation, animScale);
-        std::string matchedAnimBone = boneName;
-        
-        // If exact match fails, try normalized matching
-        if (!found) {
-            std::string normalizedSkel = normalizeBoneName(boneName);
-            auto it = animBoneMap.find(normalizedSkel);
-            if (it != animBoneMap.end()) {
-                // Found a match with normalized name
-                matchedAnimBone = it->second;
-                found = m_animationPlayer.GetBoneTransform(matchedAnimBone, animPosition, animRotation, animScale);
-                if (found && !loggedBoneMatching) {
-                    LOG_INFO_FMT("VisualEditor", "Matched skeleton bone '%s' to animation bone '%s' (normalized)", 
-                                boneName.c_str(), matchedAnimBone.c_str());
-                }
-            }
-        }
-        
-        // If still not found, try common variations
-        if (!found) {
-            std::vector<std::string> variations = {
-                "mixamorig:" + boneName,
-                boneName + "_bone",
-                boneName + "bone",
-            };
-            for (const std::string& variant : variations) {
-                if (m_animationPlayer.GetBoneTransform(variant, animPosition, animRotation, animScale)) {
-                    found = true;
-                    matchedAnimBone = variant;
-                    if (!loggedBoneMatching) {
-                        LOG_INFO_FMT("VisualEditor", "Matched skeleton bone '%s' to animation bone '%s' (variant)", 
-                                    boneName.c_str(), variant.c_str());
-                    }
-                    break;
-                }
-            }
-        }
-        
-        if (found) {
+        if (MatchBoneToAnimation(boneName, animBoneMap, animPosition, animRotation, animScale)) {
             matchedBones++;
-            
-            // Bone is animated - update its transform
-            // Note: Animation transforms are typically in local space (relative to parent)
-            // which matches how our skeleton stores bone transforms
-            m_skeletonEditor.SetBonePosition(boneName, animPosition.x, animPosition.y, animPosition.z);
-            
-            // Use SkeletonDefinition directly for quaternion rotation
-            skeleton->SetBoneRotation(boneName, animRotation);
-            
-            // Scale is typically (1,1,1) in most animations, but apply it if needed
-            if (animScale != glm::vec3(1.0f, 1.0f, 1.0f)) {
-                m_skeletonEditor.SetBoneScale(boneName, animScale.x, animScale.y, animScale.z);
-            }
+            animLocalPositions[boneName] = animPosition;
+            animLocalRotations[boneName] = animRotation;
+            animLocalScales[boneName] = animScale;
         }
     }
     
-    // Log matching results once
+    // Apply animation transforms in hierarchy order (parents before children)
+    std::function<void(const std::string&)> applyToBone = [&](const std::string& boneName) {
+        const BoneDefinition* bone = skeleton->GetBone(boneName);
+        if (!bone) return;
+        
+        auto posIt = animLocalPositions.find(boneName);
+        glm::vec3 animatedWorldPos;
+        glm::quat animatedWorldRot;
+        glm::vec3 animatedWorldScale = bone->scale; // Default to current scale
+        
+        if (posIt != animLocalPositions.end()) {
+            glm::vec3 animLocalPos = posIt->second;
+            glm::quat animLocalRot = animLocalRotations[boneName];
+            glm::vec3 animLocalScale = animLocalScales[boneName];
+            
+            if (bone->parentName.empty()) {
+                animatedWorldPos = animLocalPos;
+                animatedWorldRot = animLocalRot;
+                animatedWorldScale = animLocalScale;
+            } else {
+                const BoneDefinition* parentBone = skeleton->GetBone(bone->parentName);
+                if (parentBone) {
+                    glm::mat4 parentWorldTransform = glm::translate(glm::mat4(1.0f), parentBone->position) * 
+                                                      glm::mat4_cast(parentBone->rotation) * 
+                                                      glm::scale(glm::mat4(1.0f), parentBone->scale);
+                    
+                    glm::vec4 localPos4 = glm::vec4(animLocalPos, 1.0f);
+                    glm::vec4 worldPos4 = parentWorldTransform * localPos4;
+                    animatedWorldPos = glm::vec3(worldPos4);
+                    
+                    animatedWorldRot = parentBone->rotation * animLocalRot;
+                    
+                    animatedWorldScale = parentBone->scale * animLocalScale;
+                } else {
+                    animatedWorldPos = animLocalPos;
+                    animatedWorldRot = animLocalRot;
+                    animatedWorldScale = animLocalScale;
+                }
+            }
+        } else {
+            // No animation data - use bind pose, accounting for parent's animated state
+            auto bindPosIt = m_bindPosePositions.find(boneName);
+            auto bindRotIt = m_bindPoseRotations.find(boneName);
+            
+            if (bindPosIt != m_bindPosePositions.end() && bindRotIt != m_bindPoseRotations.end()) {
+                if (bone->parentName.empty()) {
+                    animatedWorldPos = bindPosIt->second;
+                    animatedWorldRot = bindRotIt->second;
+                } else {
+                    // Child bone: convert bind pose relative to parent's current animated state
+                    const BoneDefinition* parentBone = skeleton->GetBone(bone->parentName);
+                    if (parentBone) {
+                        auto parentBindPosIt = m_bindPosePositions.find(bone->parentName);
+                        auto parentBindRotIt = m_bindPoseRotations.find(bone->parentName);
+                        
+                        if (parentBindPosIt != m_bindPosePositions.end() && parentBindRotIt != m_bindPoseRotations.end()) {
+                            glm::vec3 parentBindPos = parentBindPosIt->second;
+                            glm::quat parentBindRot = parentBindRotIt->second;
+                            glm::vec3 bindPos = bindPosIt->second;
+                            glm::quat bindRot = bindRotIt->second;
+                            
+                            glm::mat4 parentBindTransform = glm::translate(glm::mat4(1.0f), parentBindPos) * glm::mat4_cast(parentBindRot);
+                            glm::vec4 bindPos4 = glm::vec4(bindPos, 1.0f);
+                            glm::vec4 localPos4 = glm::inverse(parentBindTransform) * bindPos4;
+                            glm::vec3 bindLocalPos = glm::vec3(localPos4);
+                            glm::quat bindLocalRot = glm::inverse(parentBindRot) * bindRot;
+                            
+                            glm::mat4 parentCurrentTransform = glm::translate(glm::mat4(1.0f), parentBone->position) * 
+                                                                 glm::mat4_cast(parentBone->rotation) * 
+                                                                 glm::scale(glm::mat4(1.0f), parentBone->scale);
+                            glm::vec4 localPos4Current = glm::vec4(bindLocalPos, 1.0f);
+                            glm::vec4 worldPos4Current = parentCurrentTransform * localPos4Current;
+                            animatedWorldPos = glm::vec3(worldPos4Current);
+                            animatedWorldRot = parentBone->rotation * bindLocalRot;
+                        } else {
+                            animatedWorldPos = bindPosIt->second;
+                            animatedWorldRot = bindRotIt->second;
+                        }
+                    } else {
+                        animatedWorldPos = bindPosIt->second;
+                        animatedWorldRot = bindRotIt->second;
+                    }
+                }
+            } else {
+                animatedWorldPos = bone->position;
+                animatedWorldRot = bone->rotation;
+            }
+        }
+        
+        m_skeletonEditor.SetBonePosition(boneName, animatedWorldPos.x, animatedWorldPos.y, animatedWorldPos.z);
+        skeleton->SetBoneRotation(boneName, animatedWorldRot);
+        if (animatedWorldScale != bone->scale) {
+            m_skeletonEditor.SetBoneScale(boneName, animatedWorldScale.x, animatedWorldScale.y, animatedWorldScale.z);
+            }
+        
+        std::vector<std::string> children = skeleton->GetBoneChildren(boneName);
+        for (const std::string& childName : children) {
+            applyToBone(childName);
+        }
+    };
+    
+    std::vector<std::string> rootBones = skeleton->GetRootBones();
+    for (const std::string& rootBone : rootBones) {
+        applyToBone(rootBone);
+    }
+    
     if (!loggedBoneMatching) {
-        LOG_INFO_FMT("VisualEditor", "Matched %d/%d skeleton bones with animation", matchedBones, totalBones);
-        if (matchedBones == 0) {
+        LOG_INFO_FMT("VisualEditor", "Matched %d/%zu skeleton bones with animation", matchedBones, boneNames.size());
+        if (matchedBones == 0 && !animBoneNames.empty() && animBoneNames.size() <= 10) {
             LOG_WARNING("VisualEditor", "No bones matched! Bone names in animation may differ from skeleton.");
-            LOG_WARNING("VisualEditor", "Check animation bone names vs skeleton bone names for mismatches.");
-            if (animBoneNames.size() > 0 && animBoneNames.size() <= 10) {
-                LOG_WARNING("VisualEditor", "Animation bone names:");
                 for (const std::string& animBone : animBoneNames) {
                     LOG_WARNING_FMT("VisualEditor", "  - %s", animBone.c_str());
-                }
             }
         }
     }
@@ -3803,6 +4087,65 @@ void VisualSkeletonEditor::ConvertWorldPositionsToLocal() {
     LOG_INFO_FMT("VisualEditor", "Converted %zu bones from world to local positions", processed.size());
 }
 
+void VisualSkeletonEditor::ConvertLocalToWorld(SkeletonDefinition& skeleton) {
+    // Get all bones and process them in hierarchy order (parents before children)
+    std::vector<std::string> rootBones = skeleton.GetRootBones();
+    std::map<std::string, glm::vec3> worldPositions; // Store calculated world positions
+    
+    // Process bones in hierarchy order (breadth-first)
+    std::vector<std::string> toProcess = rootBones;
+    std::set<std::string> processed;
+    
+    while (!toProcess.empty()) {
+        std::string currentBoneName = toProcess.front();
+        toProcess.erase(toProcess.begin());
+        
+        if (processed.find(currentBoneName) != processed.end()) {
+            continue; // Already processed
+        }
+        
+        BoneDefinition* bone = skeleton.GetBone(currentBoneName);
+        if (!bone) {
+            continue;
+        }
+        
+        glm::vec3 worldPos;
+        
+        if (bone->parentName.empty()) {
+            // Root bone: world position = local position
+            worldPos = bone->position;
+        } else {
+            // Child bone: world position = parent's world position + child's local position
+            auto parentIt = worldPositions.find(bone->parentName);
+            if (parentIt != worldPositions.end()) {
+                worldPos = parentIt->second + bone->position;
+            } else {
+                // Parent not found or not processed yet - use local position as world position
+                LOG_WARNING_FMT("VisualEditor", "Parent '%s' not found for bone '%s', using local position as world", 
+                               bone->parentName.c_str(), currentBoneName.c_str());
+                worldPos = bone->position;
+            }
+        }
+        
+        // Store calculated world position
+        worldPositions[currentBoneName] = worldPos;
+        
+        // Update bone's position to world position
+        skeleton.SetBonePosition(currentBoneName, worldPos);
+        processed.insert(currentBoneName);
+        
+        // Add children to processing queue
+        auto children = skeleton.GetBoneChildren(currentBoneName);
+        for (const std::string& childName : children) {
+            if (processed.find(childName) == processed.end()) {
+                toProcess.push_back(childName);
+            }
+        }
+    }
+    
+    LOG_INFO_FMT("VisualEditor", "Converted %zu bones from local to world positions", processed.size());
+}
+
 void VisualSkeletonEditor::StoreBindPose() {
     const SkeletonDefinition* skeleton = m_skeletonEditor.GetSkeleton();
     if (!skeleton) {
@@ -3882,7 +4225,8 @@ void VisualSkeletonEditor::ApplyAnimationAtTime(float time) {
     // Helper function to normalize bone names for matching
     auto normalizeBoneName = [](const std::string& name) -> std::string {
         std::string normalized = name;
-        std::transform(normalized.begin(), normalized.end(), normalized.begin(), ::tolower);
+        std::transform(normalized.begin(), normalized.end(), normalized.begin(), 
+            [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
         if (normalized.find("mixamorig:") == 0) {
             normalized = normalized.substr(10);
         }
@@ -3948,6 +4292,11 @@ void VisualSkeletonEditor::ApplyAnimationAtTime(float time) {
 }
 
 void VisualSkeletonEditor::ApplyMeshAnimation() {
+    // Ensure skeleton animation has been applied first
+    if (m_animationsLoaded && m_animationPlayer.IsPlaying()) {
+        // Animation should already be applied in the main loop, but ensure it's up to date
+        // The skeleton bones should already have their animated transforms
+    }
     UpdateMeshVertexBuffers();
 }
 
@@ -4023,6 +4372,530 @@ void VisualSkeletonEditor::StoreOriginalVertexData(const std::string& filePath) 
     LOG_INFO_FMT("VisualEditor", "Stored vertex data for %zu meshes", m_originalVertexData.size());
 }
 
+void VisualSkeletonEditor::ExtractSkeletonGeneric() {
+    if (!m_meshDataLoaded) {
+        LOG_WARNING("VisualEditor", "Cannot extract skeleton: mesh data not loaded");
+        return;
+    }
+    
+    LOG_INFO("VisualEditor", "Extracting skeleton structure (generic mode)...");
+    
+    // Clear existing skeleton to start fresh when switching modes
+    m_skeletonEditor.NewSkeleton("Generic Skeleton");
+    m_weights.Clear();
+    m_suggestedBonePositions.clear();
+    m_removedBonePositions.clear();
+    
+    // Initialize default bone order
+    InitializeBoneOrder();
+    
+    // Get skeleton and create bones for the expected order
+    SkeletonDefinition* skeleton = m_skeletonEditor.GetSkeleton();
+    if (!skeleton) {
+        LOG_WARNING("VisualEditor", "Skeleton object is null");
+        return;
+    }
+    
+    // Create bones for each expected bone in the order
+    for (const std::string& boneDisplayName : m_expectedBoneOrder) {
+        // Extract bone name (remove description in parentheses)
+        std::string boneName = boneDisplayName;
+        size_t parenPos = boneName.find(" (");
+        if (parenPos != std::string::npos) {
+            boneName = boneName.substr(0, parenPos);
+        }
+        
+        // Create bone if it doesn't exist
+        if (!skeleton->GetBone(boneName)) {
+            BoneDefinition bone;
+            bone.name = boneName;
+            bone.position = glm::vec3(0.0f, 0.0f, 0.0f);
+            bone.rotation = glm::quat(1.0f, 0.0f, 0.0f, 0.0f);
+            bone.scale = glm::vec3(1.0f, 1.0f, 1.0f);
+            
+            // Set parent based on bone hierarchy
+            // This is a simplified hierarchy - you can enhance this
+            if (boneName == "Hips") {
+                bone.parentName = "";
+            } else if (boneName.find("Spine") == 0 || boneName == "Neck" || boneName == "Head") {
+                // Spine chain
+                if (boneName == "Spine") {
+                    bone.parentName = "Hips";
+                } else if (boneName == "Spine1") {
+                    bone.parentName = "Spine";
+                } else if (boneName == "Spine2") {
+                    bone.parentName = "Spine1";
+                } else if (boneName == "Neck") {
+                    bone.parentName = "Spine2";
+                } else if (boneName == "Head") {
+                    bone.parentName = "Neck";
+                } else if (boneName == "HeadTop_End") {
+                    bone.parentName = "Head";
+                }
+            } else if (boneName.find("Left") == 0) {
+                // Left side bones
+                if (boneName == "LeftShoulder") {
+                    bone.parentName = "Spine2";
+                } else if (boneName == "LeftArm") {
+                    bone.parentName = "LeftShoulder";
+                } else if (boneName == "LeftForeArm") {
+                    bone.parentName = "LeftArm";
+                } else if (boneName == "LeftHand") {
+                    bone.parentName = "LeftForeArm";
+                } else if (boneName.find("LeftHand") == 0 && boneName != "LeftHand") {
+                    // Hand bones - simplified hierarchy
+                    if (boneName.find("Thumb") != std::string::npos) {
+                        bone.parentName = "LeftHand";
+                    } else if (boneName.find("Index") != std::string::npos) {
+                        bone.parentName = "LeftHand";
+                    } else if (boneName.find("Middle") != std::string::npos) {
+                        bone.parentName = "LeftHand";
+                    } else if (boneName.find("Ring") != std::string::npos) {
+                        bone.parentName = "LeftHand";
+                    } else if (boneName.find("Pinky") != std::string::npos) {
+                        bone.parentName = "LeftHand";
+                    }
+                } else if (boneName == "LeftUpLeg") {
+                    bone.parentName = "Hips";
+                } else if (boneName == "LeftLeg") {
+                    bone.parentName = "LeftUpLeg";
+                } else if (boneName == "LeftFoot") {
+                    bone.parentName = "LeftLeg";
+                } else if (boneName == "LeftToeBase") {
+                    bone.parentName = "LeftFoot";
+                } else if (boneName == "LeftToe_End") {
+                    bone.parentName = "LeftToeBase";
+                }
+            } else if (boneName.find("Right") == 0) {
+                // Right side bones
+                if (boneName == "RightShoulder") {
+                    bone.parentName = "Spine2";
+                } else if (boneName == "RightArm") {
+                    bone.parentName = "RightShoulder";
+                } else if (boneName == "RightForeArm") {
+                    bone.parentName = "RightArm";
+                } else if (boneName == "RightHand") {
+                    bone.parentName = "RightForeArm";
+                } else if (boneName.find("RightHand") == 0 && boneName != "RightHand") {
+                    // Hand bones - simplified hierarchy
+                    if (boneName.find("Thumb") != std::string::npos) {
+                        bone.parentName = "RightHand";
+                    } else if (boneName.find("Index") != std::string::npos) {
+                        bone.parentName = "RightHand";
+                    } else if (boneName.find("Middle") != std::string::npos) {
+                        bone.parentName = "RightHand";
+                    } else if (boneName.find("Ring") != std::string::npos) {
+                        bone.parentName = "RightHand";
+                    } else if (boneName.find("Pinky") != std::string::npos) {
+                        bone.parentName = "RightHand";
+                    }
+                } else if (boneName == "RightUpLeg") {
+                    bone.parentName = "Hips";
+                } else if (boneName == "RightLeg") {
+                    bone.parentName = "RightUpLeg";
+                } else if (boneName == "RightFoot") {
+                    bone.parentName = "RightLeg";
+                } else if (boneName == "RightToeBase") {
+                    bone.parentName = "RightFoot";
+                } else if (boneName == "RightToe_End") {
+                    bone.parentName = "RightToeBase";
+                }
+            }
+            
+            // Add bone using name and parent name, then set the bone properties
+            int boneID = skeleton->AddBone(bone.name, bone.parentName);
+            if (boneID >= 0) {
+                BoneDefinition* addedBone = skeleton->GetBone(bone.name);
+                if (addedBone) {
+                    // Copy the bone properties (position, rotation, scale)
+                    addedBone->position = bone.position;
+                    addedBone->rotation = bone.rotation;
+                    addedBone->scale = bone.scale;
+                }
+            }
+        }
+    }
+    
+    // Clear skeleton positions - user will place them manually
+    auto allBoneNames = skeleton->GetAllBoneNames();
+    for (const std::string& boneName : allBoneNames) {
+        skeleton->SetBonePosition(boneName, glm::vec3(0.0f, 0.0f, 0.0f));
+    }
+    
+    // Reset bone placement tracking
+    m_bonesPlaced.clear();
+    m_bonesPlaced.resize(m_expectedBoneOrder.size(), false);
+    m_nextBoneIndex = 0;
+    UpdateNextBoneIndex();
+    
+    // Update visual bones
+    UpdateVisualBones();
+    
+    LOG_INFO_FMT("VisualEditor", "Skeleton structure extracted. Please place %zu bones manually.", 
+                 m_expectedBoneOrder.size());
+    
+    // Ensure mesh animation is disabled and mesh is reset to original
+    m_animateMesh = false;
+    ResetMeshToOriginal();
+}
+
+void VisualSkeletonEditor::ExtractSkeletonWithLibIGL() {
+    if (!m_meshDataLoaded || m_meshTriangles.empty()) {
+        LOG_WARNING("VisualEditor", "Cannot extract skeleton: mesh data not loaded");
+        return;
+    }
+    
+    if (!m_libiglWrapper) {
+        m_libiglWrapper = new LibIGLWrapper();
+    }
+    
+    if (!m_libiglWrapper->IsAvailable()) {
+        LOG_WARNING_FMT("VisualEditor", "libigl not available: %s", m_libiglWrapper->GetLastError().c_str());
+        return;
+    }
+    
+    LOG_INFO("VisualEditor", "Extracting skeleton from mesh using libigl...");
+    
+    // Clear existing skeleton to start fresh when switching modes
+    m_skeletonEditor.NewSkeleton("libigl Skeleton");
+    m_weights.Clear();
+    m_suggestedBonePositions.clear();
+    m_removedBonePositions.clear();
+    
+    // Extract vertices and faces from mesh triangles
+    // Use a simple approach: collect all unique vertices with tolerance
+    std::vector<glm::vec3> allVertices;
+    std::vector<std::vector<unsigned int>> allFaces;
+    const float VERTEX_TOLERANCE = 0.001f; // Tolerance for vertex matching
+    
+    // Helper function to find or add vertex
+    auto findOrAddVertex = [&](const glm::vec3& vertex) -> unsigned int {
+        for (size_t i = 0; i < allVertices.size(); i++) {
+            if (glm::length(allVertices[i] - vertex) < VERTEX_TOLERANCE) {
+                return static_cast<unsigned int>(i);
+            }
+        }
+        unsigned int index = static_cast<unsigned int>(allVertices.size());
+        allVertices.push_back(vertex);
+        return index;
+    };
+    
+    for (const auto& tri : m_meshTriangles) {
+        std::vector<unsigned int> faceIndices;
+        faceIndices.push_back(findOrAddVertex(tri.v0));
+        faceIndices.push_back(findOrAddVertex(tri.v1));
+        faceIndices.push_back(findOrAddVertex(tri.v2));
+        
+        if (faceIndices.size() == 3) {
+            allFaces.push_back(faceIndices);
+        }
+    }
+    
+    if (allVertices.empty() || allFaces.empty()) {
+        LOG_WARNING("VisualEditor", "Failed to extract vertices/faces from mesh");
+        return;
+    }
+    
+    LOG_INFO_FMT("VisualEditor", "Extracted %zu vertices and %zu faces from mesh", 
+                 allVertices.size(), allFaces.size());
+    
+    // Extract skeleton using libigl
+    SkeletonDefinition* skeleton = m_skeletonEditor.GetSkeleton();
+    if (!skeleton) {
+        LOG_WARNING("VisualEditor", "Skeleton object is null");
+        return;
+    }
+    
+    // Extract skeleton structure temporarily to get bone names and hierarchy
+    // We'll use this to set up the expected bone order, but then clear all bones
+    if (!m_libiglWrapper->ExtractSkeleton(allVertices, allFaces, *skeleton)) {
+        LOG_ERROR_FMT("VisualEditor", "Failed to extract skeleton: %s", 
+                     m_libiglWrapper->GetLastError().c_str());
+        return;
+    }
+    
+    LOG_INFO_FMT("VisualEditor", "Successfully extracted skeleton structure with %zu bones", 
+                 skeleton->GetAllBoneNames().size());
+    
+    // Get bone names and hierarchy BEFORE clearing
+    auto allBoneNames = skeleton->GetAllBoneNames();
+    
+    // Build hierarchical bone order (root first, then children)
+    std::vector<std::string> hierarchicalOrder;
+    std::function<void(const std::string&)> addBoneAndChildren = [&](const std::string& boneName) {
+        hierarchicalOrder.push_back(boneName);
+        std::vector<std::string> children = skeleton->GetBoneChildren(boneName);
+        for (const std::string& child : children) {
+            addBoneAndChildren(child);
+        }
+    };
+    
+    // Start with root bones
+    std::vector<std::string> rootBones = skeleton->GetRootBones();
+    for (const std::string& root : rootBones) {
+        addBoneAndChildren(root);
+    }
+    
+    // If no root bones found, use all bones in any order
+    if (hierarchicalOrder.empty()) {
+        hierarchicalOrder = allBoneNames;
+    }
+    
+    // NOW clear all bones - user will place them manually from scratch
+    // Clear the skeleton completely
+    m_skeletonEditor.NewSkeleton("libigl Skeleton");
+    
+    // DO NOT store suggested positions - user starts completely from scratch
+    m_suggestedBonePositions.clear();
+    
+    // Set up expected bone order with display names (just the bone names, no positions)
+    m_expectedBoneOrder.clear();
+    for (const std::string& boneName : hierarchicalOrder) {
+        // Just use the bone name - no "Suggested" suffix, no positions stored
+        m_expectedBoneOrder.push_back(boneName);
+    }
+    
+    // Reset bone placement tracking
+    m_bonesPlaced.clear();
+    m_bonesPlaced.resize(m_expectedBoneOrder.size(), false);
+    m_nextBoneIndex = 0;
+    UpdateNextBoneIndex();
+    
+    // Clear visual bones - no bones should be shown, start from scratch
+    m_visualBones.clear();
+    m_selectedBoneID = -1;
+    
+    LOG_INFO_FMT("VisualEditor", "Skeleton structure extracted. Please place %zu bones manually from scratch.", 
+                 m_expectedBoneOrder.size());
+    
+    // Ensure mesh animation is disabled and mesh is reset to original
+    m_animateMesh = false;
+    ResetMeshToOriginal();
+    
+    // Optionally save skeleton with "_libigl" suffix
+    if (!m_meshFilePath.empty()) {
+        std::string skeletonPath = m_meshFilePath;
+        size_t lastDot = skeletonPath.find_last_of('.');
+        if (lastDot != std::string::npos) {
+            skeletonPath = skeletonPath.substr(0, lastDot) + "_libigl.skel";
+        } else {
+            skeletonPath += "_libigl.skel";
+        }
+        
+        if (m_skeletonEditor.SaveSkeleton(skeletonPath)) {
+            m_skeletonFilePath = skeletonPath;
+            LOG_INFO_FMT("VisualEditor", "Skeleton saved to: %s", skeletonPath.c_str());
+        }
+    }
+}
+
+void VisualSkeletonEditor::GenerateWeightsWithLibIGL() {
+    // Check if all bones are placed
+    bool allBonesPlaced = (m_nextBoneIndex >= static_cast<int>(m_expectedBoneOrder.size()));
+    if (!allBonesPlaced) {
+        int bonesPlaced = 0;
+        for (size_t i = 0; i < m_bonesPlaced.size(); i++) {
+            if (m_bonesPlaced[i]) bonesPlaced++;
+        }
+        LOG_WARNING_FMT("VisualEditor", "Cannot generate weights: not all bones placed (%d / %d)", 
+                       bonesPlaced, static_cast<int>(m_expectedBoneOrder.size()));
+        return;
+    }
+    
+    if (!m_meshDataLoaded || m_originalVertexData.empty() || m_meshVertexCounts.empty()) {
+        LOG_WARNING("VisualEditor", "Cannot generate weights: mesh data not loaded");
+        return;
+    }
+    
+    const SkeletonDefinition* skeleton = m_skeletonEditor.GetSkeleton();
+    if (!skeleton) {
+        LOG_WARNING("VisualEditor", "Cannot generate weights: skeleton not loaded");
+        return;
+    }
+    
+    if (!m_libiglWrapper) {
+        m_libiglWrapper = new LibIGLWrapper();
+    }
+    
+    if (!m_libiglWrapper->IsAvailable()) {
+        LOG_WARNING_FMT("VisualEditor", "libigl not available: %s", m_libiglWrapper->GetLastError().c_str());
+        LOG_INFO("VisualEditor", "Falling back to standard weight generation...");
+        GenerateWeightsFromMesh();
+        return;
+    }
+    
+    LOG_INFO("VisualEditor", "Generating vertex weights using libigl...");
+    
+    m_weights.Clear();
+    
+    // Collect bone positions and names
+    std::vector<glm::vec3> bonePositions;
+    std::vector<std::string> boneNames;
+    auto allBoneNames = skeleton->GetAllBoneNames();
+    
+    for (const std::string& boneName : allBoneNames) {
+        glm::vec3 worldPos = CalculateBoneWorldPosition(boneName);
+        bonePositions.push_back(worldPos);
+        boneNames.push_back(boneName);
+    }
+    
+    if (bonePositions.empty()) {
+        LOG_WARNING("VisualEditor", "No bones found for weight generation");
+        return;
+    }
+    
+    // Convert mesh data to format libigl expects
+    std::vector<glm::vec3> allVertices;
+    std::vector<std::vector<unsigned int>> allFaces;
+    
+    // Collect vertices from all meshes
+    size_t vertexOffset = 0;
+    for (size_t meshIdx = 0; meshIdx < m_originalVertexData.size(); meshIdx++) {
+        const std::vector<GLfloat>& meshVertices = m_originalVertexData[meshIdx];
+        unsigned int vertexCount = m_meshVertexCounts[meshIdx];
+        
+        for (unsigned int v = 0; v < vertexCount; v++) {
+            size_t baseIdx = v * 8;
+            if (baseIdx + 2 < meshVertices.size()) {
+                allVertices.push_back(glm::vec3(
+                    meshVertices[baseIdx + 0],
+                    meshVertices[baseIdx + 1],
+                    meshVertices[baseIdx + 2]
+                ));
+            }
+        }
+        
+        // Collect faces (assuming triangles)
+        // Note: This is simplified - you may need to extract faces from mesh data
+        // For now, we'll use a placeholder
+        vertexOffset += vertexCount;
+    }
+    
+    // Generate weights using libigl
+    std::vector<std::vector<std::pair<int, float>>> libiglWeights = 
+        m_libiglWrapper->GenerateWeights(allVertices, allFaces, bonePositions, boneNames, 4);
+    
+    // Convert libigl weights to our format
+    std::map<std::string, int> boneNameToID;
+    for (const std::string& boneName : allBoneNames) {
+        const BoneDefinition* bone = skeleton->GetBone(boneName);
+        if (bone) {
+            boneNameToID[boneName] = bone->id;
+        }
+    }
+    
+    size_t verticesWithWeights = 0;
+    for (size_t v = 0; v < libiglWeights.size() && v < allVertices.size(); v++) {
+        for (const auto& weightPair : libiglWeights[v]) {
+            if (weightPair.first >= 0 && weightPair.first < static_cast<int>(boneNames.size())) {
+                std::string boneName = boneNames[weightPair.first];
+                auto idIt = boneNameToID.find(boneName);
+                if (idIt != boneNameToID.end()) {
+                    m_weights.SetWeight(v, idIt->second, weightPair.second);
+                }
+            }
+        }
+        if (!libiglWeights[v].empty()) {
+            verticesWithWeights++;
+        }
+    }
+    
+    LOG_INFO_FMT("VisualEditor", "Generated weights for %zu/%zu vertices using libigl", 
+                 verticesWithWeights, allVertices.size());
+    
+    // Ensure mesh animation is disabled and mesh is reset to original after weight generation
+    m_animateMesh = false;
+    ResetMeshToOriginal();
+    
+    // Auto-save weights - check if _libigl.skel file exists and use its name
+    std::string weightsPath;
+    bool foundLibiglSkel = false;
+    
+    if (!m_meshFilePath.empty()) {
+        // Check if _libigl.skel file exists based on mesh file name
+        std::string libiglSkelPath = m_meshFilePath;
+        size_t lastDot = libiglSkelPath.find_last_of('.');
+        if (lastDot != std::string::npos) {
+            libiglSkelPath = libiglSkelPath.substr(0, lastDot) + "_libigl.skel";
+        } else {
+            libiglSkelPath += "_libigl.skel";
+        }
+        
+        // Convert to absolute path
+        try {
+            std::filesystem::path path(libiglSkelPath);
+            if (path.is_relative()) {
+                path = std::filesystem::absolute(path);
+            }
+            path = path.lexically_normal();
+            libiglSkelPath = path.string();
+        } catch (...) {
+            // Use original path if filesystem operations fail
+        }
+        
+        // Check if the _libigl.skel file exists
+        if (std::filesystem::exists(libiglSkelPath) && std::filesystem::is_regular_file(libiglSkelPath)) {
+            // Use the same name as the skeleton file but with .weights extension
+            weightsPath = libiglSkelPath;
+            lastDot = weightsPath.find_last_of('.');
+            if (lastDot != std::string::npos) {
+                weightsPath = weightsPath.substr(0, lastDot) + ".weights";
+            } else {
+                weightsPath += ".weights";
+            }
+            foundLibiglSkel = true;
+            LOG_INFO_FMT("VisualEditor", "Found _libigl.skel file: %s, will save weights as: %s", 
+                        libiglSkelPath.c_str(), weightsPath.c_str());
+        }
+    }
+    
+    // Fallback: use skeleton file path if available and _libigl.skel not found
+    if (!foundLibiglSkel && !m_skeletonFilePath.empty()) {
+        weightsPath = m_skeletonFilePath;
+        size_t lastDot = weightsPath.find_last_of('.');
+        if (lastDot != std::string::npos) {
+            weightsPath = weightsPath.substr(0, lastDot) + ".weights";
+        } else {
+            weightsPath += ".weights";
+        }
+    } else if (!foundLibiglSkel && !m_meshFilePath.empty()) {
+        // Final fallback: use mesh file name with _libigl.weights
+        weightsPath = m_meshFilePath;
+        size_t lastDot = weightsPath.find_last_of('.');
+        if (lastDot != std::string::npos) {
+            weightsPath = weightsPath.substr(0, lastDot) + "_libigl.weights";
+        } else {
+            weightsPath += "_libigl.weights";
+        }
+    }
+    
+    if (!weightsPath.empty()) {
+        std::ofstream file(weightsPath);
+        if (file.is_open()) {
+            file << "# Vertex Weights (Generated with libigl)\n";
+            file << "# Format: vertexIndex|boneID1:weight1,boneID2:weight2,...\n\n";
+            
+            for (size_t i = 0; i < m_weights.GetVertexCount(); i++) {
+                auto vertexWeights = m_weights.GetVertexWeights(i);
+                if (vertexWeights.empty()) continue;
+                
+                file << i << "|";
+                for (size_t j = 0; j < vertexWeights.size(); j++) {
+                    file << vertexWeights[j].boneID << ":" << vertexWeights[j].weight;
+                    if (j < vertexWeights.size() - 1) file << ",";
+                }
+                file << "\n";
+            }
+            file.close();
+            LOG_INFO_FMT("VisualEditor", "Weights saved to: %s", weightsPath.c_str());
+        } else {
+            LOG_WARNING_FMT("VisualEditor", "Failed to open weights file for writing: %s", weightsPath.c_str());
+        }
+    } else {
+        LOG_WARNING("VisualEditor", "No valid path for saving weights file");
+    }
+}
+
 void VisualSkeletonEditor::GenerateWeightsFromMesh() {
     // Check if all bones are placed
     bool allBonesPlaced = (m_nextBoneIndex >= static_cast<int>(m_expectedBoneOrder.size()));
@@ -4048,6 +4921,10 @@ void VisualSkeletonEditor::GenerateWeightsFromMesh() {
     }
     
     LOG_INFO("VisualEditor", "Generating vertex weights from mesh geometry...");
+    
+    // Ensure mesh animation is disabled and mesh is reset to original before generating weights
+    m_animateMesh = false;
+    ResetMeshToOriginal();
     
     m_weights.Clear();
     
@@ -4151,7 +5028,6 @@ void VisualSkeletonEditor::GenerateWeightsFromMesh() {
                                           closestBone.c_str(), globalVertexIndex, fallbackBoneID);
                         }
                     }
-                }
             } else if (totalWeight < 0.99f) {
                 float remaining = 1.0f - totalWeight;
                 std::string strongestBone = boneDistances[0].second;
@@ -4187,6 +5063,10 @@ void VisualSkeletonEditor::GenerateWeightsFromMesh() {
         LOG_INFO("VisualEditor", "Success: All vertices have weights assigned!");
     }
     
+    // Ensure mesh animation is disabled and mesh is reset to original after weight generation
+    m_animateMesh = false;
+    ResetMeshToOriginal();
+    
     if (!m_skeletonFilePath.empty()) {
         SaveRig(m_skeletonFilePath);
         LOG_INFO_FMT("VisualEditor", "Weights saved to: %s.weights", m_skeletonFilePath.c_str());
@@ -4205,13 +5085,13 @@ void VisualSkeletonEditor::GenerateWeightsFromMesh() {
             
             size_t weightCount = 0;
             for (size_t i = 0; i < m_weights.GetVertexCount(); i++) {
-                auto weights = m_weights.GetVertexWeights(i);
-                if (weights.empty()) continue;
+                auto vertexWeights = m_weights.GetVertexWeights(i);
+                if (vertexWeights.empty()) continue;
                 
                 file << i << "|";
-                for (size_t j = 0; j < weights.size(); j++) {
+                for (size_t j = 0; j < vertexWeights.size(); j++) {
                     if (j > 0) file << ",";
-                    file << weights[j].boneID << ":" << weights[j].weight;
+                    file << vertexWeights[j].boneID << ":" << vertexWeights[j].weight;
                 }
                 file << "\n";
                 weightCount++;
@@ -4228,70 +5108,15 @@ void VisualSkeletonEditor::UpdateMeshVertexBuffers() {
     }
     
     const SkeletonDefinition* skeleton = m_skeletonEditor.GetSkeleton();
-    if (!skeleton || !m_animateMesh) {
+    // Always reset to original if animation is disabled OR if we're in edit mode (PlaceBones mode)
+    // This ensures mesh doesn't deform during bone placement or weight generation
+    if (!skeleton || !m_animateMesh || m_mode == EditorMode::PlaceBones) {
         m_mesh->UpdateVertexPositions(m_originalVertexData, m_meshVertexCounts);
         return;
     }
     
     std::map<std::string, glm::mat4> boneTransforms;
-    auto boneNames = skeleton->GetAllBoneNames();
-    
-    for (const std::string& boneName : boneNames) {
-        const BoneDefinition* bone = skeleton->GetBone(boneName);
-        if (!bone) continue;
-        
-        glm::mat4 currentModelTransform = glm::mat4(1.0f);
-        std::string currentBone = boneName;
-        while (!currentBone.empty()) {
-            const BoneDefinition* b = skeleton->GetBone(currentBone);
-            if (!b) break;
-            
-            glm::mat4 localTransform = b->GetLocalTransform();
-            currentModelTransform = localTransform * currentModelTransform;
-            
-            currentBone = b->parentName;
-        }
-        
-        glm::mat4 inverseBindPose = glm::mat4(1.0f);
-        bool useOffsetMatrix = (glm::determinant(bone->offsetMatrix) != 0.0f && 
-                               glm::abs(glm::determinant(bone->offsetMatrix)) > 0.0001f);
-        
-        if (useOffsetMatrix) {
-            inverseBindPose = bone->offsetMatrix;
-        } else {
-            glm::mat4 bindPoseTransform = glm::mat4(1.0f);
-            std::string bindBone = boneName;
-            while (!bindBone.empty()) {
-                const BoneDefinition* b = skeleton->GetBone(bindBone);
-                if (!b) break;
-                
-                glm::vec3 bindPos = b->position;
-                glm::quat bindRot = b->rotation;
-                glm::vec3 bindScale = b->scale;
-                
-                auto bindIt = m_bindPosePositions.find(bindBone);
-                if (bindIt != m_bindPosePositions.end()) {
-                    bindPos = bindIt->second;
-                }
-                
-                auto rotIt = m_bindPoseRotations.find(bindBone);
-                if (rotIt != m_bindPoseRotations.end()) {
-                    bindRot = rotIt->second;
-                }
-                
-                glm::mat4 T = glm::translate(glm::mat4(1.0f), bindPos);
-                glm::mat4 R = glm::mat4_cast(bindRot);
-                glm::mat4 S = glm::scale(glm::mat4(1.0f), bindScale);
-                glm::mat4 localBind = T * R * S;
-                
-                bindPoseTransform = localBind * bindPoseTransform;
-                bindBone = b->parentName;
-            }
-            inverseBindPose = glm::inverse(bindPoseTransform);
-        }
-        
-        boneTransforms[boneName] = currentModelTransform * inverseBindPose;
-    }
+    ComputeBoneTransforms(boneTransforms);
     
     std::vector<std::vector<GLfloat>> animatedVertexData = m_originalVertexData;
     size_t verticesWithWeights = 0;
@@ -4399,6 +5224,369 @@ void VisualSkeletonEditor::UpdateMeshVertexBuffers() {
             LOG_INFO_FMT("VisualEditor", "Mesh animation applied: %zu vertices skinned out of %zu total", 
                         verticesWithWeights, totalVerticesProcessed);
         }
+    }
+}
+
+void VisualSkeletonEditor::ScanForSkeletonFiles() {
+    m_availableSkeletonFiles.clear();
+    m_availableWeightsFiles.clear();
+    
+    if (m_meshFilePath.empty()) {
+        return;
+    }
+    
+    try {
+        std::filesystem::path meshPath(m_meshFilePath);
+        std::filesystem::path meshDir = meshPath.parent_path();
+        
+        if (!std::filesystem::exists(meshDir) || !std::filesystem::is_directory(meshDir)) {
+            LOG_WARNING_FMT("VisualEditor", "Mesh directory does not exist: %s", meshDir.string().c_str());
+            return;
+        }
+        
+        // Scan for .skel files
+        for (const auto& entry : std::filesystem::directory_iterator(meshDir)) {
+            if (entry.is_regular_file()) {
+                std::string ext = entry.path().extension().string();
+                std::transform(ext.begin(), ext.end(), ext.begin(), 
+                    [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+                
+                if (ext == ".skel") {
+                    std::string fullPath = entry.path().string();
+                    try {
+                        std::filesystem::path path(fullPath);
+                        if (path.is_relative()) {
+                            path = std::filesystem::absolute(path);
+                        }
+                        path = path.lexically_normal();
+                        m_availableSkeletonFiles.push_back(path.string());
+                    } catch (...) {
+                        m_availableSkeletonFiles.push_back(fullPath);
+                    }
+                } else if (ext == ".weights") {
+                    std::string fullPath = entry.path().string();
+                    try {
+                        std::filesystem::path path(fullPath);
+                        if (path.is_relative()) {
+                            path = std::filesystem::absolute(path);
+                        }
+                        path = path.lexically_normal();
+                        m_availableWeightsFiles.push_back(path.string());
+                    } catch (...) {
+                        m_availableWeightsFiles.push_back(fullPath);
+                    }
+                }
+            }
+        }
+        
+        // Sort files alphabetically
+        std::sort(m_availableSkeletonFiles.begin(), m_availableSkeletonFiles.end());
+        std::sort(m_availableWeightsFiles.begin(), m_availableWeightsFiles.end());
+        
+        LOG_INFO_FMT("VisualEditor", "Scanned mesh directory: found %zu skeleton files and %zu weights files", 
+                     m_availableSkeletonFiles.size(), m_availableWeightsFiles.size());
+        
+    } catch (const std::exception& e) {
+        LOG_ERROR_FMT("VisualEditor", "Error scanning for skeleton files: %s", e.what());
+    }
+}
+
+void VisualSkeletonEditor::LoadSelectedSkeleton() {
+    if (m_selectedSkeletonIndex < 0 || m_selectedSkeletonIndex >= static_cast<int>(m_availableSkeletonFiles.size())) {
+        LOG_WARNING("VisualEditor", "Invalid skeleton file selection");
+        return;
+    }
+    
+    std::string selectedPath = m_availableSkeletonFiles[m_selectedSkeletonIndex];
+    if (LoadRig(selectedPath)) {
+        LOG_INFO_FMT("VisualEditor", "Loaded skeleton from: %s", selectedPath.c_str());
+        m_skeletonFilePath = selectedPath;
+        StoreBindPose();
+        UpdateVisualBones();
+        
+        // Update input field
+        size_t copyLen = std::min(m_skeletonFilePath.length(), sizeof(m_skeletonFileInput) - 1);
+        memcpy(m_skeletonFileInput, m_skeletonFilePath.c_str(), copyLen);
+        m_skeletonFileInput[copyLen] = '\0';
+        
+        // Apply animation if enabled and mesh is loaded
+        // This ensures the loaded skeleton is immediately used for animation rendering
+        if (m_animateMesh && m_meshDataLoaded) {
+            UpdateMeshVertexBuffers();
+        }
+    } else {
+        LOG_ERROR_FMT("VisualEditor", "Failed to load skeleton from: %s", selectedPath.c_str());
+    }
+}
+
+void VisualSkeletonEditor::LoadSelectedWeights() {
+    if (m_selectedWeightsIndex < 0 || m_selectedWeightsIndex >= static_cast<int>(m_availableWeightsFiles.size())) {
+        LOG_WARNING("VisualEditor", "Invalid weights file selection");
+        return;
+    }
+    
+    std::string selectedPath = m_availableWeightsFiles[m_selectedWeightsIndex];
+    m_weightsFilePath = selectedPath;
+    
+    // Convert to absolute path
+    std::string absPath = selectedPath;
+    try {
+        std::filesystem::path path(selectedPath);
+        if (path.is_relative()) {
+            path = std::filesystem::absolute(path);
+        }
+        path = path.lexically_normal();
+        absPath = path.string();
+    } catch (...) {
+        absPath = selectedPath;
+    }
+    
+    // Load weights file
+    std::ifstream file(absPath);
+    if (!file.is_open()) {
+        LOG_ERROR_FMT("VisualEditor", "Failed to open weights file: %s", absPath.c_str());
+        return;
+    }
+    
+    LOG_INFO_FMT("VisualEditor", "Loading weights from: %s", absPath.c_str());
+    
+    m_weights.Clear();
+    
+    const SkeletonDefinition* skeletonDef = m_skeletonEditor.GetSkeleton();
+    
+    size_t weightCount = 0;
+    size_t totalWeightEntries = 0;
+    size_t mismatchedBoneIDs = 0;
+    std::string line;
+    while (std::getline(file, line)) {
+        if (line.empty() || line[0] == '#') continue;
+        
+        size_t pipePos = line.find('|');
+        if (pipePos == std::string::npos) continue;
+        
+        size_t vertexIndex = std::stoul(line.substr(0, pipePos));
+        std::string weightsStr = line.substr(pipePos + 1);
+        
+        std::istringstream iss(weightsStr);
+        std::string weightPair;
+        int boneCount = 0;
+        while (std::getline(iss, weightPair, ',')) {
+            size_t colonPos = weightPair.find(':');
+            if (colonPos == std::string::npos) continue;
+            
+            int boneID = std::stoi(weightPair.substr(0, colonPos));
+            float weight = std::stof(weightPair.substr(colonPos + 1));
+            
+            if (skeletonDef) {
+                const BoneDefinition* bone = skeletonDef->GetBone(boneID);
+                if (!bone) {
+                    mismatchedBoneIDs++;
+                    static std::set<int> loggedMissingIDs;
+                    if (loggedMissingIDs.find(boneID) == loggedMissingIDs.end() && loggedMissingIDs.size() < 10) {
+                        LOG_WARNING_FMT("VisualEditor", "Bone ID %d in weights file not found in skeleton, skipping", boneID);
+                        loggedMissingIDs.insert(boneID);
+                    }
+                    continue;
+                }
+            }
+            
+            m_weights.SetWeight(vertexIndex, boneID, weight);
+            boneCount++;
+            totalWeightEntries++;
+        }
+        if (boneCount > 0) {
+            weightCount++;
+        }
+    }
+    
+    if (mismatchedBoneIDs > 0) {
+        LOG_WARNING_FMT("VisualEditor", "Skipped %zu weight entries due to bone ID mismatches", mismatchedBoneIDs);
+    }
+    
+    file.close();
+    LOG_INFO_FMT("VisualEditor", "Weights loaded successfully: %zu vertices with weights, %zu total weight entries", 
+                 weightCount, totalWeightEntries);
+    
+    // Apply weights to mesh if animation is enabled
+    if (m_animateMesh && m_meshDataLoaded) {
+        UpdateMeshVertexBuffers();
+    }
+}
+
+void VisualSkeletonEditor::ComputeBoneTransforms(std::map<std::string, glm::mat4>& boneTransforms) {
+    const SkeletonDefinition* skeleton = m_skeletonEditor.GetSkeleton();
+    if (!skeleton) return;
+    
+    auto boneNames = skeleton->GetAllBoneNames();
+    glm::vec3 meshOffset = m_originalMeshOffset;
+    
+    for (const std::string& boneName : boneNames) {
+        const BoneDefinition* bone = skeleton->GetBone(boneName);
+        if (!bone) continue;
+        
+        glm::vec3 bindPos;
+        glm::quat bindRot;
+        GetBindPose(boneName, bindPos, bindRot);
+        glm::vec3 bindScale = bone->scale;
+        
+        glm::vec3 bindPosModel = bindPos - meshOffset;
+        glm::vec3 currentPosModel = bone->position - meshOffset;
+        
+        glm::mat4 currentModelTransform = glm::translate(glm::mat4(1.0f), currentPosModel) * 
+                                          glm::mat4_cast(bone->rotation) * 
+                                          glm::scale(glm::mat4(1.0f), bone->scale);
+        
+        glm::mat4 bindPoseModelTransform = glm::translate(glm::mat4(1.0f), bindPosModel) * 
+                                           glm::mat4_cast(bindRot) * 
+                                           glm::scale(glm::mat4(1.0f), bindScale);
+        
+        glm::mat4 inverseBindPose = (glm::determinant(bone->offsetMatrix) != 0.0f && 
+                                     glm::abs(glm::determinant(bone->offsetMatrix)) > 0.0001f)
+                                    ? bone->offsetMatrix
+                                    : glm::inverse(bindPoseModelTransform);
+        
+        boneTransforms[boneName] = currentModelTransform * inverseBindPose;
+    }
+}
+
+void VisualSkeletonEditor::GetBindPose(const std::string& boneName, glm::vec3& bindPos, glm::quat& bindRot) const {
+    const SkeletonDefinition* skeleton = m_skeletonEditor.GetSkeleton();
+    const BoneDefinition* bone = skeleton ? skeleton->GetBone(boneName) : nullptr;
+    
+    if (bone) {
+        bindPos = bone->position;
+        bindRot = bone->rotation;
+        
+        auto bindIt = m_bindPosePositions.find(boneName);
+        if (bindIt != m_bindPosePositions.end()) {
+            bindPos = bindIt->second;
+        }
+        
+        auto rotIt = m_bindPoseRotations.find(boneName);
+        if (rotIt != m_bindPoseRotations.end()) {
+            bindRot = rotIt->second;
+        }
+    }
+}
+
+// ============================================================================
+// Helper Functions: Bone Name Matching
+// ============================================================================
+
+std::string VisualSkeletonEditor::NormalizeBoneName(const std::string& name) const {
+    std::string normalized = name;
+    std::transform(normalized.begin(), normalized.end(), normalized.begin(), 
+        [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    
+    if (normalized.find("mixamorig:") == 0) {
+        normalized = normalized.substr(10);
+    }
+    return normalized;
+}
+
+bool VisualSkeletonEditor::MatchBoneToAnimation(const std::string& boneName, 
+                                                  const std::map<std::string, std::string>& animBoneMap,
+                                                  glm::vec3& animPosition, glm::quat& animRotation, 
+                                                  glm::vec3& animScale) const {
+    if (m_animationPlayer.GetBoneTransform(boneName, animPosition, animRotation, animScale)) {
+        return true;
+    }
+    
+    std::string normalized = NormalizeBoneName(boneName);
+    auto it = animBoneMap.find(normalized);
+    if (it != animBoneMap.end()) {
+        return m_animationPlayer.GetBoneTransform(it->second, animPosition, animRotation, animScale);
+    }
+    
+    std::vector<std::string> variations = {
+        "mixamorig:" + boneName,
+        boneName + "_bone",
+        boneName + "bone",
+    };
+    
+    for (const std::string& variant : variations) {
+        if (m_animationPlayer.GetBoneTransform(variant, animPosition, animRotation, animScale)) {
+            return true;
+        }
+    }
+    
+    return false;
+}
+
+void VisualSkeletonEditor::ConvertAnimLocalToWorld(const std::string& boneName, const glm::vec3& animLocalPos,
+                                                    const glm::quat& animLocalRot, const glm::vec3& animLocalScale,
+                                                    glm::vec3& worldPos, glm::quat& worldRot, glm::vec3& worldScale) const {
+    const SkeletonDefinition* skeleton = m_skeletonEditor.GetSkeleton();
+    const BoneDefinition* bone = skeleton ? skeleton->GetBone(boneName) : nullptr;
+    
+    if (!bone) {
+        worldPos = animLocalPos;
+        worldRot = animLocalRot;
+        worldScale = animLocalScale;
+        return;
+    }
+    
+    if (bone->parentName.empty()) {
+        worldPos = animLocalPos;
+        worldRot = animLocalRot;
+        worldScale = animLocalScale;
+    } else {
+        const BoneDefinition* parentBone = skeleton->GetBone(bone->parentName);
+        if (parentBone) {
+            glm::mat4 parentWorldTransform = glm::translate(glm::mat4(1.0f), parentBone->position) * 
+                                              glm::mat4_cast(parentBone->rotation) * 
+                                              glm::scale(glm::mat4(1.0f), parentBone->scale);
+            
+            glm::vec4 worldPos4 = parentWorldTransform * glm::vec4(animLocalPos, 1.0f);
+            worldPos = glm::vec3(worldPos4);
+            worldRot = parentBone->rotation * animLocalRot;
+            worldScale = parentBone->scale * animLocalScale;
+        } else {
+            worldPos = animLocalPos;
+            worldRot = animLocalRot;
+            worldScale = animLocalScale;
+        }
+    }
+}
+
+void VisualSkeletonEditor::CalculateBindPoseLocalTransform(const std::string& boneName, 
+                                                           const glm::vec3& bindPosWorld,
+                                                           const glm::quat& bindRotWorld,
+                                                           glm::vec3& localPos, glm::quat& localRot) const {
+    const SkeletonDefinition* skeleton = m_skeletonEditor.GetSkeleton();
+    const BoneDefinition* bone = skeleton ? skeleton->GetBone(boneName) : nullptr;
+    
+    if (!bone || bone->parentName.empty()) {
+        localPos = bindPosWorld;
+        localRot = bindRotWorld;
+        return;
+    }
+    
+    glm::vec3 parentBindPos;
+    glm::quat parentBindRot;
+    GetBindPose(bone->parentName, parentBindPos, parentBindRot);
+    
+    glm::mat4 parentBindTransform = glm::translate(glm::mat4(1.0f), parentBindPos) * 
+                                    glm::mat4_cast(parentBindRot);
+    glm::vec4 localPos4 = glm::inverse(parentBindTransform) * glm::vec4(bindPosWorld, 1.0f);
+    localPos = glm::vec3(localPos4);
+    localRot = glm::inverse(parentBindRot) * bindRotWorld;
+}
+
+// ============================================================================
+// Helper Functions: File Operations
+// ============================================================================
+
+std::string VisualSkeletonEditor::NormalizeFilePath(const std::string& filePath) const {
+    try {
+        std::filesystem::path path(filePath);
+        if (path.is_relative()) {
+            path = std::filesystem::absolute(path);
+        }
+        path = path.lexically_normal();
+        return path.string();
+    } catch (...) {
+        return filePath;
     }
 }
 

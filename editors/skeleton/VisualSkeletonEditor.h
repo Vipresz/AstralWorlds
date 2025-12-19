@@ -164,6 +164,9 @@ private:
     MeshWeights m_weights;
     EditorMode m_mode;
     
+    // LibIGL integration
+    class LibIGLWrapper* m_libiglWrapper;
+    
     // Animation system
     AnimationPlayer m_animationPlayer;
     std::string m_animationDirectory; // Directory containing animation files
@@ -186,6 +189,7 @@ private:
     std::vector<bool> m_bonesPlaced; // Boolean list: true if bone at that index has been placed
     int m_nextBoneIndex; // Index of next bone to place (calculated from m_bonesPlaced)
     std::map<std::string, glm::vec3> m_removedBonePositions; // Store last position of removed bones for restoration
+    std::map<std::string, glm::vec3> m_suggestedBonePositions; // Suggested positions from skeleton extraction
     
     // Mouse state
     bool m_mouseLeftDown;
@@ -204,8 +208,15 @@ private:
     std::string m_outputPath;
     std::string m_meshFilePath;
     std::string m_skeletonFilePath;
+    std::string m_weightsFilePath;
     bool m_autoSave; // Auto-save skeleton when bones are added/removed
     bool m_showResetDialog; // Show reset confirmation dialog
+    
+    // File selection dropdowns
+    std::vector<std::string> m_availableSkeletonFiles; // Available .skel files in mesh directory
+    std::vector<std::string> m_availableWeightsFiles; // Available .weights files in mesh directory
+    int m_selectedSkeletonIndex; // Selected index in skeleton dropdown
+    int m_selectedWeightsIndex; // Selected index in weights dropdown
     
     // Nuklear GUI
     struct nk_glfw* m_nuklear;
@@ -257,13 +268,17 @@ private:
     void RemoveBoneAndChildren(const std::string& boneName); // Recursively remove bone and all descendants
     glm::vec3 CalculateBoneWorldPosition(const std::string& boneName) const; // Calculate world position from local transforms
     void ConvertWorldPositionsToLocal(); // Convert stored world positions to local positions after loading
+    void ConvertLocalToWorld(SkeletonDefinition& skeleton); // Convert local positions to world positions (for editing)
     void StoreBindPose(); // Store current bone positions/rotations as bind pose
     void ResetToBindPose(); // Reset skeleton to bind pose (original positions)
     void ApplyAnimationAtTime(float time); // Apply animation at specific time (for slider control)
     void ApplyMeshAnimation(); // Apply bone transforms to mesh vertices (skinning)
     void ResetMeshToOriginal(); // Reset mesh to original position
     void StoreOriginalVertexData(const std::string& filePath); // Store original vertex data from mesh file
-    void GenerateWeightsFromMesh(); // Automatically generate vertex weights based on bone proximity
+    void GenerateWeightsFromMesh();
+    void GenerateWeightsWithLibIGL(); // Automatically generate vertex weights based on bone proximity
+    void ExtractSkeletonWithLibIGL(); // Extract skeleton from mesh using libigl
+    void ExtractSkeletonGeneric(); // Extract skeleton structure (generic, sets up default bone order)
     void UpdateMeshVertexBuffers(); // Update OpenGL vertex buffers with animated positions
     void UpdateVisualBones();
     void InitializeBoneOrder();
@@ -280,6 +295,7 @@ private:
     void RenderUI();
     void RenderBoneNumber(const glm::vec3& position, int number);
     void RenderBonePlacementSphere(const glm::vec3& position);
+    void RenderSuggestedBonePosition(const glm::vec3& position); // Render suggested position hint
     float CalculateSphereRadius(const glm::vec3& position) const;
     void RenderNextBoneIndicator();
     void RenderRightPanel();
@@ -300,11 +316,41 @@ private:
                               const glm::vec3& v0, const glm::vec3& v1, const glm::vec3& v2,
                               float& t, glm::vec3& hitPoint);
     
+    // Helper: Compute bone transforms for skinning
+    void ComputeBoneTransforms(std::map<std::string, glm::mat4>& boneTransforms);
+    
+    // Helper: Normalize bone name for matching
+    std::string NormalizeBoneName(const std::string& name) const;
+    
+    // Helper: Match skeleton bone to animation bone
+    bool MatchBoneToAnimation(const std::string& boneName, const std::map<std::string, std::string>& animBoneMap,
+                               glm::vec3& animPosition, glm::quat& animRotation, glm::vec3& animScale) const;
+    
+    // Helper: Convert animation local transform to world space
+    void ConvertAnimLocalToWorld(const std::string& boneName, const glm::vec3& animLocalPos,
+                                 const glm::quat& animLocalRot, const glm::vec3& animLocalScale,
+                                 glm::vec3& worldPos, glm::quat& worldRot, glm::vec3& worldScale) const;
+    
+    // Helper: Get bind pose for bone
+    void GetBindPose(const std::string& boneName, glm::vec3& bindPos, glm::quat& bindRot) const;
+    
+    // Helper: Calculate bind pose local transform relative to parent
+    void CalculateBindPoseLocalTransform(const std::string& boneName, const glm::vec3& bindPosWorld,
+                                        const glm::quat& bindRotWorld, glm::vec3& localPos, glm::quat& localRot) const;
+    
+    // Helper: Normalize file path to absolute, normalized path
+    std::string NormalizeFilePath(const std::string& filePath) const;
+    
     // Helper: Calculate bind poses
     void CalculateBindPoses();
     
     // Helper: Create bone visualization
     void CreateBoneVisualization();
+    
+    // File selection helpers
+    void ScanForSkeletonFiles(); // Scan mesh directory for .skel and .weights files
+    void LoadSelectedSkeleton(); // Load skeleton file selected from dropdown
+    void LoadSelectedWeights();  // Load weights file selected from dropdown
     
     // Shader creation
     bool CreateShaders();

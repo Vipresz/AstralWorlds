@@ -8,9 +8,11 @@
 #include <iostream>
 #include <memory>
 
-using namespace Engine;
-using namespace Engine::ECS;
-using namespace Engine::Math;
+// Use explicit namespace qualification to avoid conflicts with std namespace
+using Engine::ECS::Registry;
+using Engine::ECS::Entity;
+using Engine::ECS::ISystem;
+using Engine::ECS::SystemManager;
 
 // Example components
 struct Position {
@@ -83,8 +85,8 @@ public:
 };
 
 int main() {
-    std::cout << "Engine - Basic Example\n";
-    std::cout << "==================================\n\n";
+    ::std::cout << "Engine - Basic Example\n";
+    ::std::cout << "==================================\n\n";
     
     // Create registry
     Registry registry;
@@ -93,8 +95,8 @@ int main() {
     SystemManager systemManager;
     
     // Register systems
-    systemManager.RegisterSystem(std::make_shared<MovementSystem>());
-    systemManager.RegisterSystem(std::make_shared<HealthSystem>());
+    systemManager.RegisterSystem(::std::make_shared<MovementSystem>());
+    systemManager.RegisterSystem(::std::make_shared<HealthSystem>());
     
     // Initialize systems
     systemManager.Initialize(registry);
@@ -119,10 +121,10 @@ int main() {
     npcVel = Velocity(-2.0f, 0.0f, 0.0f);
     npcHealth = Health(50.0f);
     
-    std::cout << "Initial state:\n";
-    std::cout << "Player position: (" << playerPos.x << ", " << playerPos.y << ", " << playerPos.z << ")\n";
-    std::cout << "NPC position: (" << npcPos.x << ", " << npcPos.y << ", " << npcPos.z << ")\n";
-    std::cout << "NPC health: " << npcHealth.current << "/" << npcHealth.max << "\n\n";
+    ::std::cout << "Initial state:\n";
+    ::std::cout << "Player position: (" << playerPos.x << ", " << playerPos.y << ", " << playerPos.z << ")\n";
+    ::std::cout << "NPC position: (" << npcPos.x << ", " << npcPos.y << ", " << npcPos.z << ")\n";
+    ::std::cout << "NPC health: " << npcHealth.current << "/" << npcHealth.max << "\n\n";
     
     // Simulate a few ticks manually (for demonstration)
     constexpr float TICK_TIME = 1.0f / 60.0f;
@@ -132,16 +134,16 @@ int main() {
         systemManager.Update(TICK_TIME, registry, tickNumber);
         tickNumber++;
         
-        std::cout << "After tick " << tickNumber << ":\n";
-        std::cout << "Player position: (" << playerPos.x << ", " << playerPos.y << ", " << playerPos.z << ")\n";
-        std::cout << "NPC position: (" << npcPos.x << ", " << npcPos.y << ", " << npcPos.z << ")\n";
-        std::cout << "NPC health: " << npcHealth.current << "/" << npcHealth.max << "\n\n";
+        ::std::cout << "After tick " << tickNumber << ":\n";
+        ::std::cout << "Player position: (" << playerPos.x << ", " << playerPos.y << ", " << playerPos.z << ")\n";
+        ::std::cout << "NPC position: (" << npcPos.x << ", " << npcPos.y << ", " << npcPos.z << ")\n";
+        ::std::cout << "NPC health: " << npcHealth.current << "/" << npcHealth.max << "\n\n";
     }
     
     // Cleanup
     systemManager.Shutdown(registry);
     
-    std::cout << "Example completed successfully!\n";
+    ::std::cout << "Example completed successfully!\n";
     return 0;
 }
 

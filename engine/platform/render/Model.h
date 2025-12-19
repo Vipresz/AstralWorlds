@@ -8,6 +8,8 @@
 #include <assimp/scene.h>
 #include <assimp/postprocess.h>
 
+#include <glm/glm.hpp>
+
 #include "render/Mesh.h"
 #include "render/Texture.h"
 
@@ -59,6 +61,10 @@ public:
     void UpdateVertexPositions(std::vector<std::vector<GLfloat>>& vertexData, 
                                const std::vector<unsigned int>& meshVertexCounts);
     
+    // Apply rainbow color gradient based on Z position
+    // minZ, maxZ: Z range across all objects (calculated externally)
+    void ApplyRainbowColors(float minZ, float maxZ);
+    
     ~Model();
 
 private:
@@ -83,6 +89,9 @@ private:
     // Bone name storage: mesh bone index → bone name
     // Used for remapping bone matrices to match skeleton bone IDs
     std::vector<std::string> m_boneNames; // Index = mesh bone index, value = bone name
+    
+    // Store vertex positions for color application
+    std::vector<std::vector<glm::vec3>> m_vertexPositions; // Per-mesh vertex positions
     
     void CalculateBounds(const aiScene* scene);
 };

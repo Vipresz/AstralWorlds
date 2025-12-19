@@ -12,8 +12,10 @@ Mesh::Mesh() {
     IBO = 0;
     m_boneIDVBO = 0;
     m_boneWeightVBO = 0;
+    m_colorVBO = 0;
     indexCount = 0;
     m_hasBoneData = false;
+    m_hasColorData = false;
 }
 
 void Mesh::CreateMesh(GLfloat* vertices, unsigned int* indices, 
@@ -109,12 +111,50 @@ void Mesh::RenderMesh() {
     
     glBindVertexArray(VAO);
     glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, IBO);
+    
+    // Enable color attribute if color data exists
+    if (m_hasColorData && m_colorVBO != 0) {
+        glEnableVertexAttribArray(5); // Use location 5 for colors
+    }
+    
     glDrawElements(GL_TRIANGLES, indexCount, GL_UNSIGNED_INT, 0);
+    
+    if (m_hasColorData && m_colorVBO != 0) {
+        glDisableVertexAttribArray(5);
+    }
+    
     glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0);
     glBindVertexArray(0);
 }
 
+void Mesh::SetVertexColors(GLfloat* colors, unsigned int numOfVertices) {
+    if (!colors || numOfVertices == 0) {
+        return;
+    }
+    
+    glBindVertexArray(VAO);
+    
+    if (m_colorVBO == 0) {
+        glGenBuffers(1, &m_colorVBO);
+    }
+    
+    glBindBuffer(GL_ARRAY_BUFFER, m_colorVBO);
+    glBufferData(GL_ARRAY_BUFFER, sizeof(GLfloat) * 3 * numOfVertices, colors, GL_STATIC_DRAW);
+    glVertexAttribPointer(5, 3, GL_FLOAT, GL_FALSE, 3 * sizeof(GLfloat), 0);
+    glEnableVertexAttribArray(5);
+    
+    glBindBuffer(GL_ARRAY_BUFFER, 0);
+    glBindVertexArray(0);
+    
+    m_hasColorData = true;
+}
+
 void Mesh::ClearMesh() {
+    if (m_colorVBO != 0) {
+        glDeleteBuffers(1, &m_colorVBO);
+        m_colorVBO = 0;
+    }
+    
     if (m_boneWeightVBO != 0) {
         glDeleteBuffers(1, &m_boneWeightVBO);
         m_boneWeightVBO = 0;
@@ -142,6 +182,7 @@ void Mesh::ClearMesh() {
     
     indexCount = 0;
     m_hasBoneData = false;
+    m_hasColorData = false;
 }
 
 Mesh::~Mesh() {

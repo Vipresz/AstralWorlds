@@ -6,6 +6,7 @@
 #include <set>
 #include <map>
 #include <vector>
+#include <cctype>
 
 namespace Engine {
 namespace Editors {
@@ -72,7 +73,8 @@ bool SkeletonSerializer::LoadFromFile(SkeletonDefinition& skeleton, const std::s
             
             // Check if description indicates world coordinates
             std::string descLower = desc;
-            std::transform(descLower.begin(), descLower.end(), descLower.begin(), ::tolower);
+            std::transform(descLower.begin(), descLower.end(), descLower.begin(), 
+                [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
             if (descLower.find("world") != std::string::npos) {
                 isWorldCoordinates = true;
             }
