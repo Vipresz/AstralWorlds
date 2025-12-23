@@ -87,6 +87,15 @@ public:
                                   std::vector<PointCloudPoint>& output,
                                   bool lowPassEnabled);
     
+    // Main gridding function - processes entire point cloud into grid
+    void ApplyGridding(const std::vector<PointCloudPoint>& inputPoints,
+                      std::map<GridKey, PointCloudPoint>& outputGrid,
+                      TOFGridMode mode,
+                      float gridSize);
+    
+    // Helper function to convert world position to grid key
+    static GridKey WorldToGridKey(const glm::vec3& position, float gridSize);
+    
     // Access to internal state
     LowPassFilterCoefficients& GetLowPassCoefficients() { return m_lowPassCoefficients; }
     const LowPassFilterCoefficients& GetLowPassCoefficients() const { return m_lowPassCoefficients; }

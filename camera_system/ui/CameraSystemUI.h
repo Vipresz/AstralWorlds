@@ -57,6 +57,7 @@ private:
     void RenderTOFControls(CameraSystemEditor& editor);
     void RenderVIPRESControls(CameraSystemEditor& editor);
     void RenderObjectsPanel(CameraSystemEditor& editor);
+    void RenderStatisticsPanel(CameraSystemEditor& editor);
     
     // Helper to get window dimensions
     void GetWindowSize(int& width, int& height);

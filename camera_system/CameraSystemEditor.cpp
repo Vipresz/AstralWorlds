@@ -1,5 +1,6 @@
 #include "CameraSystemEditor.h"
 #include "GlobalConstants.h"
+#include "config/ConfigManager.h"
 #include "../../engine/platform/render/Window.h"
 #include "../../engine/platform/render/Shader.h"
 #include "../../engine/platform/render/Model.h"
@@ -19,6 +20,7 @@
 #include <cstddef>
 #include <algorithm>
 #include <random>
+#include <functional>
 
 // Nuklear implementation is now in nuklear/NuklearUI.cpp
 #define NK_INCLUDE_FIXED_TYPES
@@ -77,11 +79,15 @@ CameraSystemEditor::CameraSystemEditor()
     , m_vipresRemeshPoissonDepth(REMESH_POISSON_DEPTH_DEFAULT)
     , m_vipresRemeshPoissonDensity(REMESH_POISSON_DENSITY_DEFAULT)
     , m_vipresRemeshPoissonSmoothNormals(true)
+    , m_vipresRemeshFCTMSliceThickness(REMESH_FCTM_SLICE_THICKNESS_DEFAULT)
+    , m_vipresRemeshGeodesicKNeighbors(REMESH_GEODESIC_K_NEIGHBORS_DEFAULT)
+    , m_vipresRemeshGeodesicNumSeeds(REMESH_GEODESIC_NUM_SEEDS_DEFAULT)
+    , m_vipresRemeshGeodesicInteriorBias(REMESH_GEODESIC_INTERIOR_BIAS_DEFAULT)
     , m_vipresFreeCameraObjectEnabled(true)
     , m_vipresNoisyTofEnabled(false)
     , m_vipresNoiseAmount(NOISE_AMOUNT_DEFAULT)
     , m_vipresGridSize(GRID_SIZE_DEFAULT)
-    , m_vipresGridMode(GridMode::GridValue)
+    , m_vipresGridMode(TOFGridMode::GridValue)
     , m_tofLowPassCutoff(LOW_PASS_CUTOFF_DEFAULT)
     , m_tofSamplingRate(TOF_SAMPLING_RATE_DEFAULT)
     , m_tofLowPassEnabled(false) // Low-pass filter disabled by default
@@ -89,6 +95,22 @@ CameraSystemEditor::CameraSystemEditor()
     , m_tofTsdfStoreColor(false)  // TSDF color storage disabled by default
     , m_tofTsdfTruncationDistance(TSDF_TRUNCATION_DISTANCE_DEFAULT)
     , m_tofTsdfWeightDecay(TSDF_WEIGHT_DECAY_DEFAULT)
+    , m_smartOccupancyEnabled(false)
+    , m_smartOccupancyNeighborConsistency(false)
+    , m_smartOccupancyNeighborRadius(2.0f)  // Default: 2 grid cells radius
+    , m_smartOccupancyResidualThreshold(1.5f)  // Default: 1.5 units (r0) - for ±1 unit noise, outliers are >1.5 units
+    , m_smartOccupancyPersistence(false)
+    , m_smartOccupancyPersistenceGamma(2.0f)  // Default: γ=2 (less aggressive than 4)
+    , m_smartOccupancyVariance(false)
+    , m_smartOccupancyVarianceThreshold(1.0f)  // Default: σ0=1.0 (matches ±1 unit noise stddev)
+    , m_smartOccupancyEviction(false)
+    , m_smartOccupancyEvictionDecay(2.0f)  // Decay value used in (decay^count)/100
+    , m_smartOccupancyEvictionIncrement(1.5f)  // Multiply weight by this when occupied
+    , m_smartOccupancyEvictionMinStartValue(0.1f)  // Minimum start value
+    , m_smartOccupancyEviction2(false)
+    , m_smartOccupancyEviction2Radius(2.0f)  // Default: check neighbors within 2 grid units
+    , m_smartOccupancyEviction2MinNeighbors(3)  // Default: require at least 3 neighbors
+    , m_weightThreshold(0.5f)  // Default: filter points below 0.5 weight
     , m_currentFPS(0.0f)
     , m_fpsUpdateTime(0.0f)
     , m_fpsFrameCount(0)
@@ -133,9 +155,9 @@ CameraSystemEditor::CameraSystemEditor()
     , m_isPlaying(false)
     , m_loopEnabled(false)
 {
-    // Initialize low-pass filter coefficients with default values
-    m_tofProcessing.ComputeLowPassFilterCoefficients(m_tofLowPassCutoff, m_tofSamplingRate);
-    
+    // Initialize low-pass filter coefficients with default values (for new algorithms module)
+    Algorithms::ComputeLowPassFilterCoefficients(m_tofLowPassCutoff, m_tofSamplingRate, m_lowPassFilterCoefficients);
+        
     // Initialize static camera frame arrays
     for (int i = 0; i < MAX_CAMERAS; i++) {
         m_cameraFrameCounts[i] = 0;
@@ -201,12 +223,7 @@ bool CameraSystemEditor::Initialize(int windowWidth, int windowHeight) {
     m_projection = glm::perspective(glm::radians(45.0f), aspect, 0.1f, Constants::FAR_PLANE);
     glViewport(0, 0, windowWidth, windowHeight);
     UpdateCamera();
-    
-    if (!InitializeBuffers()) {
-        LOG_ERROR("CameraSystem", "Failed to initialize OpenGL buffers");
-        return false;
-    }
-    
+       
     if (!InitializeNuklear()) {
         LOG_ERROR("CameraSystem", "Failed to initialize Nuklear GUI");
         return false;
@@ -280,11 +297,6 @@ bool CameraSystemEditor::CreateShaders() {
     return valid;
 }
 
-bool CameraSystemEditor::InitializeBuffers() {
-    // Buffers are now initialized by World class
-    return true;
-}
-
 bool CameraSystemEditor::InitializeNuklear() {
     return m_nuklearUI.Initialize(m_glfwWindow);
 }
@@ -293,40 +305,8 @@ void CameraSystemEditor::ShutdownNuklear() {
     m_nuklearUI.Shutdown();
 }
 
-bool CameraSystemEditor::LoadConfig(const std::string& configFile) {
-    SystemConfig config;
-    try {
-        if (!ConfigLoader::LoadFromFile(configFile, config)) {
-            LOG_ERROR_FMT("CameraSystem", "Failed to parse configuration file: %s", configFile.c_str());
-            return false;
-        }
-    } catch (const std::exception& e) {
-        LOG_ERROR_FMT("CameraSystem", "Exception parsing config file '%s': %s", configFile.c_str(), e.what());
-        return false;
-    } catch (...) {
-        LOG_ERROR_FMT("CameraSystem", "Unknown exception parsing config file: %s", configFile.c_str());
-        return false;
-    }
-    
-    // Load capture settings from config (only on initial load, not overriding user's manual toggle)
-    // Store the initial value, but don't override if user has manually toggled it
-    if (!m_configLoaded) {
-        m_captureEnabled = config.captureEnabled;
-    }
-    if (!config.captureOutputDir.empty()) {
-        m_captureOutputDir = config.captureOutputDir;
-    }
-    if (config.captureInterval > 0) {
-        m_captureInterval = config.captureInterval;
-    } else {
-        m_captureInterval = 1;  // Default to every frame if not specified or invalid
-    }
-    
-    // Clear existing objects
-    m_objects.clear();
-    m_objectPaths.clear();
-    m_objectStartTimes.clear();
-    
+// Reset frame arrays (editor-specific state management)
+void CameraSystemEditor::ResetFrameArrays() {
     // Reset object frame arrays
     for (int i = 0; i < MAX_OBJECTS; i++) {
         m_objectFrameCounts[i] = 0;
@@ -347,550 +327,99 @@ bool CameraSystemEditor::LoadConfig(const std::string& configFile) {
             m_cameraFrames[i][j].orientation = glm::vec3(0.0f, 0.0f, 1.0f);
         }
     }
+}
+
+bool CameraSystemEditor::LoadConfig(const std::string& configFile) {
+    SystemConfig config;
+    try {
+        if (!ConfigLoader::LoadFromFile(configFile, config)) {
+            LOG_ERROR_FMT("CameraSystem", "Failed to parse configuration file: %s", configFile.c_str());
+            return false;
+        }
+    } catch (const std::exception& e) {
+        LOG_ERROR_FMT("CameraSystem", "Exception parsing config file '%s': %s", configFile.c_str(), e.what());
+        return false;
+    } catch (...) {
+        LOG_ERROR_FMT("CameraSystem", "Unknown exception parsing config file: %s", configFile.c_str());
+        return false;
+    }
     
-    // Load animated cameras if available
+    // Load capture settings
+    auto captureSettings = ConfigManager::LoadCaptureSettings(config, m_configLoaded, m_captureEnabled);
+    if (!m_configLoaded) {
+        m_captureEnabled = captureSettings.enabled;
+    }
+    if (!captureSettings.outputDir.empty()) {
+        m_captureOutputDir = captureSettings.outputDir;
+    }
+    m_captureInterval = captureSettings.interval;
+    
+    // Clear existing objects and reset frame arrays
+    m_objects.clear();
+    m_objectPaths.clear();
+    m_objectStartTimes.clear();
+    ResetFrameArrays();
+    
+    // Load cameras (animated or legacy)
     if (!config.animatedCameras.empty() && config.totalFrames > 0) {
-        LOG_INFO_FMT("CameraSystem", "Loading %zu animated cameras with %d total frames", 
-                    config.animatedCameras.size(), config.totalFrames);
-        m_totalFrames = std::min(config.totalFrames, MAX_FRAMES);  // Cap at MAX_FRAMES
-        m_currentFrame = 0;
-        m_isPlaying = false;  // Start paused - don't auto-play
-        
-        // Clear existing cameras
-        m_cameras.clear();
-        
-        // Load cameras into static array (max 100 cameras, 300 frames each)
-        int cameraIndex = 0;
-        for (const auto& animCam : config.animatedCameras) {
-            if (cameraIndex >= MAX_CAMERAS) {
-                LOG_WARNING_FMT("CameraSystem", "Too many cameras, max is %d. Skipping camera '%s'", 
-                               MAX_CAMERAS, animCam.name.c_str());
-                break;
-            }
-            
-            LOG_INFO_FMT("CameraSystem", "Loading camera %d: '%s' with %zu keyframes (canMove=%s)", 
-                        cameraIndex, animCam.name.c_str(), animCam.keyframes.size(),
-                        animCam.canMove ? "true" : "false");
-            
-            if (animCam.keyframes.empty()) {
-                LOG_WARNING_FMT("CameraSystem", "Camera '%s' has no keyframes, skipping", animCam.name.c_str());
-                continue;
-            }
-            
-            // Sort keyframes by frame number
-            std::vector<CameraKeyframe> sortedKeyframes = animCam.keyframes;
-            std::sort(sortedKeyframes.begin(), sortedKeyframes.end(), 
-                     [](const CameraKeyframe& a, const CameraKeyframe& b) {
-                         return a.frame < b.frame;
-                     });
-            
-            LOG_INFO_FMT("CameraSystem", "Camera '%s': First keyframe at frame %d, last at frame %d", 
-                        animCam.name.c_str(), sortedKeyframes.front().frame, sortedKeyframes.back().frame);
-            
-            // Load into static array and FILL intermediate frames
-            // Strategy: Use frame numbers to determine where each camera should be at each frame.
-            // Fill intermediate frames with the most recent previous keyframe's data.
-            // Example: If keyframes are at frames 0, 30, 60:
-            //   - Frames 0-29: use frame 0's data
-            //   - Frames 30-59: use frame 30's data  
-            //   - Frames 60+: use frame 60's data
-            
-            if (sortedKeyframes.empty()) {
-                continue;
-            }
-            
-            // First, fill all frames from 0 to first keyframe with first keyframe's data
-            const auto& firstKeyframe = sortedKeyframes[0];
-            int firstFrame = firstKeyframe.frame;
-            if (firstFrame >= MAX_FRAMES) {
-                firstFrame = MAX_FRAMES - 1;
-            }
-            for (int fillFrame = 0; fillFrame < firstFrame && fillFrame < MAX_FRAMES; fillFrame++) {
-                m_cameraFrames[cameraIndex][fillFrame].tick = fillFrame;
-                m_cameraFrames[cameraIndex][fillFrame].position = firstKeyframe.position;
-                m_cameraFrames[cameraIndex][fillFrame].orientation = firstKeyframe.direction;
-            }
-            
-            // Store the first keyframe
-            if (firstFrame < MAX_FRAMES) {
-                m_cameraFrames[cameraIndex][firstFrame].tick = firstFrame;
-                m_cameraFrames[cameraIndex][firstFrame].position = firstKeyframe.position;
-                m_cameraFrames[cameraIndex][firstFrame].orientation = firstKeyframe.direction;
-            }
-            
-            int lastFilledFrame = firstFrame;
-            
-            // Process remaining keyframes and fill intermediate frames
-            for (size_t keyframeIndex = 1; keyframeIndex < sortedKeyframes.size(); keyframeIndex++) {
-                const auto& kf = sortedKeyframes[keyframeIndex];
-                int targetFrame = kf.frame;
-                
-                if (targetFrame >= MAX_FRAMES) {
-                    continue;
-                }
-                
-                // Fill all frames from lastFilledFrame+1 to targetFrame-1 with the previous keyframe's values
-                // This uses the most recent previous keyframe data for intermediate frames
-                const auto& previousKf = sortedKeyframes[keyframeIndex - 1];
-                for (int fillFrame = lastFilledFrame + 1; fillFrame < targetFrame && fillFrame < MAX_FRAMES; fillFrame++) {
-                    m_cameraFrames[cameraIndex][fillFrame].tick = fillFrame;
-                    m_cameraFrames[cameraIndex][fillFrame].position = previousKf.position;
-                    m_cameraFrames[cameraIndex][fillFrame].orientation = previousKf.direction;
-                }
-                
-                // Store the keyframe itself
-                if (targetFrame < MAX_FRAMES) {
-                    m_cameraFrames[cameraIndex][targetFrame].tick = targetFrame;
-                    m_cameraFrames[cameraIndex][targetFrame].position = kf.position;
-                    m_cameraFrames[cameraIndex][targetFrame].orientation = kf.direction;
-                    lastFilledFrame = targetFrame;
-                }
-            }
-            
-            // Fill remaining frames up to totalFrames with the last keyframe's values
-            if (!sortedKeyframes.empty() && cameraIndex < MAX_CAMERAS) {
-                const auto& lastKf = sortedKeyframes.back();
-                for (int fillFrame = lastFilledFrame + 1; fillFrame < m_totalFrames && fillFrame < MAX_FRAMES; fillFrame++) {
-                    m_cameraFrames[cameraIndex][fillFrame].tick = fillFrame;
-                    m_cameraFrames[cameraIndex][fillFrame].position = lastKf.position;
-                    m_cameraFrames[cameraIndex][fillFrame].orientation = lastKf.direction;
-                }
-            }
-            
-            // Set frame count to totalFrames (all frames are now filled)
-            m_cameraFrameCounts[cameraIndex] = m_totalFrames;
-            
-            // Verify frame data was filled correctly
-            int filledCount = 0;
-            for (int f = 0; f < m_totalFrames && f < MAX_FRAMES; f++) {
-                if (m_cameraFrames[cameraIndex][f].tick == f) {
-                    filledCount++;
-                }
-            }
-            LOG_INFO_FMT("CameraSystem", "Camera '%s': Filled %d/%d frames in array", 
-                        animCam.name.c_str(), filledCount, m_totalFrames);
-            
-            // Log sample positions at different frames
-            if (m_totalFrames > 0) {
-                LOG_INFO_FMT("CameraSystem", "Camera '%s' sample positions: frame 0=(%.2f,%.2f,%.2f), frame %d=(%.2f,%.2f,%.2f)", 
-                            animCam.name.c_str(),
-                            m_cameraFrames[cameraIndex][0].position.x,
-                            m_cameraFrames[cameraIndex][0].position.y,
-                            m_cameraFrames[cameraIndex][0].position.z,
-                            m_totalFrames / 2,
-                            m_cameraFrames[cameraIndex][m_totalFrames / 2].position.x,
-                            m_cameraFrames[cameraIndex][m_totalFrames / 2].position.y,
-                            m_cameraFrames[cameraIndex][m_totalFrames / 2].position.z);
-            }
-            
-            if (m_cameraFrameCounts[cameraIndex] > 0) {
-                // Create camera using first keyframe (just for initial position, not playing)
-                const auto& firstCamKeyframe = sortedKeyframes[0];
-                glm::vec3 target = firstCamKeyframe.position + firstCamKeyframe.direction;
-                AddCamera(animCam.name, firstCamKeyframe.position, target, animCam.canMove);
-                LOG_INFO_FMT("CameraSystem", "Camera '%s' added: initial pos=(%.2f,%.2f,%.2f), target=(%.2f,%.2f,%.2f)", 
-                            animCam.name.c_str(),
-                            firstCamKeyframe.position.x, firstCamKeyframe.position.y, firstCamKeyframe.position.z,
-                            target.x, target.y, target.z);
-                
-                // If this is anchor camera 1 (first camera with canMove=false), create free camera
-                if (!animCam.canMove && cameraIndex == 0) {
-                    AddCamera("Free Camera", firstCamKeyframe.position, target, true);
-                    m_freeCameraPos = firstCamKeyframe.position;
-                    // Initialize free camera yaw and pitch from anchor camera 1's direction
-                    glm::vec3 direction = glm::normalize(target - firstCamKeyframe.position);
-                    m_freeCameraYaw = atan2f(direction.x, direction.y);
-                    m_freeCameraPitch = -asinf(std::max(-1.0f, std::min(1.0f, direction.z)));
-                    LOG_INFO_FMT("CameraSystem", "Free camera created matching Anchor Camera 1");
-                }
-            } else {
-                LOG_ERROR_FMT("CameraSystem", "Camera '%s': No frames loaded, skipping", animCam.name.c_str());
-                continue;  // Skip this camera if no frames loaded
-            }
-            
-            cameraIndex++;
-        }
-        
-        m_numCameras = cameraIndex;
-        LOG_INFO_FMT("CameraSystem", "Loaded %d cameras total", m_numCameras);
-        
-        if (m_cameras.empty()) {
-            // Only create the free camera, not all default cameras
-            // Initialize free camera to match anchor camera 1's configuration if available
-            // Otherwise use default position
-            glm::vec3 freeCamPos(10.0f, 10.0f, 5.0f);
-            glm::vec3 target(0.0f, 0.0f, 0.0f);
-            
-            glm::vec3 direction = glm::normalize(target - freeCamPos);
-            m_freeCameraYaw = atan2f(direction.x, direction.y);
-            m_freeCameraPitch = asinf(std::max(-1.0f, std::min(1.0f, -direction.z)));
-            
-            m_cameras.clear();
-            AddCamera("Free Camera", freeCamPos, target, true);
-            if (!m_cameras.empty()) {
-                m_cameraSystem.SetActiveCameraIndex(0);
-                m_freeCameraPos = freeCamPos;
-            }
-        } else {
-            // Ensure active camera index is valid
-            if (m_cameraSystem.GetActiveCameraIndex() >= m_cameras.size()) {
-                m_cameraSystem.SetActiveCameraIndex(0);
-            }
-            
-            // Always ensure we have a free camera available
-            bool hasFreeCamera = false;
-            for (const auto& cam : m_cameras) {
-                if (cam.canMove) {
-                    hasFreeCamera = true;
-                    break;
-                }
-            }
-            
-            if (!hasFreeCamera) {
-                // Find anchor camera 1 to create free camera matching it
-                size_t anchorCamera1Index = SIZE_MAX;
-                for (size_t i = 0; i < m_cameras.size(); i++) {
-                    if (!m_cameras[i].canMove) {
-                        anchorCamera1Index = i;
-                        break;
-                    }
-                }
-                
-                if (anchorCamera1Index < m_cameras.size()) {
-                    const Camera& anchorCam1 = m_cameras[anchorCamera1Index];
-                    AddCamera("Free Camera", anchorCam1.position, anchorCam1.target, true);
-                    m_freeCameraPos = anchorCam1.position;
-                    // Initialize free camera yaw and pitch from anchor camera 1's direction
-                    glm::vec3 direction = glm::normalize(anchorCam1.target - anchorCam1.position);
-                    m_freeCameraYaw = atan2f(direction.x, direction.y);
-                    m_freeCameraPitch = -asinf(std::max(-1.0f, std::min(1.0f, direction.z)));
-                } else {
-                    AddCamera("Free Camera", glm::vec3(10.0f, 10.0f, 5.0f), glm::vec3(0.0f, 0.0f, 0.0f), true);
-                    m_freeCameraPos = glm::vec3(10.0f, 10.0f, 5.0f);
-                    glm::vec3 direction = glm::normalize(glm::vec3(0.0f, 0.0f, 0.0f) - m_freeCameraPos);
-                    m_freeCameraYaw = atan2f(direction.x, direction.y);
-                    m_freeCameraPitch = -asinf(std::max(-1.0f, std::min(1.0f, direction.z)));
-                }
-            }
-            
-            // Always select free camera (canMove=true) first if available
-            size_t freeCameraIndex = SIZE_MAX;
-            for (size_t i = 0; i < m_cameras.size(); i++) {
-                if (m_cameras[i].canMove) {
-                    freeCameraIndex = i;
-                    m_cameraSystem.SetActiveCameraIndex(i);
-                    LOG_INFO_FMT("CameraSystem", "Selected free camera: index %zu ('%s')", 
-                                i, m_cameras[i].name.c_str());
-                    break;
-                }
-            }
-            // If no free camera, use first camera
-            if (m_cameraSystem.GetActiveCameraIndex() >= m_cameras.size()) {
-                m_cameraSystem.SetActiveCameraIndex(0);
-                LOG_INFO_FMT("CameraSystem", "No free camera found, selected first camera: index 0");
-            }
-            
-            // Save initial safe parameters after a short delay (to allow FPS measurement)
-            // This will be called after first frame renders
-            
-            size_t activeIdx = m_cameraSystem.GetActiveCameraIndex();
-            LOG_INFO_FMT("CameraSystem", "Active camera: index %zu ('%s', canMove=%s)", 
-                        activeIdx, m_cameras[activeIdx].name.c_str(),
-                        m_cameras[activeIdx].canMove ? "true" : "false");
-            
-            if (m_cameras.size() > 0) {
-                if (m_cameras[activeIdx].canMove) {
-                    m_freeCameraPos = m_cameras[activeIdx].position;
-                    // If free camera is active, initialize yaw/pitch from anchor camera 1 if available
-                    size_t anchorCamera1Index = SIZE_MAX;
-                    for (size_t i = 0; i < m_cameras.size(); i++) {
-                        if (!m_cameras[i].canMove) {
-                            anchorCamera1Index = i;
-                            break;
-                        }
-                    }
-                    if (anchorCamera1Index < m_cameras.size()) {
-                        const Camera& anchorCam1 = m_cameras[anchorCamera1Index];
-                        glm::vec3 direction = glm::normalize(anchorCam1.target - anchorCam1.position);
-                        m_freeCameraYaw = atan2f(direction.x, direction.y);
-                        m_freeCameraPitch = -asinf(std::max(-1.0f, std::min(1.0f, direction.z)));
-                    }
-                }
-            }
-        }
+        ConfigManager::LoadAnimatedCameras<CameraFrame>(
+            config,
+            m_cameras,
+            m_cameraFrames,
+            m_cameraFrameCounts,
+            m_numCameras,
+            m_totalFrames,
+            m_currentFrame,
+            m_isPlaying,
+            m_freeCameraPos,
+            m_freeCameraYaw,
+            m_freeCameraPitch,
+            m_cameraSystem
+        );
     } else {
-        // Use legacy single camera config or no animated cameras
-        // Always ensure we have a free camera available
-        bool hasFreeCamera = false;
-        for (const auto& cam : m_cameras) {
-            if (cam.canMove) {
-                hasFreeCamera = true;
-                break;
-            }
-        }
-        
-        if (m_cameras.empty()) {
-            // No cameras loaded, just create free camera
-            // World plane is x-y, z is vertical (up)
-            AddCamera("Free Camera", glm::vec3(0.0f, 0.0f, 5.0f), glm::vec3(0.0f, 0.0f, 0.0f), true);
-            if (!m_cameras.empty()) {
-                m_cameraSystem.SetActiveCameraIndex(0);
-                m_freeCameraPos = m_cameras[0].position;
-            }
-        } else {
-            // Find anchor camera 1 (first camera with canMove=false) to initialize free camera
-            size_t anchorCamera1Index = SIZE_MAX;
-            for (size_t i = 0; i < m_cameras.size(); i++) {
-                if (!m_cameras[i].canMove) {
-                    anchorCamera1Index = i;
-                    break;
-                }
-            }
-            
-            if (!hasFreeCamera) {
-                // Add free camera matching anchor camera 1's configuration
-                glm::vec3 freeCamPos(10.0f, 10.0f, 5.0f);
-                glm::vec3 target(0.0f, 0.0f, 0.0f);
-                
-                if (anchorCamera1Index < m_cameras.size()) {
-                    const Camera& anchorCam1 = m_cameras[anchorCamera1Index];
-                    freeCamPos = anchorCam1.position;
-                    target = anchorCam1.target;
-                    LOG_INFO_FMT("CameraSystem", "Free camera initialized from Anchor Camera 1 (legacy path): pos=(%.2f,%.2f,%.2f), target=(%.2f,%.2f,%.2f)",
-                                freeCamPos.x, freeCamPos.y, freeCamPos.z, target.x, target.y, target.z);
-                }
-                
-                glm::vec3 direction = glm::normalize(target - freeCamPos);
-                m_freeCameraYaw = atan2f(direction.x, direction.y);
-                m_freeCameraPitch = -asinf(std::max(-1.0f, std::min(1.0f, direction.z)));
-                
-                AddCamera("Free Camera", freeCamPos, target, true);
-                m_freeCameraPos = freeCamPos;
-            } else if (anchorCamera1Index < m_cameras.size()) {
-                // Free camera exists, update it to match anchor camera 1
-                const Camera& anchorCam1 = m_cameras[anchorCamera1Index];
-                for (size_t i = 0; i < m_cameras.size(); i++) {
-                    if (m_cameras[i].canMove) {
-                            m_cameras[i].position = anchorCam1.position;
-                            m_cameras[i].target = anchorCam1.target;
-                            m_freeCameraPos = anchorCam1.position;
-                            
-                            glm::vec3 direction = glm::normalize(anchorCam1.target - anchorCam1.position);
-                            m_freeCameraYaw = atan2f(direction.x, direction.y);
-                            m_freeCameraPitch = -asinf(std::max(-1.0f, std::min(1.0f, direction.z)));
-                        
-                        LOG_INFO_FMT("CameraSystem", "Free camera updated to match Anchor Camera 1 (legacy path): pos=(%.2f,%.2f,%.2f), target=(%.2f,%.2f,%.2f)",
-                                    anchorCam1.position.x, anchorCam1.position.y, anchorCam1.position.z,
-                                    anchorCam1.target.x, anchorCam1.target.y, anchorCam1.target.z);
-                        break;
-                    }
-                }
-            }
-        }
-        
-        if (!m_cameras.empty() && m_cameras[0].canMove) {
-            // DON'T modify free camera from config - free cameras should remain user-controlled
-            // Just update the free camera's internal position if user wants to start from config position
-            // But don't force it - let user control it
-            // m_freeCameraPos = config.camera.position;  // Commented out - don't override free camera
-            // m_freeCameraYaw = config.camera.yaw;
-            // m_freeCameraPitch = config.camera.pitch;
-        } else {
-            // Add as a new camera
-            AddCamera("Config Camera", config.camera.position, config.camera.target, false);
-            
-            // Ensure free camera exists
-            if (!hasFreeCamera) {
-                // Initialize free camera to match anchor camera 1's configuration if available
-                glm::vec3 freeCamPos(10.0f, 10.0f, 5.0f);
-                glm::vec3 target(0.0f, 0.0f, 0.0f);
-                
-                // Find anchor camera 1 (first camera with canMove=false)
-                size_t anchorCamera1Index = SIZE_MAX;
-                for (size_t i = 0; i < m_cameras.size(); i++) {
-                    if (!m_cameras[i].canMove) {
-                        anchorCamera1Index = i;
-                        break;
-                    }
-                }
-                
-                // If anchor camera 1 exists, use its configuration
-                if (anchorCamera1Index < m_cameras.size()) {
-                    const Camera& anchorCam1 = m_cameras[anchorCamera1Index];
-                    freeCamPos = anchorCam1.position;
-                    target = anchorCam1.target;
-                    LOG_INFO_FMT("CameraSystem", "Free camera initialized from Anchor Camera 1 (legacy else path): pos=(%.2f,%.2f,%.2f), target=(%.2f,%.2f,%.2f)",
-                                freeCamPos.x, freeCamPos.y, freeCamPos.z, target.x, target.y, target.z);
-                }
-                
-                // Calculate yaw and pitch from position and target
-                glm::vec3 direction = glm::normalize(target - freeCamPos);
-                float yaw = atan2f(direction.x, direction.y);
-                // Rotate yaw by 180 degrees to face opposite direction
-                yaw += 3.14159f; // 180 degrees in radians
-                float horizontalDist = sqrtf(direction.x * direction.x + direction.y * direction.y);
-                float pitch = -atan2f(-direction.z, horizontalDist); // Flip pitch
-                
-                m_cameras.insert(m_cameras.begin(), Camera("Free Camera", freeCamPos, target, true));
-                // Also add to VIPRES enabled list (insert at beginning to match camera insertion)
-                m_vipresCameraEnabled.insert(m_vipresCameraEnabled.begin(), true);
-                m_freeCameraPos = freeCamPos;
-                m_freeCameraYaw = yaw;
-                m_freeCameraPitch = pitch;
-            }
-        }
-        m_totalFrames = 0;
-        m_currentFrame = 0;
+        ConfigManager::LoadLegacyCamera(
+            config,
+            m_cameras,
+            m_totalFrames,
+            m_currentFrame,
+            m_freeCameraPos,
+            m_freeCameraYaw,
+            m_freeCameraPitch,
+            m_cameraSystem
+        );
     }
     
     m_totalDuration = config.totalDuration;
     m_sceneTime = 0.0f;
     
     // Load objects from config
-    LOG_INFO_FMT("CameraSystem", "Loading %zu objects from config", config.objects.size());
-    size_t objectsLoaded = 0;
-    size_t objectsWithModels = 0;
-    for (const auto& objConfig : config.objects) {
-        LOG_INFO_FMT("CameraSystem", "Loading object '%s' with obj_file='%s' (keyframes: %zu)", 
-                    objConfig.name.c_str(), objConfig.objFile.c_str(), objConfig.keyframes.size());
-        // Create object
-        // Use ObjectManager to load the object
-        std::filesystem::path configPath(configFile);
-        std::filesystem::path configDir = configPath.parent_path();
-        
-        auto obj = m_objectManager.LoadObject(objConfig, configDir, OBJECT_SIZE_DEFAULT);
-        
-        if (!obj) {
-            LOG_ERROR_FMT("CameraSystem", "Failed to load object '%s'", objConfig.name.c_str());
-            continue;
-        }
-        
-        // Store object (even if model failed to load, so it can be positioned)
-        size_t objectIndex = m_objects.size();
-        SceneObject* objPtr = obj.get();
-        m_objects.push_back(std::move(obj));
-        
-        objectsLoaded++;
-        if (objPtr->model && objPtr->model->GetMeshCount() > 0) {
-            objectsWithModels++;
-        }
-        
-        // Load frame-based keyframes if available (new method)
-        if (!objConfig.keyframes.empty() && m_totalFrames > 0 && objectIndex < MAX_OBJECTS) {
-            // Sort keyframes by frame number
-            std::vector<ObjectKeyframe> sortedKeyframes = objConfig.keyframes;
-            std::sort(sortedKeyframes.begin(), sortedKeyframes.end(), 
-                     [](const ObjectKeyframe& a, const ObjectKeyframe& b) {
-                         return a.frame < b.frame;
-                     });
-            
-            // Simple approach: Use the last defined keyframe's position for all frames
-            if (!sortedKeyframes.empty()) {
-                // Find the last valid keyframe (within totalFrames range)
-                glm::vec3 lastKeyframePosition = sortedKeyframes[0].position; // Default to first keyframe
-                
-                for (const auto& kf : sortedKeyframes) {
-                    if (kf.frame < m_totalFrames && kf.frame < MAX_FRAMES) {
-                        lastKeyframePosition = kf.position;
-                    }
-                }
-                
-                // Fill ALL frames from 0 to totalFrames with the last defined keyframe's position
-                for (int fillFrame = 0; fillFrame < m_totalFrames && fillFrame < MAX_FRAMES; fillFrame++) {
-                    m_objectFrames[objectIndex][fillFrame].frame = fillFrame;
-                    m_objectFrames[objectIndex][fillFrame].position = lastKeyframePosition;
-                }
-                
-                // Now apply keyframes in order, filling gaps with previous keyframe's position
-                int lastKeyframeFrame = -1;
-                glm::vec3 lastKeyframePos = lastKeyframePosition;
-                
-                for (const auto& kf : sortedKeyframes) {
-                    int targetFrame = kf.frame;
-                    if (targetFrame < 0 || targetFrame >= m_totalFrames || targetFrame >= MAX_FRAMES) {
-                        continue;
-                    }
-                    
-                    // Fill frames from lastKeyframeFrame+1 to targetFrame-1 with last keyframe's position
-                    if (lastKeyframeFrame >= 0) {
-                        for (int fillFrame = lastKeyframeFrame + 1; fillFrame < targetFrame && fillFrame < m_totalFrames && fillFrame < MAX_FRAMES; fillFrame++) {
-                            m_objectFrames[objectIndex][fillFrame].frame = fillFrame;
-                            m_objectFrames[objectIndex][fillFrame].position = lastKeyframePos;
-                        }
-                    }
-                    
-                    // Set the keyframe itself
-                    m_objectFrames[objectIndex][targetFrame].frame = targetFrame;
-                    m_objectFrames[objectIndex][targetFrame].position = kf.position;
-                    
-                    lastKeyframeFrame = targetFrame;
-                    lastKeyframePos = kf.position;
-                }
-                
-                // Fill remaining frames after last keyframe with last keyframe's position
-                if (lastKeyframeFrame >= 0) {
-                    for (int fillFrame = lastKeyframeFrame + 1; fillFrame < m_totalFrames && fillFrame < MAX_FRAMES; fillFrame++) {
-                        m_objectFrames[objectIndex][fillFrame].frame = fillFrame;
-                        m_objectFrames[objectIndex][fillFrame].position = lastKeyframePos;
-                    }
-                }
-                
-                LOG_INFO_FMT("CameraSystem", "Object '%s': Filled %d frames (keyframes: %zu, first at frame %d, last at frame %d)", 
-                           objConfig.name.c_str(), m_totalFrames, sortedKeyframes.size(), 
-                           sortedKeyframes.front().frame, sortedKeyframes.back().frame);
-                
-                m_objectFrameCounts[objectIndex] = m_totalFrames;
-                m_objectsUseFrames[objectIndex] = true;
-                
-                // Set initial position from first keyframe
-                if (m_objects[objectIndex] && !sortedKeyframes.empty()) {
-                    m_objects[objectIndex]->position = sortedKeyframes[0].position;
-                }
-            }
-        } else {
-            // Legacy: use time-based path
-            m_objectPaths.push_back(objConfig.path);
-            m_objectStartTimes.push_back(objConfig.startTime);
-            if (objectIndex < static_cast<size_t>(MAX_OBJECTS)) {
-                m_objectsUseFrames[objectIndex] = false;
-            }
-        }
-    }
+    ConfigManager::LoadObjects<ObjectFrame>(
+        config,
+        configFile,
+        m_objectManager,
+        m_objects,
+        m_objectPaths,
+        m_objectStartTimes,
+        m_objectFrames,
+        m_objectFrameCounts,
+        m_objectsUseFrames,
+        m_totalFrames,
+        m_numCameras
+    );
     
     m_configLoaded = true;
-    m_globalAnimationPlaying = false;  // Don't auto-play animations - user controls this
+    m_globalAnimationPlaying = false;
     
     // Update animated cameras if loaded (set initial positions from first keyframe)
-    // This just sets the initial camera positions, doesn't start playback
-    // NOTE: Don't call UpdateAnimatedCameras during load - cameras are already positioned from first keyframe
-    // UpdateAnimatedCameras will be called during the main loop when needed
     if (m_totalFrames > 0 && m_numCameras > 0) {
-        // Set initial frame to 0
         m_currentFrame = 0;
-        // Cameras are already positioned from first keyframe when we called AddCamera above
-        // No need to call UpdateAnimatedCameras here - it could cause issues if cameras aren't fully set up
     }
     
     // Load lights from config
     m_lights = config.lights;
     
     // Update object positions to frame 0 immediately after loading
-    // This ensures objects are positioned correctly from the config file
     UpdatePathFollowing(0.0f);
-    
-    LOG_INFO_FMT("CameraSystem", "Config loaded: %zu objects loaded (%zu with models), %d cameras, %zu lights, %d total frames", 
-                objectsLoaded, objectsWithModels, m_numCameras, m_lights.size(), m_totalFrames);
-    
-    // Log summary of all loaded objects
-    for (size_t i = 0; i < m_objects.size(); i++) {
-        if (m_objects[i]) {
-            bool hasModel = (m_objects[i]->model != nullptr && m_objects[i]->model->GetMeshCount() > 0);
-            LOG_INFO_FMT("CameraSystem", "  Object[%zu]: '%s' %s at (%.2f, %.2f, %.2f)", 
-                        i, m_objects[i]->name.c_str(),
-                        hasModel ? "HAS MODEL" : "NO MODEL",
-                        m_objects[i]->position.x, m_objects[i]->position.y, m_objects[i]->position.z);
-        }
-    }
     
     // Initialize cameras from config
     InitializeCamerasFromConfig();
@@ -1765,49 +1294,29 @@ void CameraSystemEditor::UpdatePointCloud() {
     
     // Depth data calculation is controlled by TOF, not VIPRES
     if (!m_tofDataEnabled || m_cameras.empty()) {
-        LOG_WARNING_FMT("CameraSystem", "UpdatePointCloud: Early return - TOF enabled=%d, cameras=%zu", 
-                      m_tofDataEnabled, m_cameras.size());
         return;
     }
-    
-    LOG_INFO_FMT("CameraSystem", "UpdatePointCloud: Starting depth sampling. Cameras=%zu, objects=%zu", 
-                m_cameras.size(), m_objects.size());
     
     int fullWidth, fullHeight;
     glfwGetFramebufferSize(m_glfwWindow, &fullWidth, &fullHeight);
     
     const float nearPlane = 0.1f;
     const float farPlane = Constants::FAR_PLANE;
-    const float farPlaneThreshold = 0.9999f;  // Adjusted to allow depth values close to far plane (was 0.999)
+    const float farPlaneThreshold = 0.9999f;
     
-        // Sample depth from anchor cameras only (skip free cameras with canMove=true)
-        size_t anchorCamerasProcessed = 0;
-        size_t totalPointsSampled = 0;
-        for (size_t camIdx = 0; camIdx < m_cameras.size(); camIdx++) {
-            const Camera& cam = m_cameras[camIdx];
-            
-            // Skip free cameras - only use anchor cameras (canMove=false)
-            if (cam.canMove) {
-                continue;
-            }
-            anchorCamerasProcessed++;
-            size_t cameraPointsSampled = 0;
+    if (m_vipresCameraEnabled.size() != m_cameras.size()) {
+        m_vipresCameraEnabled.resize(m_cameras.size(), true);
+    }
+    
+    m_filteredTofData[m_filteredTofWriteBuffer].clear();
+    
+    for (size_t camIdx = 0; camIdx < m_cameras.size(); camIdx++) {
+        const Camera& cam = m_cameras[camIdx];
+        if (cam.canMove || !m_vipresCameraEnabled[camIdx]) {
+            continue;
+        }
         
-        // Ensure vector is properly sized and all cameras are enabled by default
-        if (m_vipresCameraEnabled.size() != m_cameras.size()) {
-                size_t oldSize = m_vipresCameraEnabled.size();
-                m_vipresCameraEnabled.resize(m_cameras.size(), true);
-                for (size_t i = oldSize; i < m_cameras.size(); i++) {
-                m_vipresCameraEnabled[i] = true;
-                }
-            }
-            
-            if (camIdx >= m_vipresCameraEnabled.size() || !m_vipresCameraEnabled[camIdx]) {
-                continue;
-            }
-            
-            glm::mat4 camView = CalculateCameraView(cam);
-            glm::mat4 camProjection = m_projection;
+        glm::mat4 camView = CalculateCameraView(cam);
             
             glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
             glEnable(GL_DEPTH_TEST);
@@ -1824,20 +1333,10 @@ void CameraSystemEditor::UpdatePointCloud() {
             GLint uniformView = m_meshShader->GetViewLocation();
             GLint uniformProjection = m_meshShader->GetProjectionLocation();
             if (uniformView != -1) glUniformMatrix4fv(uniformView, 1, GL_FALSE, glm::value_ptr(camView));
-            if (uniformProjection != -1) glUniformMatrix4fv(uniformProjection, 1, GL_FALSE, glm::value_ptr(camProjection));
+            if (uniformProjection != -1) glUniformMatrix4fv(uniformProjection, 1, GL_FALSE, glm::value_ptr(m_projection));
             
             for (size_t i = 0; i < m_objects.size(); i++) {
                 if (m_objects[i] && m_objects[i]->visible) {
-                    // Log rendering for debugging
-                    static bool loggedOnce = false;
-                    if (!loggedOnce && i < 4) {
-                        bool hasModel = (m_objects[i]->model != nullptr && m_objects[i]->model->GetMeshCount() > 0);
-                        LOG_INFO_FMT("CameraSystem", "Rendering object[%zu]: '%s' %s at (%.2f, %.2f, %.2f)", 
-                                    i, m_objects[i]->name.c_str(),
-                                    hasModel ? "HAS MODEL" : "NO MODEL",
-                                    m_objects[i]->position.x, m_objects[i]->position.y, m_objects[i]->position.z);
-                        if (i == 3) loggedOnce = true; // Log first 4 objects once
-                    }
                     RenderObject(m_objects[i].get());
                 }
             }
@@ -1848,179 +1347,100 @@ void CameraSystemEditor::UpdatePointCloud() {
         
         // Read depth buffer from back buffer
         std::vector<float> depthBuffer(fullWidth * fullHeight);
-        glReadBuffer(GL_BACK);  // Explicitly read from back buffer
+        glReadBuffer(GL_BACK);
         glReadPixels(0, 0, fullWidth, fullHeight, GL_DEPTH_COMPONENT, GL_FLOAT, depthBuffer.data());
-        GLenum readError = glGetError();
-        if (readError != GL_NO_ERROR) {
-            static int errorCount = 0;
-            if (errorCount++ < 3) {
-                LOG_ERROR_FMT("CameraSystem", "OpenGL error reading depth buffer for camera %zu: 0x%x", camIdx, readError);
-            }
-        }
         
-        // Debug: Check depth buffer statistics
-        static int depthStatsCount = 0;
-        if (depthStatsCount++ < 2) {
-            float minDepth = 1.0f, maxDepth = 0.0f;
-            size_t validDepths = 0, farPlaneDepths = 0;
-            for (size_t i = 0; i < depthBuffer.size(); i++) {
-                float d = depthBuffer[i];
-                if (d < minDepth) minDepth = d;
-                if (d > maxDepth) maxDepth = d;
-                if (d < farPlaneThreshold) validDepths++;
-                else farPlaneDepths++;
-            }
-            LOG_INFO_FMT("CameraSystem", "Camera %zu depth buffer: size=%dx%d, min=%.6f, max=%.6f, valid=%zu, farPlane=%zu, samplingDensity=%d", 
-                        camIdx, fullWidth, fullHeight, minDepth, maxDepth, validDepths, farPlaneDepths, m_vipresSamplingDensity);
-        }
-        
-        // Read color buffer if color computation is enabled
         std::vector<unsigned char> colorBuffer;
         if (m_vipresComputeColor) {
-            colorBuffer.resize(fullWidth * fullHeight * 4);  // RGBA
+            colorBuffer.resize(fullWidth * fullHeight * 4);
             glReadPixels(0, 0, fullWidth, fullHeight, GL_RGBA, GL_UNSIGNED_BYTE, colorBuffer.data());
         }
         
-        size_t pixelsChecked = 0;
-        size_t pixelsPassedFarPlaneCheck = 0;
-        size_t pixelsPassedDepthLimitCheck = 0;
+        // Precompute values outside pixel loop for performance
+        const float twoNearFar = 2.0f * nearPlane * farPlane;
+        const float farPlusNear = farPlane + nearPlane;
+        const float invWidthMinusOne = 1.0f / (fullWidth - 1.0f);
+        const float invHeightMinusOne = 1.0f / (fullHeight - 1.0f);
+        const float fov_rad = glm::radians(45.0f);
+        const float tan_half_fov = std::tan(fov_rad / 2.0f);
+        const float min_dim = static_cast<float>(std::min(fullWidth, fullHeight));
+        const float max_dim = static_cast<float>(std::max(fullWidth, fullHeight));
+        const float aspect_ratio = max_dim / min_dim;
+        const float tan_half_fov_large = tan_half_fov * aspect_ratio;
+        const bool widthLeHeight = (fullWidth <= fullHeight);
+        const glm::mat4 invView = glm::inverse(camView);
+        const glm::vec3 defaultColor = m_tofColorCodeByCamera ? 
+            glm::vec3(std::sin(camIdx * 0.618f) * 0.5f + 0.5f,
+                     std::sin(camIdx * 0.618f + 2.094f) * 0.5f + 0.5f,
+                     std::sin(camIdx * 0.618f + 4.189f) * 0.5f + 0.5f) : glm::vec3(1.0f);
+        const float inv255 = 0.003921568627451f;  // 1.0f / 255.0f
+        std::mt19937 rng;
+        std::uniform_real_distribution<float> noiseDist(-m_vipresNoiseAmount, m_vipresNoiseAmount);
+        const bool useNoise = m_vipresNoisyTofEnabled && m_vipresNoiseAmount > 0.0f;
         
         for (int y = 0; y < fullHeight; y += m_vipresSamplingDensity) {
+            const int yIndex = y * fullWidth;
+            const float yNormBase = 2.0f * (static_cast<float>(fullHeight - 1 - y) * invHeightMinusOne) - 1.0f;
+            
             for (int x = 0; x < fullWidth; x += m_vipresSamplingDensity) {
-                pixelsChecked++;
-                float normalizedDepth = depthBuffer[y * fullWidth + x];
-                
+                const float normalizedDepth = depthBuffer[yIndex + x];
                 if (normalizedDepth >= farPlaneThreshold) {
                     continue;
                 }
-                pixelsPassedFarPlaneCheck++;
                 
                 float z_ndc = 2.0f * normalizedDepth - 1.0f;
-                float z_eye = (2.0f * nearPlane * farPlane) / 
-                             (farPlane + nearPlane - z_ndc * (farPlane - nearPlane));
+                float z_eye = twoNearFar / (farPlusNear - z_ndc * (farPlane - nearPlane));
                 float linearDepth = std::abs(z_eye);
                 
-                if (m_vipresNoisyTofEnabled && m_vipresNoiseAmount > 0.0f) {
-                    unsigned int seed = static_cast<unsigned int>((x * 73856093) ^ (y * 19349663) ^ 
-                                                                   (static_cast<unsigned int>(m_currentFrame) * 83492791) ^
-                                                                   (static_cast<unsigned int>(linearDepth * 100.0f) * 19349669) ^
-                                                                   (m_frameProcessingCounter * 19349673));
-                    std::mt19937 rng(seed);
-                    std::uniform_real_distribution<float> dist(-m_vipresNoiseAmount, m_vipresNoiseAmount);
-                    float noise = dist(rng);
-                    linearDepth += noise;
-                    if (linearDepth < 0.0f) {
-                        linearDepth = 0.0f;
-                    }
+                if (useNoise) {
+                    rng.seed(static_cast<unsigned int>((x * 73856093) ^ (y * 19349663) ^ 
+                                                        (static_cast<unsigned int>(m_currentFrame) * 83492791) ^
+                                                        (static_cast<unsigned int>(linearDepth * 100.0f) * 19349669) ^
+                                                        (m_frameProcessingCounter * 19349673)));
+                    linearDepth += noiseDist(rng);
+                    if (linearDepth < 0.0f) linearDepth = 0.0f;
                 }
                 
-                float x_norm = 2.0f * (static_cast<float>(x) / (fullWidth - 1.0f)) - 1.0f;
-                float y_norm = 2.0f * (static_cast<float>(fullHeight - 1 - y) / (fullHeight - 1.0f)) - 1.0f;
+                if (linearDepth > m_vipresDepthLimit || std::isnan(linearDepth) || std::isinf(linearDepth)) {
+                    continue;
+                }
                 
-                const float fov_degrees = 45.0f;
-                float fov_rad = glm::radians(fov_degrees);
-                float tan_half_fov = std::tan(fov_rad / 2.0f);
+                float x_norm = 2.0f * (static_cast<float>(x) * invWidthMinusOne) - 1.0f;
+                float y_norm = -yNormBase;
                 
-                float min_dim = static_cast<float>(std::min(fullWidth, fullHeight));
-                float max_dim = static_cast<float>(std::max(fullWidth, fullHeight));
-                float aspect_ratio = max_dim / min_dim;
-                float tan_half_fov_large = tan_half_fov * aspect_ratio;
-                
-                float x_3d, y_3d, z_3d;
-                if (fullWidth <= fullHeight) {
+                float x_3d, y_3d;
+                if (widthLeHeight) {
                     x_3d = tan_half_fov * x_norm * linearDepth;
-                    y_3d = -tan_half_fov_large * y_norm * linearDepth;
+                    y_3d = tan_half_fov_large * y_norm * linearDepth;
                 } else {
                     x_3d = tan_half_fov_large * x_norm * linearDepth;
-                    y_3d = -tan_half_fov * y_norm * linearDepth;
+                    y_3d = tan_half_fov * y_norm * linearDepth;
                 }
-                z_3d = -linearDepth;
                 
-                glm::vec3 eyeSpacePos(x_3d, y_3d, z_3d);
-                glm::mat4 invView = glm::inverse(camView);
-                glm::vec4 worldPos4 = invView * glm::vec4(eyeSpacePos, 1.0f);
+                glm::vec4 worldPos4 = invView * glm::vec4(x_3d, y_3d, -linearDepth, 1.0f);
                 if (std::abs(worldPos4.w) > 0.0001f) {
                     worldPos4 /= worldPos4.w;
                 }
-                glm::vec3 worldPos = glm::vec3(worldPos4);
                 
-                float distance = linearDepth;
-                if (std::isnan(distance) || std::isinf(distance) || distance < 0.0f) {
-                    continue;
-                }
-                pixelsPassedDepthLimitCheck++;
-                
-                // Filter out large values that exceed depth limit threshold (ensure we can detect up to 10000 units)
-                if (distance > m_vipresDepthLimit) {
-                    continue;
-                }
-                
-                glm::vec3 color;
+                glm::vec3 color = defaultColor;
                 if (m_vipresComputeColor && !colorBuffer.empty()) {
-                    // Read color from framebuffer at the same pixel location
-                    int pixelIndex = (y * fullWidth + x) * 4;
+                    const int pixelIndex = (yIndex + x) * 4;
                     if (pixelIndex + 2 < static_cast<int>(colorBuffer.size())) {
-                        color.r = static_cast<float>(colorBuffer[pixelIndex]) / 255.0f;     // R
-                        color.g = static_cast<float>(colorBuffer[pixelIndex + 1]) / 255.0f; // G
-                        color.b = static_cast<float>(colorBuffer[pixelIndex + 2]) / 255.0f; // B
-                    } else {
-                        // Fallback: use white if color coding disabled, otherwise camera-based color
-                        if (m_tofColorCodeByCamera) {
-                            float hue = (camIdx * 0.618f);
-                            color = glm::vec3(
-                                std::sin(hue) * 0.5f + 0.5f,
-                                std::sin(hue + 2.094f) * 0.5f + 0.5f, // 120 degrees
-                                std::sin(hue + 4.189f) * 0.5f + 0.5f  // 240 degrees
-                            );
-                        } else {
-                            color = glm::vec3(1.0f, 1.0f, 1.0f);  // White
-                        }
-                    }
-                } else {
-                    // Color coding toggle: white by default, camera-based if enabled
-                    if (m_tofColorCodeByCamera) {
-                        // Use camera-based color when color coding is enabled
-                        float hue = (camIdx * 0.618f);
                         color = glm::vec3(
-                            std::sin(hue) * 0.5f + 0.5f,
-                            std::sin(hue + 2.094f) * 0.5f + 0.5f, // 120 degrees
-                            std::sin(hue + 4.189f) * 0.5f + 0.5f  // 240 degrees
+                            colorBuffer[pixelIndex] * inv255,
+                            colorBuffer[pixelIndex + 1] * inv255,
+                            colorBuffer[pixelIndex + 2] * inv255
                         );
-                    } else {
-                        // Default: white color
-                        color = glm::vec3(1.0f, 1.0f, 1.0f);
                     }
                 }
                 
-                // Write filtered TOF data to write buffer (all filtered points, regardless of gridding)
                 PointCloudPoint point;
-                point.position = worldPos;
+                point.position = glm::vec3(worldPos4);
                 point.color = color;
                 m_filteredTofData[m_filteredTofWriteBuffer].push_back(point);
-                cameraPointsSampled++;
-                totalPointsSampled++;
             }
         }
         
-        // Log points sampled for this camera
-        static int cameraLogCount = 0;
-        if (cameraLogCount++ < 3) {
-            LOG_INFO_FMT("CameraSystem", "UpdatePointCloud: Camera %zu - pixelsChecked=%zu, passedFarPlane=%zu, passedDepthLimit=%zu, sampled=%zu", 
-                        camIdx, pixelsChecked, pixelsPassedFarPlaneCheck, pixelsPassedDepthLimitCheck, cameraPointsSampled);
-        }
-    }
-    
-    if (anchorCamerasProcessed == 0) {
-        static int logCount = 0;
-        if (logCount++ < 3) {
-            LOG_WARNING("CameraSystem", "UpdatePointCloud: No anchor cameras found (all cameras are free cameras). Point cloud requires anchor cameras (canMove=false)");
-        }
-    } else if (!m_vipresGriddingEnabled) {
-        // Log total points when not using gridding
-        static int pointLogCount = 0;
-        if (pointLogCount++ < 3 && totalPointsSampled > 0) {
-            LOG_INFO_FMT("CameraSystem", "UpdatePointCloud: Total points sampled (no gridding): %zu", totalPointsSampled);
-        }
     }
     
     UpdateCamera();
@@ -2029,126 +1449,117 @@ void CameraSystemEditor::UpdatePointCloud() {
     std::swap(m_filteredTofReadBuffer, m_filteredTofWriteBuffer);
     
     // Process filtered TOF data from read buffer into final point cloud
-    const auto& filteredData = m_filteredTofData[m_filteredTofReadBuffer];
+    // Processing order: Get buffer data -> (noise already applied during sampling) -> TSDF (if enabled) -> Gridding -> Low-pass
+    // Note: TSDF and Low-pass are mutually exclusive
+    std::vector<PointCloudPoint> processedData = m_filteredTofData[m_filteredTofReadBuffer];
     
-    if (m_vipresGriddingEnabled) {
-        // Process filtered TOF data: integrate into grids/TSDF
-        for (const auto& point : filteredData) {
-            GridKey gridKey;
-            gridKey.x = static_cast<int>(std::round(point.position.x / m_vipresGridSize));
-            gridKey.y = static_cast<int>(std::round(point.position.y / m_vipresGridSize));
-            gridKey.z = static_cast<int>(std::round(point.position.z / m_vipresGridSize));
-            
-            if (m_tofTsdfEnabled) {
-                // Find camera position for TSDF integration (use first anchor camera as approximation)
-                glm::vec3 cameraPos(0.0f, 0.0f, 300.0f);
-                for (const auto& cam : m_cameras) {
-                    if (!cam.canMove) {
-                        cameraPos = cam.position;
-                        break;
-                    }
-                }
-                // Pass color to TSDF integration if color storage is enabled
-                IntegrateTSDF(gridKey, point.position, cameraPos, point.color);
-            } else {
-                // Regular gridding
-                if (m_vipresGridMode == GridMode::Average) {
-                    m_gridAccumulators[gridKey].positionSum += point.position;
-                    m_gridAccumulators[gridKey].colorSum += point.color;
-                    m_gridAccumulators[gridKey].count++;
-                } else {
-                    m_pointCloudGrid[gridKey] = point;
-                }
+    // Step 1: Apply TSDF if enabled (before gridding, mutually exclusive with low-pass)
+    if (m_tofTsdfEnabled) {
+        // Ensure low-pass is disabled (mutually exclusive)
+        if (m_tofLowPassEnabled) {
+            m_tofLowPassEnabled = false;
+            Algorithms::ClearLowPassFilterState(m_lowPassFilterState);
+            m_tofProcessing.ClearLowPassFilterState();
+        }
+        
+        // Find camera positions for TSDF integration
+        // Use first anchor camera as approximation for all points
+        glm::vec3 cameraPos(0.0f, 0.0f, 300.0f);
+        for (const auto& cam : m_cameras) {
+            if (!cam.canMove) {
+                cameraPos = cam.position;
+                break;
             }
         }
         
-        // If TSDF is enabled, extract point cloud from TSDF
-        if (m_tofTsdfEnabled) {
-            // Cleanup old/unobserved TSDF voxels before extraction to prevent unbounded growth
-            // Lower threshold (0.05) and apply decay to all voxels to prevent accumulation
-            m_tofProcessing.CleanupTSDF(0.05f, m_tofTsdfWeightDecay);  // Remove voxels with weight < 0.05, using same decay rate
-            ExtractTSDFPointCloud(m_pointCloud[m_pointCloudWriteBuffer]);
+        const float invGridSize = 1.0f / m_vipresGridSize;
+        for (const auto& point : processedData) {
+            GridKey gridKey;
+            gridKey.x = static_cast<int>(std::round(point.position.x * invGridSize));
+            gridKey.y = static_cast<int>(std::round(point.position.y * invGridSize));
+            gridKey.z = static_cast<int>(std::round(point.position.z * invGridSize));
+            IntegrateTSDF(gridKey, point.position, cameraPos, point.color);
+        }
+        
+        // Cleanup old/unobserved TSDF voxels before extraction to prevent unbounded growth
+        m_tofProcessing.CleanupTSDF(0.05f, m_tofTsdfWeightDecay);
+        
+        // Extract TSDF point cloud - this becomes the processed data
+        processedData.clear();
+        ExtractTSDFPointCloud(processedData);
+    }
+    
+    // Step 2: Apply gridding if enabled (using TOFProcessing)
+    std::vector<GridKey> pointGridKeys;  // Track grid keys for smart occupancy
+    
+    if (m_vipresGriddingEnabled) {
+        // ApplyGridding clears and populates the grid, so no need to clear here
+        m_tofProcessing.ApplyGridding(processedData, m_pointCloudGrid, m_vipresGridMode, m_vipresGridSize);
+        
+        // Step 3: Apply smart occupancy weights if enabled (ONLY on gridded data)
+        // Smart occupancy algorithms require gridding to be enabled
+        if (m_smartOccupancyEnabled && m_vipresGriddingEnabled) {
+            ApplySmartOccupancyWeights(m_pointCloudGrid);
         } else {
-            // Regular gridding with optional low-pass filter
-        if (m_vipresGridMode == GridMode::Average) {
-                m_pointCloud[m_pointCloudWriteBuffer].reserve(m_gridAccumulators.size());
-            for (const auto& pair : m_gridAccumulators) {
-                const GridAccumulator& acc = pair.second;
-                PointCloudPoint point;
-                    glm::vec3 avgPosition = acc.positionSum / static_cast<float>(acc.count);
-                    
-                    // Apply low-pass filter to gridded points AFTER gridding
-                    if (m_tofLowPassEnabled && m_tofProcessing.GetLowPassCoefficients().valid) {
-                        avgPosition = ApplyLowPassFilterPosition(pair.first, avgPosition);
-                    }
-                    
-                    point.position = avgPosition;
-                point.color = acc.colorSum / static_cast<float>(acc.count);
-                    m_pointCloud[m_pointCloudWriteBuffer].push_back(point);
-            }
-        } else {
-                m_pointCloud[m_pointCloudWriteBuffer].reserve(m_pointCloudGrid.size());
-            for (const auto& pair : m_pointCloudGrid) {
-                    PointCloudPoint point = pair.second;
-                    
-                // Apply low-pass filter to gridded points AFTER gridding
-                if (m_tofLowPassEnabled && m_tofProcessing.GetLowPassCoefficients().valid) {
-                    point.position = ApplyLowPassFilterPosition(pair.first, point.position);
-                }
-                    
-                    m_pointCloud[m_pointCloudWriteBuffer].push_back(point);
-                }
+            // Set default weights to 1.0 if smart occupancy is disabled or gridding is disabled
+            for (auto& pair : m_pointCloudGrid) {
+                pair.second.weight = 1.0f;
             }
         }
+        
+        // Step 4: Apply weight-based low-pass filter if enabled (AFTER occupancy filtering)
+        if (m_tofLowPassEnabled && m_vipresGriddingEnabled && !m_tofTsdfEnabled) {
+            // This ensures filter responds immediately to slider changes
+            Algorithms::ComputeLowPassFilterCoefficients(m_tofLowPassCutoff, m_tofSamplingRate, m_lowPassFilterCoefficients);
+            
+            // Apply weight-based low-pass filter to gridded points
+            Algorithms::ApplyWeightBasedLowPassFilter(m_pointCloudGrid, m_lowPassFilterCoefficients, m_lowPassFilterState);
+        }
+        
+        // Convert gridded data to point cloud (after weights and low-pass are applied)
+        processedData.clear();
+        pointGridKeys.clear();
+        processedData.reserve(m_pointCloudGrid.size());
+        pointGridKeys.reserve(m_pointCloudGrid.size());
+        
+        for (const auto& pair : m_pointCloudGrid) {
+            const GridKey& gridKey = pair.first;
+            PointCloudPoint point = pair.second;
+            // Weight is already set by smart occupancy or defaulted to 1.0
+            
+            pointGridKeys.push_back(gridKey);
+            processedData.push_back(point);
+        }
     } else {
-        // No gridding: copy filtered TOF data directly to point cloud
-        m_pointCloud[m_pointCloudWriteBuffer] = filteredData;
+        // If not gridding, initialize weights to 1.0
+        for (auto& point : processedData) {
+            point.weight = 1.0f;
+        }
     }
+    
+    // Final step: Copy processed data to point cloud buffer
+    m_pointCloud[m_pointCloudWriteBuffer] = processedData;
     
     // Swap point cloud buffers using std::swap: write buffer becomes read buffer for rendering
     // This ensures rendering always uses a complete, consistent frame
     std::swap(m_pointCloudReadBuffer, m_pointCloudWriteBuffer);
     
-    // Initialize buffers if needed (matches old implementation - do this even if point cloud might be empty)
     if (!m_pointCloudBuffersInitialized) {
         glGenVertexArrays(1, &m_pointCloudVAO);
         glGenBuffers(1, &m_pointCloudVBO);
         m_pointCloudBuffersInitialized = true;
-        LOG_INFO("CameraSystem", "Point cloud buffers initialized");
     }
     
-    size_t pointCount = m_pointCloud[m_pointCloudReadBuffer].size();
-    
-    LOG_INFO_FMT("CameraSystem", "UpdatePointCloud: After buffer swap - anchor cameras=%zu, points=%zu, depth limit=%.1f, gridding=%d", 
-                anchorCamerasProcessed, pointCount, m_vipresDepthLimit, m_vipresGriddingEnabled);
-    
-    if (pointCount == 0) {
-        // Match old implementation: return early if empty, but buffers are already initialized above
-        LOG_WARNING_FMT("CameraSystem", "UpdatePointCloud: Point cloud is empty (anchor cameras=%zu, objects=%zu, gridding=%d)", 
-                      anchorCamerasProcessed, m_objects.size(), m_vipresGriddingEnabled);
-        return;
-    }
-    
-    // Update buffer with point cloud data (matches old implementation)
-    glBindVertexArray(m_pointCloudVAO);
-    glBindBuffer(GL_ARRAY_BUFFER, m_pointCloudVBO);
-    glBufferData(GL_ARRAY_BUFFER, pointCount * sizeof(Engine::Editors::CameraSystem::PointCloudPoint), 
-                m_pointCloud[m_pointCloudReadBuffer].data(), GL_DYNAMIC_DRAW);
-    
-    glEnableVertexAttribArray(0);
-    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(Engine::Editors::CameraSystem::PointCloudPoint), 
-                         reinterpret_cast<void*>(offsetof(Engine::Editors::CameraSystem::PointCloudPoint, position)));
-    
-    glEnableVertexAttribArray(1);
-    glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, sizeof(Engine::Editors::CameraSystem::PointCloudPoint), 
-                         reinterpret_cast<void*>(offsetof(Engine::Editors::CameraSystem::PointCloudPoint, color)));
-    
-    glBindVertexArray(0);
+    // VBO update with filtering happens in RenderPointCloud() to ensure weight-based filtering is applied
     glBindBuffer(GL_ARRAY_BUFFER, 0);
 }
 
 // Compute second-order Butterworth low-pass filter coefficients
 void CameraSystemEditor::ComputeLowPassFilterCoefficients(float cutoffHz, float sampleRate) {
+    // Update new algorithms module coefficients
+    Algorithms::ComputeLowPassFilterCoefficients(cutoffHz, sampleRate, m_lowPassFilterCoefficients);
+    
+    // Also update old TOFProcessing coefficients for backward compatibility
     m_tofProcessing.ComputeLowPassFilterCoefficients(cutoffHz, sampleRate);
 }
 
@@ -2183,6 +1594,61 @@ void CameraSystemEditor::CleanupTSDF(float minWeightThreshold, float weightDecay
 // Second-order low-pass filter implementation for non-gridded points using position hash
 glm::vec3 CameraSystemEditor::ApplyLowPassFilterPosition(size_t positionHash, const glm::vec3& inputPos) {
     return m_tofProcessing.ApplyLowPassFilterPosition(positionHash, inputPos);
+}
+
+// Smart Occupancy: Apply weight algorithms directly to grid map
+// NOTE: All occupancy algorithms ONLY operate on gridded data - gridding must be enabled
+void CameraSystemEditor::ApplySmartOccupancyWeights(std::map<GridKey, PointCloudPoint>& pointCloudGrid) {
+    // Require gridding to be enabled - occupancy algorithms only work on gridded data
+    if (!m_vipresGriddingEnabled) {
+        return;  // Do not run occupancy algorithms if gridding is disabled
+    }
+    
+    if (pointCloudGrid.empty()) {
+        return;  // No data to process
+    }
+    
+    // Build parameters from member variables
+    GridBased::OccupancyParams params;
+    params.neighborConsistencyEnabled = m_smartOccupancyNeighborConsistency;
+    params.neighborRadius = m_smartOccupancyNeighborRadius;
+    params.residualThreshold = m_smartOccupancyResidualThreshold;
+    params.persistenceEnabled = m_smartOccupancyPersistence;
+    params.persistenceGamma = m_smartOccupancyPersistenceGamma;
+    params.varianceEnabled = m_smartOccupancyVariance;
+    params.varianceThreshold = m_smartOccupancyVarianceThreshold;
+    params.evictionEnabled = m_smartOccupancyEviction;
+    params.evictionUseStrategy2 = true;  // Always use Strategy 2
+    params.evictionDecay = m_smartOccupancyEvictionDecay;
+    params.evictionIncrement = m_smartOccupancyEvictionIncrement;
+    params.evictionMinStartValue = m_smartOccupancyEvictionMinStartValue;
+    params.evictionRemovalThreshold = 5;  // Hardcoded removal threshold
+    params.eviction2Enabled = m_smartOccupancyEviction2;
+    params.eviction2Radius = m_smartOccupancyEviction2Radius;
+    params.eviction2MinNeighbors = m_smartOccupancyEviction2MinNeighbors;
+    
+    // Call the occupancy algorithms module
+    GridBased::ApplyOccupancyAlgorithms(pointCloudGrid, params, m_occupancyState);
+}
+
+std::vector<float> CameraSystemEditor::GetPointCloudWeights() const {
+    std::vector<float> weights;
+    
+    // Prefer gridded data if available (more accurate since occupancy algorithms operate on grid)
+    if (!m_pointCloudGrid.empty()) {
+        weights.reserve(m_pointCloudGrid.size());
+        for (const auto& pair : m_pointCloudGrid) {
+            weights.push_back(pair.second.weight);
+        }
+    } else if (!m_pointCloud[m_pointCloudReadBuffer].empty()) {
+        // Fallback to point cloud buffer
+        weights.reserve(m_pointCloud[m_pointCloudReadBuffer].size());
+        for (const auto& point : m_pointCloud[m_pointCloudReadBuffer]) {
+            weights.push_back(point.weight);
+        }
+    }
+    
+    return weights;
 }
 
 void CameraSystemEditor::RenderPointCloud() {
@@ -2224,16 +1690,45 @@ void CameraSystemEditor::RenderPointCloud() {
     glEnable(GL_DEPTH_TEST);
     glPointSize(2.0f);  // Match old implementation point size
     
+    // Filter points by weight threshold before rendering
+    std::vector<PointCloudPoint> filteredPoints;
+    filteredPoints.reserve(m_pointCloud[m_pointCloudReadBuffer].size());
+    for (const auto& point : m_pointCloud[m_pointCloudReadBuffer]) {
+        if (point.weight >= m_weightThreshold) {
+            filteredPoints.push_back(point);
+        }
+    }
+    
+    size_t filteredCount = filteredPoints.size();
+    if (filteredCount == 0) {
+        glBindVertexArray(0);
+        glPointSize(1.0f);
+        return;
+    }
+    
+    // Update VBO with filtered points
     glBindVertexArray(m_pointCloudVAO);
+    glBindBuffer(GL_ARRAY_BUFFER, m_pointCloudVBO);
+    glBufferData(GL_ARRAY_BUFFER, filteredCount * sizeof(Engine::Editors::CameraSystem::PointCloudPoint), 
+                filteredPoints.data(), GL_DYNAMIC_DRAW);
+    
+    // Re-setup vertex attributes after buffer update
+    glEnableVertexAttribArray(0);
+    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(Engine::Editors::CameraSystem::PointCloudPoint), 
+                         reinterpret_cast<void*>(offsetof(Engine::Editors::CameraSystem::PointCloudPoint, position)));
+    
+    glEnableVertexAttribArray(1);
+    glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, sizeof(Engine::Editors::CameraSystem::PointCloudPoint), 
+                         reinterpret_cast<void*>(offsetof(Engine::Editors::CameraSystem::PointCloudPoint, color)));
     
     if (colorLoc != -1) {
         glUniform3f(colorLoc, 1.0f, 1.0f, 1.0f);
     }
     
-    size_t pointCount = m_pointCloud[m_pointCloudReadBuffer].size();
-    glDrawArrays(GL_POINTS, 0, static_cast<GLsizei>(pointCount));
+    glDrawArrays(GL_POINTS, 0, static_cast<GLsizei>(filteredCount));
     
     glBindVertexArray(0);
+    glBindBuffer(GL_ARRAY_BUFFER, 0);
     glPointSize(1.0f);
 }
 
@@ -2250,7 +1745,6 @@ void CameraSystemEditor::GenerateRemesh() {
     // Use the new Remeshing class for improved mesh generation
     Engine::Editors::CameraSystem::Remeshing remeshing;
     
-    // Select algorithm based on UI choice
     Engine::Editors::CameraSystem::Algorithm algorithm = Engine::Editors::CameraSystem::Algorithm::GriddedQuads;
     if (m_vipresRemeshAlgorithm == 1) {
         algorithm = Engine::Editors::CameraSystem::Algorithm::NearestNeighbor;
@@ -2258,6 +1752,12 @@ void CameraSystemEditor::GenerateRemesh() {
         algorithm = Engine::Editors::CameraSystem::Algorithm::Delaunay2D;
     } else if (m_vipresRemeshAlgorithm == 3) {
         algorithm = Engine::Editors::CameraSystem::Algorithm::PoissonLike;
+    } else if (m_vipresRemeshAlgorithm == 4) {
+        algorithm = Engine::Editors::CameraSystem::Algorithm::FCTM;
+    } else if (m_vipresRemeshAlgorithm == 5) {
+        algorithm = Engine::Editors::CameraSystem::Algorithm::GeodesicTree;
+    } else if (m_vipresRemeshAlgorithm == 6) {
+        algorithm = Engine::Editors::CameraSystem::Algorithm::GTree;
     }
     
     // Set up algorithm parameters
@@ -2270,6 +1770,11 @@ void CameraSystemEditor::GenerateRemesh() {
     params.poissonDepth = m_vipresRemeshPoissonDepth;
     params.poissonDensity = m_vipresRemeshPoissonDensity;
     params.poissonSmoothNormals = m_vipresRemeshPoissonSmoothNormals;
+    params.fctmSliceThickness = m_vipresRemeshFCTMSliceThickness;
+    params.geodesicKNeighbors = m_vipresRemeshGeodesicKNeighbors;
+    params.geodesicNumSeeds = m_vipresRemeshGeodesicNumSeeds;
+    params.geodesicInteriorBias = m_vipresRemeshGeodesicInteriorBias;
+    params.useWeights = m_smartOccupancyEnabled && m_vipresGriddingEnabled;  // Use weights if smart occupancy is enabled
     
     // Convert CameraSystemEditor types to Remeshing types
     // Use type aliases to avoid name collision with CameraSystemEditor's nested types
@@ -2282,6 +1787,7 @@ void CameraSystemEditor::GenerateRemesh() {
         RemeshPointCloudPoint converted;
         converted.position = point.position;
         converted.color = point.color;
+        converted.weight = point.weight;
         remeshPointCloud.push_back(converted);
     }
     
@@ -2295,6 +1801,7 @@ void CameraSystemEditor::GenerateRemesh() {
         RemeshPointCloudPoint point;
         point.position = pair.second.position;
         point.color = pair.second.color;
+        point.weight = pair.second.weight;
         remeshPointCloudGrid[key] = point;
     }
     
@@ -2306,6 +1813,11 @@ void CameraSystemEditor::GenerateRemesh() {
         algorithm,
         params
     );
+    
+    // Display initial cluster count for FCTM algorithm
+    if (algorithm == Engine::Editors::CameraSystem::Algorithm::FCTM && result.initialClusterCount > 0) {
+        LOG_INFO_FMT("CameraSystem", "FCTM: Computed %zu initial clusters from point cloud", result.initialClusterCount);
+    }
     
     // Convert Remeshing::MeshVertex to CameraSystemEditor::MeshVertex
     m_remeshVertices.clear();
@@ -2385,14 +1897,39 @@ void CameraSystemEditor::RenderRemesh() {
     if (modelLoc != -1) glUniformMatrix4fv(modelLoc, 1, GL_FALSE, glm::value_ptr(model));
     
     glEnable(GL_DEPTH_TEST);
-    glEnable(GL_CULL_FACE);
-    glCullFace(GL_BACK);
-    
     glBindVertexArray(m_remeshVAO);
-    glDrawElements(GL_TRIANGLES, static_cast<GLsizei>(m_remeshIndices.size()), GL_UNSIGNED_INT, 0);
-    glBindVertexArray(0);
     
-    glDisable(GL_CULL_FACE);
+    // Check rendering mode based on algorithm
+    if (m_vipresRemeshAlgorithm == 4 && m_remeshIndices.empty()) {
+        // FCTM: Render as larger red points
+        glDisable(GL_CULL_FACE);
+        glPointSize(8.0f);  // Larger point size for FCTM cluster centers
+        glDrawArrays(GL_POINTS, 0, static_cast<GLsizei>(m_remeshVertices.size()));
+        glPointSize(1.0f);
+    } else if (m_vipresRemeshAlgorithm == 5 || m_vipresRemeshAlgorithm == 6) {
+        // GeodesicTree/GTree: Render as large spheres (points) and connecting lines
+        glDisable(GL_CULL_FACE);
+        
+        // First render lines connecting consecutive points
+        if (!m_remeshIndices.empty()) {
+            glLineWidth(2.0f);
+            glDrawElements(GL_LINES, static_cast<GLsizei>(m_remeshIndices.size()), GL_UNSIGNED_INT, 0);
+            glLineWidth(1.0f);
+        }
+        
+        // Then render points as large spheres
+        glPointSize(12.0f);  // Large sphere size
+        glDrawArrays(GL_POINTS, 0, static_cast<GLsizei>(m_remeshVertices.size()));
+        glPointSize(1.0f);
+    } else {
+        // Other algorithms: Render as triangles
+        glEnable(GL_CULL_FACE);
+        glCullFace(GL_BACK);
+        glDrawElements(GL_TRIANGLES, static_cast<GLsizei>(m_remeshIndices.size()), GL_UNSIGNED_INT, 0);
+        glDisable(GL_CULL_FACE);
+    }
+    
+    glBindVertexArray(0);
 }
 
 void CameraSystemEditor::RenderGrid() {
@@ -2612,245 +2149,284 @@ void CameraSystemEditor::RenderUI() {
     m_ui.Render(*this);
 }
 
+// Run() helper function implementations
+void CameraSystemEditor::UpdateFPSAndSafeParameters(float deltaTime) {
+    m_fpsUpdateTime += deltaTime;
+    m_fpsFrameCount++;
+    m_framesSinceStartup++;
+    
+    if (m_fpsUpdateTime >= 0.5f) {
+        m_currentFPS = static_cast<float>(m_fpsFrameCount) / m_fpsUpdateTime;
+        m_fpsUpdateTime = 0.0f;
+        m_fpsFrameCount = 0;
+        
+        if (m_framesSinceStartup >= 60 && !m_hasSafeParameters && m_currentFPS >= 1.0f) {
+            SaveSafeParameters();
+            LOG_INFO("CameraSystem", "Initial safe parameters saved");
+        }
+        
+        if (m_justRestoredParameters && m_currentFPS >= 1.0f) {
+            m_justRestoredParameters = false;
+        }
+        
+        CheckAndRestoreIfNeeded();
+    }
+}
+
+bool CameraSystemEditor::CanAdvanceFrameWithCapture() const {
+    if (!m_captureEnabled || !m_configLoaded) {
+        return true;
+    }
+    
+    bool allCapturedForCurrentFrame = true;
+    
+    if (m_currentFrame == m_lastCapturedFrame && !m_capturedCamerasForFrame.empty()) {
+        for (size_t i = 0; i < m_cameras.size(); i++) {
+            if (i >= m_capturedCamerasForFrame.size() || !m_capturedCamerasForFrame[i]) {
+                allCapturedForCurrentFrame = false;
+                break;
+            }
+        }
+    } else if (m_currentFrame != m_lastCapturedFrame && m_lastCapturedFrame >= 0) {
+        allCapturedForCurrentFrame = false;
+    }
+    
+    return allCapturedForCurrentFrame;
+}
+
+void CameraSystemEditor::AdvanceFrame(float deltaTime, float maxFrameTime) {
+    static float frameAccumulator = 0.0f;
+    
+    if (!m_isPlaying || !m_configLoaded || m_totalFrames <= 0) {
+        if (!m_isPlaying) {
+            frameAccumulator = 0.0f;
+        }
+        return;
+    }
+    
+    if (m_captureEnabled) {
+        if (CanAdvanceFrameWithCapture()) {
+            m_currentFrame++;
+            if (m_currentFrame >= m_totalFrames) {
+                if (m_loopEnabled) {
+                    m_currentFrame = 0;
+                } else {
+                    m_currentFrame = m_totalFrames - 1;
+                    m_isPlaying = false;
+                }
+            }
+            frameAccumulator = 0.0f;
+        }
+    } else {
+        frameAccumulator += deltaTime;
+        const float frameInterval = maxFrameTime;
+        while (frameAccumulator >= frameInterval) {
+            frameAccumulator -= frameInterval;
+            m_currentFrame++;
+            if (m_currentFrame >= m_totalFrames) {
+                if (m_loopEnabled) {
+                    m_currentFrame = 0;
+                } else {
+                    m_currentFrame = m_totalFrames - 1;
+                    m_isPlaying = false;
+                }
+            }
+        }
+    }
+}
+
+void CameraSystemEditor::ProcessPendingCameraSwitch() {
+    if (m_pendingCameraSwitch != SIZE_MAX) {
+        size_t switchTo = m_pendingCameraSwitch;
+        m_pendingCameraSwitch = SIZE_MAX;
+        if (switchTo < m_cameras.size()) {
+            SwitchCamera(switchTo);
+        }
+    }
+}
+
+void CameraSystemEditor::HandleInputSafely() {
+    try {
+        HandleMouseInput();
+    } catch (const std::exception& e) {
+        LOG_ERROR_FMT("CameraSystem", "Exception in HandleMouseInput: %s", e.what());
+    } catch (...) {
+        LOG_ERROR("CameraSystem", "Unknown exception in HandleMouseInput");
+    }
+    
+    try {
+        HandleKeyboardInput();
+    } catch (const std::exception& e) {
+        LOG_ERROR_FMT("CameraSystem", "Exception in HandleKeyboardInput: %s", e.what());
+    } catch (...) {
+        LOG_ERROR("CameraSystem", "Unknown exception in HandleKeyboardInput");
+    }
+}
+
+void CameraSystemEditor::UpdateSceneSafely(float updateInterval) {
+    if (m_configLoaded && m_totalFrames > 0) {
+        UpdateAnimatedCameras();
+        UpdateCamera();
+    }
+    
+    ProcessPendingCameraSwitch();
+    HandleInputSafely();
+    
+    try {
+        UpdateFreeCamera(updateInterval);
+    } catch (const std::exception& e) {
+        LOG_ERROR_FMT("CameraSystem", "Exception in UpdateFreeCamera: %s", e.what());
+    } catch (...) {
+        LOG_ERROR("CameraSystem", "Unknown exception in UpdateFreeCamera");
+    }
+    
+    if (m_configLoaded) {
+        if (m_isPlaying) {
+            m_sceneTime += updateInterval;
+            if (m_sceneTime > m_totalDuration) {
+                m_sceneTime = 0.0f;
+            }
+        }
+        UpdatePathFollowing(updateInterval);
+    }
+    
+    UpdateAnimations(updateInterval);
+    UpdateCamera();
+}
+
+void CameraSystemEditor::RenderFrameSafely() {
+    if (m_nuklearUI.IsInitialized()) {
+        try {
+            m_nuklearUI.BeginFrame();
+        } catch (const std::exception& e) {
+            LOG_ERROR_FMT("CameraSystem", "Exception in Nuklear BeginFrame: %s", e.what());
+        } catch (...) {
+            LOG_ERROR("CameraSystem", "Unknown exception in Nuklear BeginFrame");
+        }
+    }
+    
+    if (m_tofDataEnabled) {
+        try {
+            UpdatePointCloud();
+        } catch (const std::exception& e) {
+            LOG_ERROR_FMT("CameraSystem", "Exception in UpdatePointCloud: %s", e.what());
+        } catch (...) {
+            LOG_ERROR("CameraSystem", "Unknown exception in UpdatePointCloud");
+        }
+    }
+    
+    if (m_vipresEnabled && m_vipresRemeshEnabled && m_vipresAutoRecomputeMesh) {
+        try {
+            auto startTime = std::chrono::high_resolution_clock::now();
+            GenerateRemesh();
+            auto endTime = std::chrono::high_resolution_clock::now();
+            auto duration = std::chrono::duration_cast<std::chrono::microseconds>(endTime - startTime);
+            float meshTimeSeconds = duration.count() / 1000000.0f;
+            
+            const float MAX_MESH_TIME = 1.0f;
+            if (meshTimeSeconds > MAX_MESH_TIME) {
+                m_vipresAutoRecomputeMesh = false;
+                LOG_WARNING_FMT("CameraSystem", "Mesh generation took %.3f seconds (exceeds limit of %.1f second), auto-recompute disabled", 
+                               meshTimeSeconds, MAX_MESH_TIME);
+            }
+        } catch (const std::exception& e) {
+            LOG_ERROR_FMT("CameraSystem", "Exception in GenerateRemesh: %s", e.what());
+            m_vipresAutoRecomputeMesh = false;
+        } catch (...) {
+            LOG_ERROR("CameraSystem", "Unknown exception in GenerateRemesh");
+            m_vipresAutoRecomputeMesh = false;
+        }
+    }
+    
+    try {
+        RenderScene();
+    } catch (const std::exception& e) {
+        LOG_ERROR_FMT("CameraSystem", "Exception in RenderScene: %s", e.what());
+    } catch (...) {
+        LOG_ERROR("CameraSystem", "Unknown exception in RenderScene");
+    }
+    
+    if (m_nuklearUI.IsInitialized()) {
+        RenderUI();
+    }
+    
+    if (m_captureEnabled && m_configLoaded) {
+        CaptureScreenshots();
+    } else if (m_captureEnabled) {
+        static int warnCount = 0;
+        if (warnCount++ < 3) {
+            LOG_WARNING_FMT("CameraSystem", "Capture enabled but config not loaded (frame %d)", m_currentFrame);
+        }
+    }
+}
+
+void CameraSystemEditor::SleepForFrameTiming(float maxFrameTime, const std::chrono::high_resolution_clock::time_point& lastFrameTime) {
+    if (!m_captureEnabled) {
+        auto frameEndTime = std::chrono::high_resolution_clock::now();
+        auto elapsed = std::chrono::duration<float>(frameEndTime - lastFrameTime).count();
+        float sleepTime = maxFrameTime - elapsed;
+        if (sleepTime > 0.0f && sleepTime < maxFrameTime * 2.0f) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(
+                static_cast<int>(sleepTime * 1000.0f)));
+        }
+    }
+}
+
 void CameraSystemEditor::Run() {
     if (!m_window) {
         LOG_ERROR("CameraSystem", "Window is null, cannot run editor");
         return;
     }
     
-    // Flexible frame timing - allow up to 60fps, but wait for processing to finish
-    // When capture is enabled, frame advancement is based on capture completion, not fixed timing
-    const float maxFrameTime = 1.0f / 60.0f; // Maximum 60 FPS (minimum frame time)
+    const float maxFrameTime = 1.0f / 60.0f; // Maximum 60 FPS
     auto lastFrameTime = std::chrono::high_resolution_clock::now();
     float accumulator = 0.0f;
-    
-    // Frame increment accumulator (for non-capture mode timing)
-    static float frameAccumulator = 0.0f;
     
     while (!m_window->getShouldClose()) {
         auto currentTime = std::chrono::high_resolution_clock::now();
         float deltaTime = std::chrono::duration<float>(currentTime - lastFrameTime).count();
         lastFrameTime = currentTime;
         
-        // Cap delta time to prevent large jumps (but use actual deltaTime for FPS calculation accuracy)
         float cappedDeltaTime = std::min(deltaTime, 0.1f);
         
-        // Update FPS tracking - use actual deltaTime (not capped) for accurate FPS measurement
-        m_fpsUpdateTime += deltaTime;  // Use actual deltaTime for accurate FPS measurement
-        m_fpsFrameCount++;
-        m_framesSinceStartup++;
+        // Update FPS and safe parameters
+        UpdateFPSAndSafeParameters(deltaTime);
         
-        if (m_fpsUpdateTime >= 0.5f) { // Update FPS every 0.5 seconds
-            // Calculate accurate FPS: frames per second = frame count / actual time elapsed
-            m_currentFPS = static_cast<float>(m_fpsFrameCount) / m_fpsUpdateTime;
-            m_fpsUpdateTime = 0.0f;
-            m_fpsFrameCount = 0;
-            
-            // Save initial safe parameters after 60 frames (1 second at 60fps) if FPS is good
-            if (m_framesSinceStartup >= 60 && !m_hasSafeParameters && m_currentFPS >= 1.0f) {
-                SaveSafeParameters();
-                LOG_INFO("CameraSystem", "Initial safe parameters saved");
-            }
-            
-            // Reset restore flag after FPS update cycle (allows saving again)
-            if (m_justRestoredParameters && m_currentFPS >= 1.0f) {
-                m_justRestoredParameters = false;
-            }
-            
-            // Check if we need to restore safe parameters due to low FPS
-            CheckAndRestoreIfNeeded();
-        }
-        
-        // Frame advancement logic:
-        // - If capture is enabled: Advance only when all cameras have captured the current frame
-        // - If capture is disabled: Use flexible timing (up to 60fps, but allow slower if needed)
-        bool canAdvanceFrame = true;
-        if (m_captureEnabled && m_configLoaded) {
-            // When capture is enabled, frame advancement is based on capture completion
-            // Check if all cameras have been captured for current frame
-            bool allCapturedForCurrentFrame = true;
-            
-            // Only check if we're actively capturing this frame (same frame as last captured)
-            if (m_currentFrame == m_lastCapturedFrame && !m_capturedCamerasForFrame.empty()) {
-                // Check if all cameras have been captured for this frame
-                for (size_t i = 0; i < m_cameras.size(); i++) {
-                    if (i >= m_capturedCamerasForFrame.size() || !m_capturedCamerasForFrame[i]) {
-                        allCapturedForCurrentFrame = false;
-                        break;
-                    }
-                }
-            } else if (m_currentFrame != m_lastCapturedFrame && m_lastCapturedFrame >= 0) {
-                // Frame has advanced but we haven't started capturing the new frame yet
-                // This means CaptureScreenshots() hasn't been called for the new frame
-                // Don't advance further until capture starts
-                allCapturedForCurrentFrame = false;
-            }
-            // If m_lastCapturedFrame < 0, we haven't started capturing yet, so allow first frame
-            
-            canAdvanceFrame = allCapturedForCurrentFrame;
-            
-            // When capture is enabled, advance frame immediately when all cameras are captured
-            // Don't use time-based accumulation - wait for completion
-            if (m_isPlaying && m_configLoaded && m_totalFrames > 0 && canAdvanceFrame) {
-                m_currentFrame++;
-                if (m_currentFrame >= m_totalFrames) {
-                    if (m_loopEnabled) {
-                        m_currentFrame = 0;  // Loop back to start
-                    } else {
-                        m_currentFrame = m_totalFrames - 1;  // Stay at last frame
-                        m_isPlaying = false;  // Auto-pause when reaching the end
-                    }
-                }
-                // Reset accumulator since we're not using time-based advancement
-                frameAccumulator = 0.0f;
-            }
-        } else {
-            // When capture is disabled, use flexible timing (up to 60fps, but allow slower)
-            if (m_isPlaying && m_configLoaded && m_totalFrames > 0) {
-                frameAccumulator += deltaTime;
-                
-                // Advance one frame every 1/60 second (60fps max), but allow slower if processing takes longer
-                const float frameInterval = maxFrameTime;
-                while (frameAccumulator >= frameInterval) {
-                    frameAccumulator -= frameInterval;
-                    m_currentFrame++;
-                    if (m_currentFrame >= m_totalFrames) {
-                        if (m_loopEnabled) {
-                            m_currentFrame = 0;  // Loop back to start
-                        } else {
-                            m_currentFrame = m_totalFrames - 1;  // Stay at last frame
-                            m_isPlaying = false;  // Auto-pause when reaching the end
-                        }
-                    }
-                }
-            } else {
-                // Reset accumulator when not playing
-                if (!m_isPlaying) {
-                    frameAccumulator = 0.0f;
-                }
-            }
-        }
+        // Advance frame (capture-aware)
+        AdvanceFrame(deltaTime, maxFrameTime);
         
         accumulator += deltaTime;
         
-        // Process events
+        // Process window events
         try {
             m_window->pollEvents();
         } catch (const std::exception& e) {
             LOG_ERROR_FMT("CameraSystem", "Exception in pollEvents: %s", e.what());
-            break; // Exit loop on poll events failure
+            break;
         } catch (...) {
             LOG_ERROR("CameraSystem", "Unknown exception in pollEvents");
-            break; // Exit loop on poll events failure
+            break;
         }
         
-        // Flexible update timing - allow up to 60fps, but process as fast as possible
-        // Process multiple updates if we've accumulated enough time
-        // Limit to max 5 updates per render to prevent freezing
-        // Also cap accumulator to prevent unbounded growth
-        const float updateInterval = maxFrameTime; // Use same max frame time for updates
+        // Fixed timestep update loop
+        const float updateInterval = maxFrameTime;
         if (accumulator > updateInterval * 10.0f) {
-            // If accumulator is too large (more than 10 frames), reset it to prevent freezing
-            accumulator = updateInterval;
+            accumulator = updateInterval; // Prevent unbounded growth
         }
         
-        // Only run update loop if we have accumulated enough time
-        // This allows up to 60fps updates, but will process slower if needed
         if (accumulator >= updateInterval) {
             int maxUpdates = 5;
             int updateCount = 0;
             while (accumulator >= updateInterval && updateCount < maxUpdates) {
                 accumulator -= updateInterval;
                 updateCount++;
-                
-                // Update cameras every game tick (whether playing or not, so UI shows current frame)
-                if (m_configLoaded && m_totalFrames > 0) {
-                    UpdateAnimatedCameras();
-                    UpdateCamera();
-                }
-                
-                // Process pending camera switch (deferred from UI)
-                if (m_pendingCameraSwitch != SIZE_MAX) {
-                    size_t switchTo = m_pendingCameraSwitch;
-                    m_pendingCameraSwitch = SIZE_MAX;  // Clear pending switch
-                    if (switchTo < m_cameras.size()) {
-                        SwitchCamera(switchTo);
-                    }
-                }
-                
-                // Handle input BEFORE Nuklear processes it
-                try {
-                    HandleMouseInput();
-                } catch (const std::exception& e) {
-                    LOG_ERROR_FMT("CameraSystem", "Exception in HandleMouseInput: %s", e.what());
-                } catch (...) {
-                    LOG_ERROR("CameraSystem", "Unknown exception in HandleMouseInput");
-                }
-                
-                try {
-                    HandleKeyboardInput();
-                } catch (const std::exception& e) {
-                    LOG_ERROR_FMT("CameraSystem", "Exception in HandleKeyboardInput: %s", e.what());
-                } catch (...) {
-                    LOG_ERROR("CameraSystem", "Unknown exception in HandleKeyboardInput");
-                }
-                
-                // Update free camera movement BEFORE Nuklear processes input
-                try {
-                    UpdateFreeCamera(updateInterval);
-                } catch (const std::exception& e) {
-                    LOG_ERROR_FMT("CameraSystem", "Exception in UpdateFreeCamera: %s", e.what());
-                } catch (...) {
-                    LOG_ERROR("CameraSystem", "Unknown exception in UpdateFreeCamera");
-                }
-                
-                // Update scene time if config is loaded
-                if (m_configLoaded) {
-                    if (m_isPlaying) {
-                        m_sceneTime += updateInterval;
-                        if (m_sceneTime > m_totalDuration) {
-                            m_sceneTime = 0.0f; // Loop
-                        }
-                    }
-                    
-                    // CRITICAL: Always update object positions based on current frame
-                    // This ensures objects are positioned correctly even when paused
-                    UpdatePathFollowing(updateInterval);
-                }
-                
-                UpdateAnimations(updateInterval);
-                UpdateCamera();
+                UpdateSceneSafely(updateInterval);
             }
         } else {
-            // Even if not updating, still handle input and camera switch
-            // Process pending camera switch (deferred from UI)
-            if (m_pendingCameraSwitch != SIZE_MAX) {
-                size_t switchTo = m_pendingCameraSwitch;
-                m_pendingCameraSwitch = SIZE_MAX;  // Clear pending switch
-                if (switchTo < m_cameras.size()) {
-                    SwitchCamera(switchTo);
-                }
-            }
-            
             // Handle input even when not updating (for responsiveness)
-            try {
-                HandleMouseInput();
-            } catch (const std::exception& e) {
-                LOG_ERROR_FMT("CameraSystem", "Exception in HandleMouseInput: %s", e.what());
-            } catch (...) {
-                LOG_ERROR("CameraSystem", "Unknown exception in HandleMouseInput");
-            }
+            ProcessPendingCameraSwitch();
+            HandleInputSafely();
             
-            try {
-                HandleKeyboardInput();
-            } catch (const std::exception& e) {
-                LOG_ERROR_FMT("CameraSystem", "Exception in HandleKeyboardInput: %s", e.what());
-            } catch (...) {
-                LOG_ERROR("CameraSystem", "Unknown exception in HandleKeyboardInput");
-            }
-            
-            // Update free camera movement even when paused (for manual control)
-            // Use cappedDeltaTime to prevent large jumps in camera movement
             try {
                 UpdateFreeCamera(cappedDeltaTime);
             } catch (const std::exception& e) {
@@ -2860,116 +2436,31 @@ void CameraSystemEditor::Run() {
             }
         }
         
-        // Process Nuklear input (outside the update loop, once per render)
-        // Since we initialized with NK_GLFW3_DEFAULT (no callbacks), BeginFrame
-        // will handle window size updates but won't capture keyboard input
-        // This means WASD keys won't interfere with Nuklear
-        if (m_nuklearUI.IsInitialized()) {
-            try {
-                m_nuklearUI.BeginFrame();
-            } catch (const std::exception& e) {
-                LOG_ERROR_FMT("CameraSystem", "Exception in Nuklear BeginFrame: %s", e.what());
-            } catch (...) {
-                LOG_ERROR("CameraSystem", "Unknown exception in Nuklear BeginFrame");
-            }
-        }
+        // Render frame
+        RenderFrameSafely();
         
-        // Update point cloud every frame if TOF is enabled (to capture depth data)
-        if (m_tofDataEnabled) {
-            try {
-                UpdatePointCloud();
-            } catch (const std::exception& e) {
-                LOG_ERROR_FMT("CameraSystem", "Exception in UpdatePointCloud: %s", e.what());
-            } catch (...) {
-                LOG_ERROR("CameraSystem", "Unknown exception in UpdatePointCloud");
-            }
-        }
-        
-        // Auto-recompute mesh every frame if enabled
-        if (m_vipresEnabled && m_vipresRemeshEnabled && m_vipresAutoRecomputeMesh) {
-            try {
-                auto startTime = std::chrono::high_resolution_clock::now();
-                GenerateRemesh();
-                auto endTime = std::chrono::high_resolution_clock::now();
-                auto duration = std::chrono::duration_cast<std::chrono::microseconds>(endTime - startTime);
-                float meshTimeSeconds = duration.count() / 1000000.0f;
-                
-                // If mesh generation takes longer than 1 second, disable auto-recompute
-                const float MAX_MESH_TIME = 1.0f;
-                if (meshTimeSeconds > MAX_MESH_TIME) {
-                    m_vipresAutoRecomputeMesh = false;
-                    LOG_WARNING_FMT("CameraSystem", "Mesh generation took %.3f seconds (exceeds limit of %.1f second), auto-recompute disabled", 
-                                   meshTimeSeconds, MAX_MESH_TIME);
-                }
-            } catch (const std::exception& e) {
-                LOG_ERROR_FMT("CameraSystem", "Exception in GenerateRemesh: %s", e.what());
-                m_vipresAutoRecomputeMesh = false; // Disable on error
-            } catch (...) {
-                LOG_ERROR("CameraSystem", "Unknown exception in GenerateRemesh");
-                m_vipresAutoRecomputeMesh = false; // Disable on error
-            }
-        }
-        
-        try {
-            RenderScene();
-        } catch (const std::exception& e) {
-            LOG_ERROR_FMT("CameraSystem", "Exception in RenderScene: %s", e.what());
-        } catch (...) {
-            LOG_ERROR("CameraSystem", "Unknown exception in RenderScene");
-        }
-        
-        // Render UI (camera controls) - must be last so it renders on top
-        // In the old version, nk_glfw3_render was called INSIDE RenderUI() at the end
-        // So RenderUI() now handles the rendering internally
-        if (m_nuklearUI.IsInitialized()) {
-            RenderUI();
-        }
-        
-        // Capture screenshots every frame if enabled (after normal rendering)
-        if (m_captureEnabled && m_configLoaded) {
-            CaptureScreenshots();
-        } else if (m_captureEnabled) {
-            static int warnCount = 0;
-            if (warnCount++ < 3) {
-                LOG_WARNING_FMT("CameraSystem", "Capture enabled but config not loaded (frame %d)", m_currentFrame);
-            }
-        }
-        
+        // Swap buffers
         try {
             m_window->swapBuffers();
         } catch (const std::exception& e) {
             LOG_ERROR_FMT("CameraSystem", "Exception in swapBuffers: %s", e.what());
-            break; // Exit loop on swap buffer failure
+            break;
         } catch (...) {
             LOG_ERROR("CameraSystem", "Unknown exception in swapBuffers");
-            break; // Exit loop on swap buffer failure
+            break;
         }
         
-        // Check if window should close after each frame
         if (m_window->getShouldClose()) {
             break;
         }
         
-        // Sleep to maintain up to 60fps target (but don't let it block processing)
-        // Only sleep if we're running faster than 60fps and capture is not enabled
-        // When capture is enabled, don't sleep - let it process as fast as possible
-        if (!m_captureEnabled) {
-            auto frameEndTime = std::chrono::high_resolution_clock::now();
-            auto elapsed = std::chrono::duration<float>(frameEndTime - lastFrameTime).count();
-            float sleepTime = maxFrameTime - elapsed;
-            if (sleepTime > 0.0f && sleepTime < maxFrameTime * 2.0f) {  // Only sleep if reasonable (up to 2 frames)
-                std::this_thread::sleep_for(std::chrono::milliseconds(
-                    static_cast<int>(sleepTime * 1000.0f)));
-            }
-        }
-        
-        // Note: lastFrameTime is updated at the start of the loop, not here
-        // This ensures deltaTime is calculated correctly even if rendering blocks
+        // Sleep for frame timing
+        SleepForFrameTiming(maxFrameTime, lastFrameTime);
     }
 }
 
 void CameraSystemEditor::LoadAlgorithmParams(int algorithmIndex) {
-    if (algorithmIndex < 0 || algorithmIndex >= 4) {
+    if (algorithmIndex < 0 || algorithmIndex >= 6) {
         return;
     }
     
@@ -2982,10 +2473,14 @@ void CameraSystemEditor::LoadAlgorithmParams(int algorithmIndex) {
     m_vipresRemeshPoissonDepth = params.poissonDepth;
     m_vipresRemeshPoissonDensity = params.poissonDensity;
     m_vipresRemeshPoissonSmoothNormals = params.poissonSmoothNormals;
+    m_vipresRemeshFCTMSliceThickness = params.fctmSliceThickness;
+    m_vipresRemeshGeodesicKNeighbors = params.geodesicKNeighbors;
+    m_vipresRemeshGeodesicNumSeeds = params.geodesicNumSeeds;
+    m_vipresRemeshGeodesicInteriorBias = params.geodesicInteriorBias;
 }
 
 void CameraSystemEditor::SaveAlgorithmParams(int algorithmIndex) {
-    if (algorithmIndex < 0 || algorithmIndex >= 4) {
+    if (algorithmIndex < 0 || algorithmIndex >= 6) {
         return;
     }
     
@@ -2998,6 +2493,10 @@ void CameraSystemEditor::SaveAlgorithmParams(int algorithmIndex) {
     params.poissonDepth = m_vipresRemeshPoissonDepth;
     params.poissonDensity = m_vipresRemeshPoissonDensity;
     params.poissonSmoothNormals = m_vipresRemeshPoissonSmoothNormals;
+    params.fctmSliceThickness = m_vipresRemeshFCTMSliceThickness;
+    params.geodesicKNeighbors = m_vipresRemeshGeodesicKNeighbors;
+    params.geodesicNumSeeds = m_vipresRemeshGeodesicNumSeeds;
+    params.geodesicInteriorBias = m_vipresRemeshGeodesicInteriorBias;
 }
 
 void CameraSystemEditor::ApplyRainbowColorsToObjects() {
@@ -3035,6 +2534,10 @@ void CameraSystemEditor::SaveSafeParameters() {
     m_safeParameters.vipresRemeshPoissonDepth = m_vipresRemeshPoissonDepth;
     m_safeParameters.vipresRemeshPoissonDensity = m_vipresRemeshPoissonDensity;
     m_safeParameters.vipresRemeshPoissonSmoothNormals = m_vipresRemeshPoissonSmoothNormals;
+    m_safeParameters.vipresRemeshFCTMSliceThickness = m_vipresRemeshFCTMSliceThickness;
+    m_safeParameters.vipresRemeshGeodesicKNeighbors = m_vipresRemeshGeodesicKNeighbors;
+    m_safeParameters.vipresRemeshGeodesicNumSeeds = m_vipresRemeshGeodesicNumSeeds;
+    m_safeParameters.vipresRemeshGeodesicInteriorBias = m_vipresRemeshGeodesicInteriorBias;
     m_safeParameters.vipresFreeCameraObjectEnabled = m_vipresFreeCameraObjectEnabled;
     m_safeParameters.vipresNoisyTofEnabled = m_vipresNoisyTofEnabled;
     m_safeParameters.vipresNoiseAmount = m_vipresNoiseAmount;
@@ -3051,7 +2554,7 @@ void CameraSystemEditor::SaveSafeParameters() {
     m_safeParameters.tofTsdfWeightDecay = m_tofTsdfWeightDecay;
     
     // Save all algorithm parameters
-    for (int i = 0; i < 4; i++) {
+    for (int i = 0; i < 7; i++) {
         m_safeParameters.remeshParams[i] = m_remeshParams[i];
     }
     
@@ -3085,6 +2588,10 @@ void CameraSystemEditor::RestoreSafeParameters() {
     m_vipresRemeshPoissonDepth = m_safeParameters.vipresRemeshPoissonDepth;
     m_vipresRemeshPoissonDensity = m_safeParameters.vipresRemeshPoissonDensity;
     m_vipresRemeshPoissonSmoothNormals = m_safeParameters.vipresRemeshPoissonSmoothNormals;
+    m_vipresRemeshFCTMSliceThickness = m_safeParameters.vipresRemeshFCTMSliceThickness;
+    m_vipresRemeshGeodesicKNeighbors = m_safeParameters.vipresRemeshGeodesicKNeighbors;
+    m_vipresRemeshGeodesicNumSeeds = m_safeParameters.vipresRemeshGeodesicNumSeeds;
+    m_vipresRemeshGeodesicInteriorBias = m_safeParameters.vipresRemeshGeodesicInteriorBias;
     m_vipresFreeCameraObjectEnabled = m_safeParameters.vipresFreeCameraObjectEnabled;
     m_vipresNoisyTofEnabled = m_safeParameters.vipresNoisyTofEnabled;
     m_vipresNoiseAmount = m_safeParameters.vipresNoiseAmount;
@@ -3100,13 +2607,14 @@ void CameraSystemEditor::RestoreSafeParameters() {
     m_tofTsdfTruncationDistance = m_safeParameters.tofTsdfTruncationDistance;
     m_tofTsdfWeightDecay = m_safeParameters.tofTsdfWeightDecay;
     // Recompute filter coefficients after restoring parameters
+    Algorithms::ComputeLowPassFilterCoefficients(m_tofLowPassCutoff, m_tofSamplingRate, m_lowPassFilterCoefficients);
     m_tofProcessing.ComputeLowPassFilterCoefficients(m_tofLowPassCutoff, m_tofSamplingRate);
     // Clear filter state and TSDF when restoring
+    Algorithms::ClearLowPassFilterState(m_lowPassFilterState);
     m_tofProcessing.ClearLowPassFilterState();
     ClearTSDF();
     
-    // Restore all algorithm parameters
-    for (int i = 0; i < 4; i++) {
+    for (int i = 0; i < 7; i++) {
         m_remeshParams[i] = m_safeParameters.remeshParams[i];
     }
     

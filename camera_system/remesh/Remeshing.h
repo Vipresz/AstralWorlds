@@ -33,9 +33,11 @@ struct GridKey {
 struct PointCloudPoint {
     glm::vec3 position;
     glm::vec3 color;
+    float weight;  // Weight for mesh algorithms (0.0-1.0, default 1.0)
     
-    PointCloudPoint() : position(0.0f), color(1.0f) {}
-    PointCloudPoint(const glm::vec3& pos, const glm::vec3& col) : position(pos), color(col) {}
+    PointCloudPoint() : position(0.0f), color(1.0f), weight(1.0f) {}
+    PointCloudPoint(const glm::vec3& pos, const glm::vec3& col) : position(pos), color(col), weight(1.0f) {}
+    PointCloudPoint(const glm::vec3& pos, const glm::vec3& col, float w) : position(pos), color(col), weight(w) {}
 };
 
 // 2D point for Delaunay triangulation
@@ -61,7 +63,10 @@ enum class Algorithm {
     GriddedQuads,
     NearestNeighbor,
     Delaunay2D,
-    PoissonLike
+    PoissonLike,
+    FCTM,
+    GeodesicTree,
+    GTree
 };
 
 // Algorithm parameters
@@ -74,6 +79,11 @@ struct AlgorithmParameters {
     int poissonDepth;
     float poissonDensity;
     bool poissonSmoothNormals;
+    float fctmSliceThickness;  // Thickness of slice near each face (steps are auto-calculated from this)
+    int geodesicKNeighbors;     // Number of neighbors for kNN graph construction
+    int geodesicNumSeeds;       // Number of seed points (0 = auto-determine using k-means)
+    float geodesicInteriorBias; // Bias weight for staying inside point cloud (0.0-1.0, higher = more interior)
+    bool useWeights;            // Whether to use point weights in mesh generation
     
     AlgorithmParameters()
         : maxDistance(1.0f)
@@ -84,6 +94,11 @@ struct AlgorithmParameters {
         , poissonDepth(8)
         , poissonDensity(1.0f)
         , poissonSmoothNormals(true)
+        , fctmSliceThickness(0.1f)
+        , geodesicKNeighbors(10)
+        , geodesicNumSeeds(0)
+        , geodesicInteriorBias(0.5f)
+        , useWeights(false)
     {}
 };
 
@@ -93,8 +108,9 @@ struct RemeshResult {
     std::vector<unsigned int> indices;
     size_t triangleCount;
     size_t vertexCount;
+    size_t initialClusterCount;  // For FCTM: number of initial clusters computed
     
-    RemeshResult() : triangleCount(0), vertexCount(0) {}
+    RemeshResult() : triangleCount(0), vertexCount(0), initialClusterCount(0) {}
 };
 
 // Remeshing class
@@ -132,6 +148,42 @@ private:
         const std::vector<PointCloudPoint>& pointCloud,
         const AlgorithmParameters& params
     );
+    
+    RemeshResult GenerateFCTM(
+        const std::vector<PointCloudPoint>& pointCloud,
+        const AlgorithmParameters& params
+    );
+    
+    RemeshResult GenerateGeodesicTree(
+        const std::vector<PointCloudPoint>& pointCloud,
+        const AlgorithmParameters& params
+    );
+    
+    RemeshResult GenerateGTree(
+        const std::vector<PointCloudPoint>& pointCloud,
+        const AlgorithmParameters& params
+    );
+    
+    // Helper function: Tube-following algorithm
+    std::vector<glm::vec3> FollowTube(
+        const glm::vec3& origin,
+        const std::vector<glm::vec3>& clusterPoints,
+        float stepSize,
+        float tubeRadius,
+        int maxNodes
+    );
+    
+    // Helper function: Plane-based path following
+    std::vector<glm::vec3> FollowPlanePath(
+        const glm::vec3& startPoint,
+        const std::vector<glm::vec3>& clusterPoints,
+        int minPointsInSphere,
+        float stepSize
+    );
+    
+    // Helper functions for FCTM
+    void ComputePCAAxes(const std::vector<PointCloudPoint>& pointCloud, glm::vec3& axis1, glm::vec3& axis2, glm::vec3& axis3) const;
+    glm::vec3 EstimateNormalForPoint(size_t pointIndex, const std::vector<PointCloudPoint>& pointCloud, float radius) const;
     
     std::vector<Point2D> ProjectToPlane(
         const std::vector<PointCloudPoint>& pointCloud,

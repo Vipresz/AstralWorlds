@@ -52,6 +52,9 @@ set(SOURCES
     logs/ConsoleRedirect.h
     helper/ConfigLoader.cpp
     helper/ConfigLoader.h
+    config/ConfigManager.cpp
+    config/ConfigManager.h
+    config/ConfigManager.inl
     nuklear/NuklearUI.cpp
     nuklear/NuklearUI.h
     nuklear/NuklearImpl.cpp
@@ -62,12 +65,18 @@ set(SOURCES
     remesh/Remeshing.h
     tof/TOFProcessing.cpp
     tof/TOFProcessing.h
+    occupancy/OccupancyAlgorithms.cpp
+    occupancy/OccupancyAlgorithms.h
+    algorithms/LowPassFilter.cpp
+    algorithms/LowPassFilter.h
     world/World.cpp
     world/World.h
     ui/CameraSystemUI.cpp
     ui/CameraSystemUI.h
     ui/UIHelpers.cpp
     ui/UIHelpers.h
+    ui/Plotting.cpp
+    ui/Plotting.h
     objects/ObjectManager.cpp
     objects/ObjectManager.h
     objects/ObjectRenderer.cpp

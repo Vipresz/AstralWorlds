@@ -12,8 +12,16 @@ namespace Engine {
 namespace Editors {
 namespace CameraSystem {
 
-// Forward declaration
-struct Camera;
+// Camera definition
+struct Camera {
+    std::string name;
+    glm::vec3 position;
+    glm::vec3 target;
+    bool canMove;  // Can this camera be moved with WASD/mouse?
+    
+    Camera(const std::string& n, const glm::vec3& pos, const glm::vec3& tgt, bool movable = false)
+        : name(n), position(pos), target(tgt), canMove(movable) {}
+};
 
 class CameraSystem {
 public:
@@ -54,6 +62,21 @@ public:
     // Getters
     size_t GetActiveCameraIndex() const { return m_activeCameraIndex; }
     void SetActiveCameraIndex(size_t index) { m_activeCameraIndex = index; }
+    
+    // Camera query functions
+    static size_t FindAnchorCameraIndex(const std::vector<Camera>& cameras);
+    static bool HasFreeCamera(const std::vector<Camera>& cameras);
+    
+    // Camera utility functions
+    static void CalculateYawPitchFromDirection(const glm::vec3& direction, float& yaw, float& pitch);
+    
+    // Camera management
+    void EnsureFreeCameraExists(
+        std::vector<Camera>& cameras,
+        glm::vec3& freeCameraPos,
+        float& freeCameraYaw,
+        float& freeCameraPitch
+    );
     
 private:
     size_t m_activeCameraIndex;

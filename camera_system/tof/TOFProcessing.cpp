@@ -1,6 +1,7 @@
 #include "TOFProcessing.h"
 #include <cmath>
 #include <algorithm>
+#include <set>
 
 namespace Engine {
 namespace Editors {
@@ -66,13 +67,17 @@ glm::vec3 TOFProcessing::ApplyLowPassFilterPosition(const GridKey& key, const gl
         state.initialized = true;
     }
     
-    // Apply filter to each component: y[n] = b0*x[n] + b1*x[n-1] + b2*x[n-2] - a1*y[n-1] - a2*y[n-2]
     glm::vec3 output;
-    output.x = m_lowPassCoefficients.b0 * inputPos.x + m_lowPassCoefficients.b1 * state.x1.x + m_lowPassCoefficients.b2 * state.x2.x - m_lowPassCoefficients.a1 * state.y1.x - m_lowPassCoefficients.a2 * state.y2.x;
-    output.y = m_lowPassCoefficients.b0 * inputPos.y + m_lowPassCoefficients.b1 * state.x1.y + m_lowPassCoefficients.b2 * state.x2.y - m_lowPassCoefficients.a1 * state.y1.y - m_lowPassCoefficients.a2 * state.y2.y;
-    output.z = m_lowPassCoefficients.b0 * inputPos.z + m_lowPassCoefficients.b1 * state.x1.z + m_lowPassCoefficients.b2 * state.x2.z - m_lowPassCoefficients.a1 * state.y1.z - m_lowPassCoefficients.a2 * state.y2.z;
+    const float b0 = m_lowPassCoefficients.b0;
+    const float b1 = m_lowPassCoefficients.b1;
+    const float b2 = m_lowPassCoefficients.b2;
+    const float a1 = m_lowPassCoefficients.a1;
+    const float a2 = m_lowPassCoefficients.a2;
     
-    // Update state
+    output.x = b0 * inputPos.x + b1 * state.x1.x + b2 * state.x2.x - a1 * state.y1.x - a2 * state.y2.x;
+    output.y = b0 * inputPos.y + b1 * state.x1.y + b2 * state.x2.y - a1 * state.y1.y - a2 * state.y2.y;
+    output.z = b0 * inputPos.z + b1 * state.x1.z + b2 * state.x2.z - a1 * state.y1.z - a2 * state.y2.z;
+    
     state.x2 = state.x1;
     state.x1 = inputPos;
     state.y2 = state.y1;
@@ -99,13 +104,17 @@ glm::vec3 TOFProcessing::ApplyLowPassFilterPosition(size_t positionHash, const g
         state.initialized = true;
     }
     
-    // Apply filter to each component: y[n] = b0*x[n] + b1*x[n-1] + b2*x[n-2] - a1*y[n-1] - a2*y[n-2]
     glm::vec3 output;
-    output.x = m_lowPassCoefficients.b0 * inputPos.x + m_lowPassCoefficients.b1 * state.x1.x + m_lowPassCoefficients.b2 * state.x2.x - m_lowPassCoefficients.a1 * state.y1.x - m_lowPassCoefficients.a2 * state.y2.x;
-    output.y = m_lowPassCoefficients.b0 * inputPos.y + m_lowPassCoefficients.b1 * state.x1.y + m_lowPassCoefficients.b2 * state.x2.y - m_lowPassCoefficients.a1 * state.y1.y - m_lowPassCoefficients.a2 * state.y2.y;
-    output.z = m_lowPassCoefficients.b0 * inputPos.z + m_lowPassCoefficients.b1 * state.x1.z + m_lowPassCoefficients.b2 * state.x2.z - m_lowPassCoefficients.a1 * state.y1.z - m_lowPassCoefficients.a2 * state.y2.z;
+    const float b0 = m_lowPassCoefficients.b0;
+    const float b1 = m_lowPassCoefficients.b1;
+    const float b2 = m_lowPassCoefficients.b2;
+    const float a1 = m_lowPassCoefficients.a1;
+    const float a2 = m_lowPassCoefficients.a2;
     
-    // Update state
+    output.x = b0 * inputPos.x + b1 * state.x1.x + b2 * state.x2.x - a1 * state.y1.x - a2 * state.y2.x;
+    output.y = b0 * inputPos.y + b1 * state.x1.y + b2 * state.x2.y - a1 * state.y1.y - a2 * state.y2.y;
+    output.z = b0 * inputPos.z + b1 * state.x1.z + b2 * state.x2.z - a1 * state.y1.z - a2 * state.y2.z;
+    
     state.x2 = state.x1;
     state.x1 = inputPos;
     state.y2 = state.y1;
@@ -125,99 +134,82 @@ void TOFProcessing::IntegrateTSDF(const GridKey& key, const glm::vec3& pointPos,
         key.z * gridSize
     );
     
-    // Calculate ray direction from camera to point
     glm::vec3 rayDir = pointPos - cameraPos;
-    float rayLength = glm::length(rayDir);
-    if (rayLength < 0.0001f) {
-        return;  // Invalid ray
+    const float rayLengthSq = glm::dot(rayDir, rayDir);
+    if (rayLengthSq < 1e-8f) {
+        return;
     }
-    rayDir = rayDir / rayLength;
+    const float rayLengthInv = 1.0f / std::sqrt(rayLengthSq);
+    rayDir *= rayLengthInv;
+    const float surfaceDist = rayLengthSq * rayLengthInv;
     
-    // Calculate vector from camera to voxel center
     glm::vec3 toVoxel = voxelCenter - cameraPos;
-    
-    // Project voxel center onto the ray
-    float projectedDist = glm::dot(toVoxel, rayDir);
-    
-    // Distance from camera to surface point
-    float surfaceDist = rayLength;
-    
-    // Signed distance: distance from voxel center to surface along the ray
-    // Positive = voxel is behind surface (further from camera)
-    // Negative = voxel is in front of surface (closer to camera)
+    const float projectedDist = glm::dot(toVoxel, rayDir);
     float signedDist = projectedDist - surfaceDist;
     
-    // Truncate the distance to truncation distance
-    float truncation = truncationDistance * gridSize;
+    const float truncation = truncationDistance * gridSize;
     signedDist = std::clamp(signedDist, -truncation, truncation);
     
     // Get or create TSDF voxel
     TSDFVoxel& voxel = m_tsdfGrid[key];
     
-    // Weight for this measurement (constant for now, could be based on distance/angle)
-    float newWeight = 1.0f;
-    
-    // Apply weight decay to existing weight
-    float oldWeight = voxel.weight * weightDecay;
-    float totalWeight = oldWeight + newWeight;
+    const float newWeight = 1.0f;
+    const float oldWeight = voxel.weight * weightDecay;
+    const float totalWeight = oldWeight + newWeight;
     
     if (totalWeight > 0.001f) {
-        // Weighted average: integrate new measurement
-        voxel.distance = (voxel.distance * oldWeight + signedDist * newWeight) / totalWeight;
-        voxel.weight = totalWeight;
-        
-        // Cap weight to prevent unbounded growth
-        voxel.weight = std::min(voxel.weight, 10.0f);
+        const float invTotalWeight = 1.0f / totalWeight;
+        voxel.distance = (voxel.distance * oldWeight + signedDist) * invTotalWeight;
+        voxel.weight = std::min(totalWeight, 10.0f);
     } else {
-        // First measurement for this voxel
         voxel.distance = signedDist;
         voxel.weight = newWeight;
     }
     
-    // Store color if enabled
     if (storeColor) {
-        float oldColorWeight = voxel.colorWeight * weightDecay;
-        float newColorWeight = newWeight;  // Use same weight as distance
-        float totalColorWeight = oldColorWeight + newColorWeight;
+        const float oldColorWeight = voxel.colorWeight * weightDecay;
+        const float totalColorWeight = oldColorWeight + newWeight;
         
         if (totalColorWeight > 0.001f) {
-            // Weighted average: integrate new color measurement
-            voxel.color = (voxel.color * oldColorWeight + color * newColorWeight) / totalColorWeight;
-            voxel.colorWeight = totalColorWeight;
-            
-            // Cap color weight to prevent unbounded growth
-            voxel.colorWeight = std::min(voxel.colorWeight, 10.0f);
+            const float invTotalColorWeight = 1.0f / totalColorWeight;
+            voxel.color = (voxel.color * oldColorWeight + color) * invTotalColorWeight;
+            voxel.colorWeight = std::min(totalColorWeight, 10.0f);
         } else {
-            // First color measurement for this voxel
             voxel.color = color;
-            voxel.colorWeight = newColorWeight;
+            voxel.colorWeight = newWeight;
         }
     }
 }
 
-// Extract point cloud from TSDF by finding zero-crossings (surface locations)
 void TOFProcessing::ExtractTSDFPointCloud(std::vector<PointCloudPoint>& output, float gridSize, bool useStoredColors) {
     output.clear();
     output.reserve(m_tsdfGrid.size());
+    
+    const float halfGridSize = gridSize * 0.5f;
+    const float minWeight = 0.5f;
     
     for (const auto& pair : m_tsdfGrid) {
         const GridKey& key = pair.first;
         const TSDFVoxel& voxel = pair.second;
         
-        // Only extract points near the surface (distance close to zero)
-        // and with sufficient weight (observed multiple times)
-        if (std::abs(voxel.distance) < gridSize * 0.5f && voxel.weight > 0.5f) {
+        if (std::abs(voxel.distance) < halfGridSize && voxel.weight > minWeight) {
             PointCloudPoint point;
-            point.position = glm::vec3(
-                key.x * gridSize,
-                key.y * gridSize,
-                key.z * gridSize
-            );
+            const float posX = key.x * gridSize;
+            const float posY = key.y * gridSize;
+            const float posZ = key.z * gridSize;
             
-            // Adjust position based on signed distance (move towards surface)
-            // This provides sub-voxel accuracy
-            glm::vec3 normal = glm::normalize(point.position);  // Approximate normal
-            point.position += normal * voxel.distance * 0.5f;  // Partial correction
+            const float distCorrection = voxel.distance * 0.5f;
+            const float lenSq = posX * posX + posY * posY + posZ * posZ;
+            if (lenSq > 1e-8f) {
+                const float lenInv = 1.0f / std::sqrt(lenSq);
+                point.position.x = posX + posX * lenInv * distCorrection;
+                point.position.y = posY + posY * lenInv * distCorrection;
+                point.position.z = posZ + posZ * lenInv * distCorrection;
+            } else {
+                point.position.x = posX;
+                point.position.y = posY;
+                point.position.z = posZ;
+            }
             
             // Use stored color if available and enabled, otherwise use default
             if (useStoredColors && voxel.colorWeight > 0.001f) {
@@ -311,15 +303,15 @@ void TOFProcessing::ExtractGriddedPointCloud(const std::map<GridKey, PointCloudP
         for (const auto& pair : gridAccumulators) {
             const GridAccumulator& acc = pair.second;
             PointCloudPoint point;
-            glm::vec3 avgPosition = acc.positionSum / static_cast<float>(acc.count);
+            const float invCount = 1.0f / static_cast<float>(acc.count);
+            glm::vec3 avgPosition = acc.positionSum * invCount;
             
-            // Apply low-pass filter to gridded points AFTER gridding
             if (lowPassEnabled && m_lowPassCoefficients.valid) {
                 avgPosition = ApplyLowPassFilterPosition(pair.first, avgPosition);
             }
             
             point.position = avgPosition;
-            point.color = acc.colorSum / static_cast<float>(acc.count);
+            point.color = acc.colorSum * invCount;
             output.push_back(point);
         }
     } else {
@@ -347,6 +339,91 @@ void TOFProcessing::ClearLowPassFilterState() {
 void TOFProcessing::ClearAll() {
     ClearTSDF();
     ClearLowPassFilterState();
+}
+
+// Main gridding function - processes entire point cloud into grid
+void TOFProcessing::ApplyGridding(const std::vector<PointCloudPoint>& inputPoints,
+                                 std::map<GridKey, PointCloudPoint>& outputGrid,
+                                 TOFGridMode mode,
+                                 float gridSize) {
+    outputGrid.clear();
+    const float invGridSize = 1.0f / gridSize;
+    
+    if (mode == TOFGridMode::Average) {
+        // Collect all values per grid coordinate in lists
+        std::map<GridKey, std::vector<PointCloudPoint>> gridLists;
+        
+        for (const auto& point : inputPoints) {
+            GridKey gridKey = WorldToGridKey(point.position, gridSize);
+            gridLists[gridKey].push_back(point);
+        }
+        
+        // Average values per grid coordinate
+        for (const auto& pair : gridLists) {
+            const GridKey& gridKey = pair.first;
+            const std::vector<PointCloudPoint>& points = pair.second;
+            
+            glm::vec3 posSum(0.0f);
+            glm::vec3 colorSum(0.0f);
+            for (const auto& p : points) {
+                posSum += p.position;
+                colorSum += p.color;
+            }
+            
+            PointCloudPoint averagedPoint;
+            averagedPoint.position = posSum / static_cast<float>(points.size());
+            averagedPoint.color = colorSum / static_cast<float>(points.size());
+            // Normalize weight by number of points: points/100, capped at 1.0
+            averagedPoint.weight = std::min(1.0f, static_cast<float>(points.size()) / 100.0f);
+            
+            outputGrid[gridKey] = averagedPoint;
+        }
+    } else if (mode == TOFGridMode::FirstCome) {
+        // Save first value, ignore others
+        for (const auto& point : inputPoints) {
+            GridKey gridKey = WorldToGridKey(point.position, gridSize);
+            
+            if (outputGrid.find(gridKey) == outputGrid.end()) {
+                PointCloudPoint gridPoint = point;
+                gridPoint.weight = 1.0f;
+                outputGrid[gridKey] = gridPoint;
+            }
+        }
+    } else {  // TOFGridMode::GridValue
+        // Use grid coordinate itself (snap to grid center)
+        std::set<GridKey> gridKeys;
+        
+        for (const auto& point : inputPoints) {
+            GridKey gridKey = WorldToGridKey(point.position, gridSize);
+            gridKeys.insert(gridKey);
+        }
+        
+        // Create points at grid centers
+        for (const GridKey& gridKey : gridKeys) {
+            glm::vec3 snappedPos(
+                gridKey.x * gridSize,
+                gridKey.y * gridSize,
+                gridKey.z * gridSize
+            );
+            
+            PointCloudPoint gridPoint;
+            gridPoint.position = snappedPos;
+            gridPoint.color = glm::vec3(1.0f);
+            gridPoint.weight = 1.0f;
+            
+            outputGrid[gridKey] = gridPoint;
+        }
+    }
+}
+
+// Helper function to convert world position to grid key
+GridKey TOFProcessing::WorldToGridKey(const glm::vec3& position, float gridSize) {
+    const float invGridSize = 1.0f / gridSize;
+    GridKey key;
+    key.x = static_cast<int>(std::round(position.x * invGridSize));
+    key.y = static_cast<int>(std::round(position.y * invGridSize));
+    key.z = static_cast<int>(std::round(position.z * invGridSize));
+    return key;
 }
 
 } // namespace CameraSystem

@@ -4,6 +4,8 @@
 #include "helper/ConfigLoader.h"
 #include "remesh/Remeshing.h"  // For GridKey and PointCloudPoint - must be included early
 #include "tof/TOFProcessing.h"
+#include "occupancy/OccupancyAlgorithms.h"
+#include "algorithms/LowPassFilter.h"
 #include "world/World.h"
 #include "camera/CameraSystem.h"
 #include "nuklear/NuklearUI.h"
@@ -42,17 +44,6 @@ namespace CameraSystem {
 
 // Forward declarations
 class ObjectRenderer;
-
-// Camera definition
-struct Camera {
-    std::string name;
-    glm::vec3 position;
-    glm::vec3 target;
-    bool canMove;  // Can this camera be moved with WASD/mouse?
-    
-    Camera(const std::string& n, const glm::vec3& pos, const glm::vec3& tgt, bool movable = false)
-        : name(n), position(pos), target(tgt), canMove(movable) {}
-};
 
 struct SceneObject {
     std::string name;
@@ -111,6 +102,9 @@ public:
     // Get object by index
     SceneObject* GetObject(size_t index);
     const SceneObject* GetObject(size_t index) const;
+    
+    // Get point cloud weight data for statistics (returns weights from gridded data if available, otherwise from point cloud buffer)
+    std::vector<float> GetPointCloudWeights() const;
 
 private:
     // Window and rendering
@@ -206,7 +200,7 @@ private:
     bool m_vipresGriddingEnabled;                           // Enable grid-based point storage
     bool m_vipresRemeshEnabled;                             // Enable mesh generation from point cloud
     bool m_vipresAutoRecomputeMesh;                         // Auto-recompute mesh every frame
-    int m_vipresRemeshAlgorithm;                           // Remeshing algorithm index (0=GriddedQuads, 1=NearestNeighbor, 2=Delaunay2D, 3=PoissonLike)
+    int m_vipresRemeshAlgorithm;                           // Remeshing algorithm index (0=GriddedQuads, 1=NearestNeighbor, 2=Delaunay2D, 3=PoissonLike, 4=FCTM, 5=GeodesicTree)
     
     // Per-algorithm parameter storage
     struct AlgorithmParams {
@@ -218,8 +212,13 @@ private:
         int poissonDepth = 8;  // For Poisson-like
         float poissonDensity = 1.0f;  // For Poisson-like
         bool poissonSmoothNormals = true;  // For Poisson-like
+        int fctmSteps = 10;  // For FCTM
+        float fctmSliceThickness = 0.1f;  // For FCTM
+        int geodesicKNeighbors = 10;  // For GeodesicTree: number of neighbors for kNN graph
+        int geodesicNumSeeds = 0;  // For GeodesicTree: number of seed points (0 = auto-determine)
+        float geodesicInteriorBias = 0.5f;  // For GeodesicTree: bias weight for staying inside point cloud (0.0-1.0)
     };
-    AlgorithmParams m_remeshParams[4];  // One set of parameters for each algorithm (0-3)
+    AlgorithmParams m_remeshParams[7];  // One set of parameters for each algorithm (0-6)
     
     // Legacy members kept for backward compatibility - now just reference current algorithm's params
     float m_vipresRemeshMaxDistance;                       // Max distance for neighbor search (references current algorithm)
@@ -230,6 +229,10 @@ private:
     int m_vipresRemeshPoissonDepth;                         // Depth for Poisson-like reconstruction (references current algorithm)
     float m_vipresRemeshPoissonDensity;                    // Density for Poisson-like reconstruction (references current algorithm)
     bool m_vipresRemeshPoissonSmoothNormals;               // Smooth normals for Poisson-like (references current algorithm)
+    float m_vipresRemeshFCTMSliceThickness;                // Slice thickness for FCTM (steps auto-calculated from this)
+    int m_vipresRemeshGeodesicKNeighbors;                  // K neighbors for GeodesicTree (references current algorithm)
+    int m_vipresRemeshGeodesicNumSeeds;                    // Number of seed points for GeodesicTree (references current algorithm)
+    float m_vipresRemeshGeodesicInteriorBias;              // Interior bias for GeodesicTree (references current algorithm)
     bool m_vipresFreeCameraObjectEnabled;                    // Enable object rendering in free camera view
     bool m_vipresNoisyTofEnabled;                           // Enable noisy TOF data capture
     float m_vipresNoiseAmount;                              // Noise amount for TOF measurements (+- range)
@@ -242,6 +245,31 @@ private:
     float m_tofTsdfTruncationDistance;                     // TSDF truncation distance (voxel units)
     float m_tofTsdfWeightDecay;                            // TSDF weight decay factor (0-1)
     
+    // Smart Occupancy (4th step in TOF pipeline)
+    bool m_smartOccupancyEnabled;                         // Smart occupancy enabled toggle
+    bool m_smartOccupancyNeighborConsistency;              // Neighbor consistency weight algorithm enabled
+    float m_smartOccupancyNeighborRadius;                 // Neighbor radius for consistency check (in grid units)
+    float m_smartOccupancyResidualThreshold;              // Residual threshold (r0) for neighbor consistency
+    bool m_smartOccupancyPersistence;                     // Persistence weight algorithm enabled
+    float m_smartOccupancyPersistenceGamma;                // Persistence sharpness (γ)
+    bool m_smartOccupancyVariance;                         // Variance-based weight algorithm enabled
+    float m_smartOccupancyVarianceThreshold;               // Allowed jitter (σ0)
+    bool m_smartOccupancyEviction;                         // Eviction-based weight algorithm enabled
+    float m_smartOccupancyEvictionDecay;                   // Decay value used in (decay^count)/100 formula
+    float m_smartOccupancyEvictionIncrement;               // Multiply weight by this when occupied
+    float m_smartOccupancyEvictionMinStartValue;           // Minimum start value added to increment/decrement deltas
+    bool m_smartOccupancyEviction2;                        // Eviction-based-2 weight algorithm enabled (density-based filtering)
+    float m_smartOccupancyEviction2Radius;                 // Radius (r) for neighbor search in grid units
+    int m_smartOccupancyEviction2MinNeighbors;             // Minimum number of neighbors required to keep a point
+    float m_weightThreshold;                              // Minimum weight threshold for rendering (0.0-1.0)
+    
+    // Occupancy algorithm state (managed by GridBased namespace)
+    GridBased::OccupancyState m_occupancyState;
+    
+    // Low-pass filter state (managed by Algorithms namespace)
+    Algorithms::LowPassFilterStateContainer m_lowPassFilterState;
+    Algorithms::LowPassFilterCoefficients m_lowPassFilterCoefficients;
+    
     // TOF Processing - handles TSDF, low-pass filtering, and gridding
     TOFProcessing m_tofProcessing;
     
@@ -251,12 +279,8 @@ private:
     // Object Renderer - handles object rendering
     ObjectRenderer* m_objectRenderer;
     
-    enum class GridMode {
-        Average,    // Average all points that snap to the same grid coordinate
-        FirstCome,  // Save only the first point that maps to a grid cell
-        GridValue   // Use the snapped grid position (center of grid cell)
-    };
-    GridMode m_vipresGridMode;                              // How to handle multiple points in same grid cell
+    // Use TOFGridMode from TOFProcessing (no duplicate enum)
+    TOFGridMode m_vipresGridMode;                           // How to handle multiple points in same grid cell
     std::vector<bool> m_vipresCameraEnabled;                // Track which cameras are enabled for VIPRES point cloud
     
     // Safe parameter storage for performance recovery
@@ -281,14 +305,18 @@ private:
         int vipresRemeshPoissonDepth;
         float vipresRemeshPoissonDensity;
         bool vipresRemeshPoissonSmoothNormals;
+        float vipresRemeshFCTMSliceThickness;
+        int vipresRemeshGeodesicKNeighbors;
+        int vipresRemeshGeodesicNumSeeds;
+        float vipresRemeshGeodesicInteriorBias;
         bool vipresFreeCameraObjectEnabled;
         bool vipresNoisyTofEnabled;
         float vipresNoiseAmount;
         float vipresGridSize;
-        GridMode vipresGridMode;
+        TOFGridMode vipresGridMode;
         std::vector<bool> vipresCameraEnabled;
         bool gridVisible;
-        AlgorithmParams remeshParams[4];
+        AlgorithmParams remeshParams[7];
         float tofLowPassCutoff;
         float tofSamplingRate;
         bool tofLowPassEnabled;
@@ -367,6 +395,9 @@ private:
     
     // VIPRES point cloud
     void UpdatePointCloud();
+    
+    // Smart Occupancy: Apply weight algorithms to point cloud
+    void ApplySmartOccupancyWeights(std::map<GridKey, PointCloudPoint>& pointCloudGrid);
     void RenderPointCloud();
     void GenerateRemesh();                                  // Generate mesh from point cloud
     void RenderRemesh();                                    // Render the remeshed mesh
@@ -437,6 +468,19 @@ private:
     
     // Apply rainbow colors to loaded meshes
     void ApplyRainbowColorsToObjects();
+    
+    // LoadConfig helper functions (editor-specific state management)
+    void ResetFrameArrays();
+    
+    // Run() helper functions
+    void UpdateFPSAndSafeParameters(float deltaTime);
+    void AdvanceFrame(float deltaTime, float maxFrameTime);
+    bool CanAdvanceFrameWithCapture() const;
+    void ProcessPendingCameraSwitch();
+    void HandleInputSafely();
+    void UpdateSceneSafely(float updateInterval);
+    void RenderFrameSafely();
+    void SleepForFrameTiming(float maxFrameTime, const std::chrono::high_resolution_clock::time_point& lastFrameTime);
 };
 
 } // namespace CameraSystem

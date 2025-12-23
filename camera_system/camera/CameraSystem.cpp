@@ -334,6 +334,59 @@ void CameraSystem::InitializeFromConfig(const std::vector<Camera>& cameras, size
     }
 }
 
+size_t CameraSystem::FindAnchorCameraIndex(const std::vector<Camera>& cameras) {
+    for (size_t i = 0; i < cameras.size(); i++) {
+        if (!cameras[i].canMove) {
+            return i;
+        }
+    }
+    return SIZE_MAX;
+}
+
+bool CameraSystem::HasFreeCamera(const std::vector<Camera>& cameras) {
+    for (const auto& cam : cameras) {
+        if (cam.canMove) {
+            return true;
+        }
+    }
+    return false;
+}
+
+void CameraSystem::CalculateYawPitchFromDirection(const glm::vec3& direction, float& yaw, float& pitch) {
+    yaw = atan2f(direction.x, direction.y);
+    pitch = -asinf(std::max(-1.0f, std::min(1.0f, direction.z)));
+}
+
+void CameraSystem::EnsureFreeCameraExists(
+    std::vector<Camera>& cameras,
+    glm::vec3& freeCameraPos,
+    float& freeCameraYaw,
+    float& freeCameraPitch
+) {
+    if (HasFreeCamera(cameras)) {
+        return;  // Already has a free camera
+    }
+    
+    size_t anchorIdx = FindAnchorCameraIndex(cameras);
+    glm::vec3 freeCamPos(10.0f, 10.0f, 5.0f);
+    glm::vec3 target(0.0f, 0.0f, 0.0f);
+    
+    if (anchorIdx < cameras.size()) {
+        const Camera& anchorCam = cameras[anchorIdx];
+        freeCamPos = anchorCam.position;
+        target = anchorCam.target;
+    }
+    
+    glm::vec3 direction = glm::normalize(target - freeCamPos);
+    float yaw, pitch;
+    CalculateYawPitchFromDirection(direction, yaw, pitch);
+    
+    AddCamera("Free Camera", freeCamPos, target, true, cameras);
+    freeCameraPos = freeCamPos;
+    freeCameraYaw = yaw;
+    freeCameraPitch = pitch;
+}
+
 } // namespace CameraSystem
 } // namespace Editors
 }
