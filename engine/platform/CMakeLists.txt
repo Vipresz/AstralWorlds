@@ -84,10 +84,12 @@ if(EXISTS "${GLEW_INCLUDE_DIR}/GL/glew.h" AND EXISTS "${GLEW_LIB_DIR}/glew32.lib
     
     # Copy DLL to output directory
     if(EXISTS "${GLEW_DLL_DIR}/glew32.dll")
+        # Copy to Platform library output directory
         add_custom_command(TARGET Platform POST_BUILD
             COMMAND ${CMAKE_COMMAND} -E copy_if_different
             "${GLEW_DLL_DIR}/glew32.dll"
-            $<TARGET_FILE_DIR:Game>
+            "$<TARGET_FILE_DIR:Platform>"
+            COMMENT "Copying GLEW DLL to output directory"
         )
     endif()
 else()
@@ -172,6 +174,7 @@ if(ASSIMP_HAS_COMPLETE_SOURCE)
     # DLL will be built automatically - copy it after build
     add_custom_command(TARGET Platform POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E echo "Assimp library built and linked"
+        COMMENT "Assimp library built and linked"
     )
 else()
     # Source is incomplete, try to find pre-built libraries

@@ -228,7 +228,20 @@ void main()
 	finalColour += CalcPointLights();
 	finalColour += CalcSpotLights();
 	
-	colour = texture(theTexture, TexCoord) * finalColour;
+	// Use vertex color if it's significantly different from position-based color
+	// Position-based colors are typically dim (clamped 0-1 from position)
+	// Rainbow colors will be bright and saturated
+	vec4 baseColor = texture(theTexture, TexCoord);
+	vec3 posBasedColor = clamp(vec3(0.5, 0.5, 0.5), 0.0, 1.0); // Typical position-based color
+	
+	// If vertex color is significantly different from typical position color, use it
+	if (length(vCol.rgb - posBasedColor) > 0.3) {
+		// Use vertex color (rainbow gradient)
+		colour = vCol * finalColour;
+	} else {
+		// Use texture
+		colour = baseColor * finalColour;
+	}
 }
 
 

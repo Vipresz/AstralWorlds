@@ -6,6 +6,7 @@
 #include <limits>
 #include <map>
 #include <string>
+#include <glm/glm.hpp>
 
 namespace Engine {
 namespace Platform {
@@ -71,7 +72,7 @@ void Model::LoadNode(aiNode* node, const aiScene* scene) {
     }
 }
 
-void Model::LoadMesh(aiMesh* mesh, const aiScene* scene) {
+void Model::LoadMesh(aiMesh* mesh, const aiScene* /*scene*/) {
     std::vector<GLfloat> vertices;
     std::vector<unsigned int> indices;
     
@@ -151,6 +152,18 @@ void Model::LoadMesh(aiMesh* mesh, const aiScene* scene) {
             indices.push_back(face.mIndices[j]);
         }
     }
+    
+    // Store vertex positions for color application
+    std::vector<glm::vec3> meshPositions;
+    meshPositions.reserve(mesh->mNumVertices);
+    for (size_t i = 0; i < mesh->mNumVertices; i++) {
+        meshPositions.push_back(glm::vec3(
+            mesh->mVertices[i].x,
+            mesh->mVertices[i].y,
+            mesh->mVertices[i].z
+        ));
+    }
+    m_vertexPositions.push_back(meshPositions);
     
     // Create mesh with bone data if available
     Mesh* newMesh = new Mesh();
@@ -271,6 +284,9 @@ void Model::ClearModel() {
     
     // Clear bone names
     m_boneNames.clear();
+    
+    // Clear vertex positions
+    m_vertexPositions.clear();
 }
 
 void Model::CreatePlane(float sizeX, float sizeZ) {
@@ -361,6 +377,82 @@ std::string Model::GetBoneNameByIndex(unsigned int meshBoneIndex) const {
         return m_boneNames[meshBoneIndex];
     }
     return std::string(); // Return empty string if index is invalid
+}
+
+void Model::UpdateVertexPositions(std::vector<std::vector<GLfloat>>& vertexData,
+                                   const std::vector<unsigned int>& meshVertexCounts) {
+    if (vertexData.size() != m_meshList.size() || meshVertexCounts.size() != m_meshList.size()) {
+        LOG_WARNING_FMT("Model", "Vertex data count mismatch: %zu meshes, %zu vertex data arrays", 
+                        m_meshList.size(), vertexData.size());
+        return;
+    }
+    
+    for (size_t i = 0; i < m_meshList.size() && i < vertexData.size(); i++) {
+        if (!vertexData[i].empty() && meshVertexCounts[i] > 0) {
+            m_meshList[i]->UpdateVertexPositions(vertexData[i].data(), meshVertexCounts[i]);
+        }
+    }
+}
+
+void Model::ApplyRainbowColors(float minZ, float maxZ) {
+    if (m_meshList.empty() || m_vertexPositions.size() != m_meshList.size()) {
+        return;
+    }
+    
+    float zRange = maxZ - minZ;
+    if (zRange < 0.0001f) {
+        zRange = 1.0f;
+    }
+    
+    for (size_t i = 0; i < m_meshList.size() && i < m_vertexPositions.size(); i++) {
+        if (!m_meshList[i]) continue;
+        
+        const std::vector<glm::vec3>& vertexPositions = m_vertexPositions[i];
+        if (vertexPositions.empty()) continue;
+        
+        // Generate colors for each vertex based on its Z position
+        std::vector<GLfloat> colors;
+        colors.reserve(vertexPositions.size() * 3);
+        
+        for (const glm::vec3& pos : vertexPositions) {
+            float normalizedZ = (pos.z - minZ) / zRange;
+            normalizedZ = std::max(0.0f, std::min(1.0f, normalizedZ));
+            // Invert normalizedZ so colors match the point cloud mesh orientation
+            normalizedZ = 1.0f - normalizedZ;
+            
+            // Generate rainbow color based on normalized Z (0 = red, 1 = violet)
+            glm::vec3 color;
+            float hue = normalizedZ * 5.0f; // 0-5 maps to full rainbow
+            
+            if (hue < 1.0f) {
+                // Red to Yellow
+                color = glm::vec3(1.0f, hue, 0.0f);
+            } else if (hue < 2.0f) {
+                // Yellow to Green
+                color = glm::vec3(2.0f - hue, 1.0f, 0.0f);
+            } else if (hue < 3.0f) {
+                // Green to Cyan
+                color = glm::vec3(0.0f, 1.0f, hue - 2.0f);
+            } else if (hue < 4.0f) {
+                // Cyan to Blue
+                color = glm::vec3(0.0f, 4.0f - hue, 1.0f);
+            } else {
+                // Blue to Magenta
+                color = glm::vec3(hue - 4.0f, 0.0f, 1.0f);
+            }
+            
+            colors.push_back(color.r);
+            colors.push_back(color.g);
+            colors.push_back(color.b);
+        }
+        
+        // Apply colors to mesh
+        if (!colors.empty()) {
+            GLfloat* colorData = colors.data();
+            unsigned int vertexCount = static_cast<unsigned int>(vertexPositions.size());
+            m_meshList[i]->SetVertexColors(colorData, vertexCount);
+        }
+    }
 }
 
 Model::~Model() {

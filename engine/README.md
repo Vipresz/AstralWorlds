@@ -1,6 +1,6 @@
 # Game Engine
 
-Core simulation engine library. Provides ECS, fixed timestep, job system, and game systems.
+Core simulation engine library. Provides ECS, fixed timestep, job system, and platform abstraction.
 
 ## Engine Structure
 
@@ -11,15 +11,11 @@ engine/
 │   ├── math/         # Deterministic math library
 │   ├── jobs/         # Multithreaded job system
 │   └── time/         # Fixed timestep management
-├── systems/          # Game-specific systems
-│   ├── inventory/    # Inventory & item management
-│   ├── crafting/     # Crafting system
-│   ├── ai/           # AI pathfinding & behavior trees
-│   ├── economy/      # Resource flow & economy
-│   └── physics/      # 3D physics simulation (placeholder)
 ├── platform/         # Platform/render layer (rendering, audio, input, network)
 └── examples/         # Example code
 ```
+
+**Note:** Game-specific systems (inventory, crafting, AI, economy) are located in `src/systems/` as they are specific to the game being developed, not part of the reusable engine.
 
 ## Building
 

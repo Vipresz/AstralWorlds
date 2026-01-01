@@ -32,3 +32,13 @@ CMakeFiles/
 .DS_Store
 Thumbs.db
 
+# Log files
+*.log
+*_debug.log
+*_editor_debug.log
+
+# JSON config files (generated)
+*.json
+!package.json
+!tsconfig.json
+docs/

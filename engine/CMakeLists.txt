@@ -32,22 +32,27 @@ endif()
 # Example/Simulation Executables
 # ============================================================================
 
-# Basic Example Simulation
-add_executable(BasicSimulation
-    examples/BasicExample.cpp
-)
+# Option to build examples
+option(BUILD_ENGINE_EXAMPLES "Build engine example programs" OFF)
 
-target_link_libraries(BasicSimulation PRIVATE Engine)
+if(BUILD_ENGINE_EXAMPLES)
+    # Basic Example Simulation
+    add_executable(BasicSimulation
+        examples/BasicExample.cpp
+    )
 
-# Set output name - CMake automatically adds .exe on Windows
-set_target_properties(BasicSimulation PROPERTIES
-    OUTPUT_NAME "basic_simulation"
-)
+    target_link_libraries(BasicSimulation PRIVATE Engine)
 
-# Optional: Set working directory for running from IDE
-set_target_properties(BasicSimulation PROPERTIES
-    VS_DEBUGGER_WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
-)
+    # Set output name - CMake automatically adds .exe on Windows
+    set_target_properties(BasicSimulation PROPERTIES
+        OUTPUT_NAME "basic_simulation"
+    )
+
+    # Optional: Set working directory for running from IDE
+    set_target_properties(BasicSimulation PROPERTIES
+        VS_DEBUGGER_WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+    )
+endif()
 
 
 # ============================================================================

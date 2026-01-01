@@ -39,13 +39,35 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/engine/platform/CMakeLists.txt")
     add_subdirectory(engine/platform)
 endif()
 
+# Build options for specific targets
+option(BUILD_GAME "Build the main game executable" ON)
+option(BUILD_SKELETON_EDITOR "Build the skeleton editor" ON)
+option(BUILD_CAMERA_SYSTEM "Build the camera system editor" ON)
+
 # Build game executable (final player executable)
-if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/src/CMakeLists.txt")
+if(BUILD_GAME AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/src/CMakeLists.txt")
     add_subdirectory(src)
+endif()
+
+# Build skeleton editor
+if(BUILD_SKELETON_EDITOR AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/editors/skeleton/CMakeLists.txt")
+    add_subdirectory(editors/skeleton)
+endif()
+
+# Build camera system editor
+if(BUILD_CAMERA_SYSTEM AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/camera_system/CMakeLists.txt")
+    add_subdirectory(camera_system)
 endif()
 
 message(STATUS "")
 message(STATUS "Game Engine Build Configuration:")
 message(STATUS "  Build type: ${CMAKE_BUILD_TYPE}")
 message(STATUS "  C++ standard: ${CMAKE_CXX_STANDARD}")
+message(STATUS "  Build targets:")
+message(STATUS "    - Game executable: ${BUILD_GAME}")
+message(STATUS "    - Skeleton editor: ${BUILD_SKELETON_EDITOR}")
+message(STATUS "    - Camera system editor: ${BUILD_CAMERA_SYSTEM}")
+message(STATUS "")
+message(STATUS "To build specific targets, use:")
+message(STATUS "  cmake -DBUILD_GAME=OFF -DBUILD_SKELETON_EDITOR=ON -DBUILD_CAMERA_SYSTEM=OFF ..")
 message(STATUS "")
