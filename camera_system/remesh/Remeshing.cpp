@@ -229,7 +229,6 @@ RemeshResult Remeshing::GenerateNearestNeighbor(
         result.vertices.push_back(vertex);
     }
 
-    // Improved nearest neighbor triangulation
     // For each point, find neighbors and create triangles more intelligently
     for (size_t i = 0; i < result.vertices.size(); i++) {
         std::vector<std::pair<float, size_t>> neighbors;

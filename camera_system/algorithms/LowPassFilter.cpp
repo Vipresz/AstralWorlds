@@ -106,9 +106,10 @@ void ApplyWeightBasedLowPassFilter(std::map<GridKey, PointCloudPoint>& pointClou
         // Weight-based blending: blend filtered and unfiltered positions based on original point weight
         // Higher weight = more trust in filtered position
         // Lower weight = more trust in original position (less filtering)
-        float blendFactor = std::max(0.0f, std::min(1.0f, point.weight));
-        point.position = blendFactor * filteredPos + (1.0f - blendFactor) * point.position;
-        
+
+        // float blendFactor = std::max(0.0f, std::min(1.0f, point.weight));
+        //point.position = blendFactor * filteredPos + (1.0f - blendFactor) * point.position;
+        point.position = filteredPos;
         // Store filtered weight directly (no blending needed for weight itself)
         point.weight = filteredWeight;
     }

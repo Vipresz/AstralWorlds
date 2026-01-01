@@ -167,7 +167,7 @@ def generate_moving_objects(total_frames=60):
 
 OBJECT_FILES = {
     "character1": {
-        "obj_file": "graphics/Models/character/graphics/male_model.obj",
+        "obj_file": "/Users/rgrigorii/Desktop/projects/FinalBaseMesh.obj",
         "fbx_file": None,
         "skel_file": None,
         "weights_file": None,

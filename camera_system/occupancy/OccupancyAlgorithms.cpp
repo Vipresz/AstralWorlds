@@ -44,7 +44,7 @@ void UpdateCellStatistics(std::map<GridKey, PointCloudPoint>& pointCloudGrid,
  * Computes 3D neighbor offsets within a given radius for eviction-based-2 algorithm.
  * Results are cached and only recomputed when the radius changes.
  */
-void ComputeEviction2NeighborOffsets(float radius, 
+void ComputeNeighborOffsetsSideRadius(float radius, 
                                      std::vector<std::tuple<int, int, int>>& neighborOffsets,
                                      float& cachedRadius) {
     if (std::abs(radius - cachedRadius) < 0.001f && !neighborOffsets.empty()) {
@@ -69,6 +69,38 @@ void ComputeEviction2NeighborOffsets(float radius,
             }
         }
     }
+}
+
+
+/**
+ * Computes 3D neighbor offsets on the side of a hypotehtical cube within a given radius
+ */
+ void ComputeNeighborOffsetsSide(int radius, 
+    std::vector<std::tuple<int, int, int>>& neighborOffsets,
+    float& cachedRadius) {
+    if (std::abs(radius - cachedRadius) < 0.001f && !neighborOffsets.empty()) {
+        return;
+    }
+
+    neighborOffsets.clear();
+    cachedRadius = radius;
+
+    int radiusCells = static_cast<int>(std::ceil(radius));
+
+    // Generate all 3D neighbor offsets within radius
+    for (int dx = -radiusCells; dx <= radiusCells; ++dx) {
+        if (dx == 0) continue;
+            neighborOffsets.push_back({dx, 0, 0});
+    }
+    for (int dy = -radiusCells; dy <= radiusCells; ++dy) {
+        if (dy == 0) continue;
+            neighborOffsets.push_back({0, dy, 0});
+    }
+    for (int dz = -radiusCells; dz <= radiusCells; ++dz) {
+        if (dz == 0) continue;
+            neighborOffsets.push_back({0, 0, dz});
+    }
+
 }
 
 /**
@@ -351,13 +383,15 @@ void ApplyEviction(std::map<GridKey, PointCloudPoint>& pointCloudGrid,
  * sufficient neighbors (>= minNeighbors) keep full weight. Isolated points are
  * penalized proportionally to their neighbor count.
  */
-void ApplyEviction2(std::map<GridKey, PointCloudPoint>& pointCloudGrid,
+void ApplyNeighborEvictionPolicy(std::map<GridKey, PointCloudPoint>& pointCloudGrid,
                     const OccupancyParams& params,
                     OccupancyState& state) {
-    ComputeEviction2NeighborOffsets(params.eviction2Radius, 
+    ComputeNeighborOffsetsSide(params.eviction2Radius, 
                                     state.eviction2NeighborOffsets,
                                     state.eviction2CachedRadius);
     
+    std::vector<GridKey> keysToRemove;
+
     for (auto& pair : pointCloudGrid) {
         const GridKey& key = pair.first;
         
@@ -369,18 +403,19 @@ void ApplyEviction2(std::map<GridKey, PointCloudPoint>& pointCloudGrid,
                 key.y + std::get<1>(offset),
                 key.z + std::get<2>(offset)
             );
-            
-            if (pointCloudGrid.find(neighborKey) != pointCloudGrid.end()) {
-                neighborCount++;
-            }
+            // if (pointCloudGrid.find(neighborKey) != pointCloudGrid.end()) {
+            //     neighborCount++;
+            // }
         }
         
         // Penalize isolated points, reward dense regions
         if (neighborCount < params.eviction2MinNeighbors) {
-            float neighborRatio = static_cast<float>(neighborCount) / static_cast<float>(params.eviction2MinNeighbors);
-            neighborRatio = std::max(0.0f, std::min(1.0f, neighborRatio));
-            pair.second.weight *= neighborRatio;
+            keysToRemove.push_back(key);
         }
+    }
+
+    for (auto& key: keysToRemove){
+        pointCloudGrid.erase(key);
     }
 }
 
@@ -416,7 +451,7 @@ void ApplyOccupancyAlgorithms(std::map<GridKey, PointCloudPoint>& pointCloudGrid
         ApplyEviction(pointCloudGrid, params, state);
     }
     if (params.eviction2Enabled) {
-        ApplyEviction2(pointCloudGrid, params, state);
+        ApplyNeighborEvictionPolicy(pointCloudGrid, params, state);
     }
     
     // Clamp final weights to [0, 1] range
