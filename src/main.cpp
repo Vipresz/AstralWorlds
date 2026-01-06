@@ -33,16 +33,6 @@ using namespace Engine::Platform::Render::Systems;
 using namespace Engine::Platform::Input::Systems;
 
 int main(int argc, char* argv[]) {
-    // Debug: Write to file immediately to verify we're running
-    {
-        FILE* f = fopen("main_startup.log", "w");
-        if (f) {
-            fprintf(f, "main() started\n");
-            fprintf(f, "Working directory should be wherever we launched from\n");
-            fclose(f);
-        }
-    }
-    
     EngineLogging::Logger& logger = EngineLogging::Logger::GetInstance();
     logger.Initialize("debug.log");
     logger.SetMinLevel(EngineLogging::LogLevel::LevelInfo);

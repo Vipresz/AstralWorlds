@@ -176,6 +176,7 @@ void CameraSystem::UpdateFreeCamera(float deltaTime, std::vector<Camera>& camera
             right = glm::vec3(1.0f, 0.0f, 0.0f);
         }
         
+        // WASD keys for movement
         if (glfwGetKey(window, GLFW_KEY_W) == GLFW_PRESS) {
             freeCameraPos += forward * moveSpeed;
         }
@@ -187,6 +188,25 @@ void CameraSystem::UpdateFreeCamera(float deltaTime, std::vector<Camera>& camera
         }
         if (glfwGetKey(window, GLFW_KEY_D) == GLFW_PRESS) {
             freeCameraPos += right * moveSpeed;
+        }
+        
+        // Arrow keys for rotation
+        float rotateSpeed = 1.5f * deltaTime;  // Rotation speed in radians per second
+        if (glfwGetKey(window, GLFW_KEY_LEFT) == GLFW_PRESS) {
+            freeCameraYaw -= rotateSpeed;
+        }
+        if (glfwGetKey(window, GLFW_KEY_RIGHT) == GLFW_PRESS) {
+            freeCameraYaw += rotateSpeed;
+        }
+        if (glfwGetKey(window, GLFW_KEY_UP) == GLFW_PRESS) {
+            freeCameraPitch -= rotateSpeed;
+            // Clamp pitch to prevent flipping
+            freeCameraPitch = std::max(freeCameraPitch, -1.5f);
+        }
+        if (glfwGetKey(window, GLFW_KEY_DOWN) == GLFW_PRESS) {
+            freeCameraPitch += rotateSpeed;
+            // Clamp pitch to prevent flipping
+            freeCameraPitch = std::min(freeCameraPitch, 1.5f);
         }
         
         if (glfwGetKey(window, GLFW_KEY_SPACE) == GLFW_PRESS) {

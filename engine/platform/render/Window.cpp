@@ -39,27 +39,14 @@ Window::Window(GLint windowWidth, GLint windowHeight) {
 }
 
 int Window::Initialize() {
-    // Write debug log directly to a file
-    FILE* debugFile = fopen("window_debug.log", "w");
-    if (debugFile) {
-        fprintf(debugFile, "Window::Initialize() called\n");
-        fflush(debugFile);
-    }
-    
-    // Set error callback first
+    // Set error callback for GLFW debugging
     glfwSetErrorCallback(glfw_error_callback);
     
-    if (debugFile) fprintf(debugFile, "Initializing GLFW...\n");
-    if (debugFile) fflush(debugFile);
-    
     if (!glfwInit()) {
-        if (debugFile) fprintf(debugFile, "GLFW init FAILED\n");
-        if (debugFile) fclose(debugFile);
+        printf("Error Initialising GLFW\n");
         glfwTerminate();
         return 1;
     }
-    if (debugFile) fprintf(debugFile, "GLFW initialized OK\n");
-    if (debugFile) fflush(debugFile);
     
     // Setup GLFW Windows Properties
     // OpenGL version
@@ -70,20 +57,12 @@ int Window::Initialize() {
     // Allow forward compatibility
     glfwWindowHint(GLFW_OPENGL_FORWARD_COMPAT, GL_TRUE);
     
-    if (debugFile) fprintf(debugFile, "Creating window %dx%d...\n", width, height);
-    if (debugFile) fflush(debugFile);
-    
     // Create the window
     mainWindow = glfwCreateWindow(width, height, "Game Engine", NULL, NULL);
     if (!mainWindow) {
-        if (debugFile) fprintf(debugFile, "ERROR: Window creation FAILED!\n");
-        if (debugFile) fclose(debugFile);
+        printf("Error creating GLFW window!\n");
         glfwTerminate();
         return 1;
-    }
-    if (debugFile) {
-        fprintf(debugFile, "Window created successfully\n");
-        fflush(debugFile);
     }
     
     // Get buffer size information
@@ -126,19 +105,6 @@ int Window::Initialize() {
     // Explicitly show and focus window (important for macOS)
     glfwShowWindow(mainWindow);
     glfwFocusWindow(mainWindow);
-    
-    {
-        FILE* df = fopen("window_debug.log", "a");
-        if (df) {
-            const char* glVersion = (const char*)glGetString(GL_VERSION);
-            const char* glslVersion = (const char*)glGetString(GL_SHADING_LANGUAGE_VERSION);
-            fprintf(df, "OpenGL Version: %s\n", glVersion ? glVersion : "NULL");
-            fprintf(df, "GLSL Version: %s\n", glslVersion ? glslVersion : "NULL");
-            fprintf(df, "Framebuffer Size: %d x %d\n", bufferWidth, bufferHeight);
-            fprintf(df, "Window initialization COMPLETE\n");
-            fclose(df);
-        }
-    }
     
     return 0;
 }

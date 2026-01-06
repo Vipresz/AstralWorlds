@@ -224,24 +224,27 @@ vec4 CalcSpotLights()
 
 void main()
 {
-	vec4 finalColour = CalcDirectionalLight();
-	finalColour += CalcPointLights();
-	finalColour += CalcSpotLights();
-	
-	// Use vertex color if it's significantly different from position-based color
-	// Position-based colors are typically dim (clamped 0-1 from position)
-	// Rainbow colors will be bright and saturated
-	vec4 baseColor = texture(theTexture, TexCoord);
-	vec3 posBasedColor = clamp(vec3(0.5, 0.5, 0.5), 0.0, 1.0); // Typical position-based color
-	
-	// If vertex color is significantly different from typical position color, use it
-	if (length(vCol.rgb - posBasedColor) > 0.3) {
-		// Use vertex color (rainbow gradient)
-		colour = vCol * finalColour;
+	// Simple default lighting - always visible
+	vec3 lightDir = normalize(vec3(0.5, 1.0, 0.3));
+	vec3 norm = Normal;
+	// Handle zero-length normals
+	if (length(norm) > 0.001) {
+		norm = normalize(norm);
 	} else {
-		// Use texture
-		colour = baseColor * finalColour;
+		norm = vec3(0.0, 1.0, 0.0);
 	}
+	float diff = max(dot(norm, lightDir), 0.0);
+	float light = 0.4 + 0.6 * diff;  // Ambient 0.4 + diffuse 0.6
+	
+	// Use vertex color if it has color, otherwise gray
+	vec3 surfaceColor;
+	if (length(vCol.rgb) > 0.01) {
+		surfaceColor = vCol.rgb;
+	} else {
+		surfaceColor = vec3(0.7, 0.7, 0.7);
+	}
+	
+	colour = vec4(surfaceColor * light, 1.0);
 }
 
 
