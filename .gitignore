@@ -42,3 +42,21 @@ Thumbs.db
 !package.json
 !tsconfig.json
 docs/
+
+# ML Extractor - Training data and outputs
+ML_extractor/shapenet/shapenet_input/
+ML_extractor/shapenet/shapenet_output/
+ML_extractor/test_input/
+ML_extractor/test_output/
+ML_extractor/training/model/
+ML_extractor/*.bin
+ML_extractor/DensitySDFModel.h
+
+# Python artifacts
+__pycache__/
+*.pyc
+*.pyo
+*.joblib
+
+# Large generated model headers
+camera_system/DensitySDFModel.h

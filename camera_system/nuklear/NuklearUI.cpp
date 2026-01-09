@@ -43,15 +43,26 @@ bool NuklearUI::Initialize(GLFWwindow* window) {
     m_nuklear = new struct nk_glfw();
     memset(m_nuklear, 0, sizeof(struct nk_glfw));
     
+    // Save the original user pointer (set by Window class for its key callbacks)
+    void* originalUserPointer = glfwGetWindowUserPointer(m_window);
+    
     // Initialize WITHOUT callbacks - we'll manually feed only mouse input
     // This prevents Nuklear from capturing keyboard input (WASD)
+    // NOTE: nk_glfw3_init() sets the window user pointer to its own context,
+    // but since we use NK_GLFW3_DEFAULT (no callbacks), we can restore the
+    // original user pointer after init.
     m_nkContext = nk_glfw3_init(m_nuklear, m_window, NK_GLFW3_DEFAULT);
     if (!m_nkContext) {
         LOG_ERROR("NuklearUI", "Failed to initialize Nuklear context");
         delete m_nuklear;
         m_nuklear = nullptr;
+        // Restore original user pointer even on failure
+        glfwSetWindowUserPointer(m_window, originalUserPointer);
         return false;
     }
+    
+    // Restore the original user pointer so Window's key callbacks work correctly
+    glfwSetWindowUserPointer(m_window, originalUserPointer);
     
     struct nk_font_atlas* atlas;
     nk_glfw3_font_stash_begin(m_nuklear, &atlas);

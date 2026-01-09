@@ -19,8 +19,6 @@ void ComputeLowPassFilterCoefficients(float cutoffHz, float sampleRate, LowPassF
         normalizedCutoff = 0.499f;  // Clamp to just below Nyquist
     }
     
-    // Pre-warp for bilinear transform: k = tan(π * fc / fs)
-    // This ensures the digital filter matches the analog cutoff frequency
     const float PI = 3.14159265359f;
     float k = std::tan(PI * normalizedCutoff);
     float k2 = k * k;
@@ -28,7 +26,6 @@ void ComputeLowPassFilterCoefficients(float cutoffHz, float sampleRate, LowPassF
     
     // Second-order Butterworth low-pass filter coefficients
     // Analog transfer function: H(s) = ωc² / (s² + √2·ωc·s + ωc²)
-    // After bilinear transform to z-domain:
     float a0 = 1.0f + sqrt2 * k + k2;
     coefficients.a1 = 2.0f * (k2 - 1.0f) / a0;
     coefficients.a2 = (1.0f - sqrt2 * k + k2) / a0;

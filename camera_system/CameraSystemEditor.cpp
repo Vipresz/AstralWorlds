@@ -1,26 +1,26 @@
 #include "CameraSystemEditor.h"
 #include "GlobalConstants.h"
+#include "UIDefaults.h"
 #include "config/ConfigManager.h"
 #include "../../engine/platform/render/Window.h"
 #include "../../engine/platform/render/Shader.h"
 #include "../../engine/platform/render/Model.h"
 #include "../../engine/platform/Logger.h"
 #include "objects/ObjectRenderer.h"
-#include <filesystem>
 #include <algorithm>
-#include <cmath>
-#include <cstring>
-#include <thread>
 #include <chrono>
-#include <unordered_set>
-#include <set>
-#include <tuple>
-#include <fstream>
-#include <vector>
+#include <cmath>
 #include <cstddef>
-#include <algorithm>
-#include <random>
+#include <cstring>
+#include <filesystem>
+#include <fstream>
 #include <functional>
+#include <random>
+#include <set>
+#include <thread>
+#include <tuple>
+#include <unordered_set>
+#include <vector>
 
 // Nuklear implementation is now in nuklear/NuklearUI.cpp
 #define NK_INCLUDE_FIXED_TYPES
@@ -38,6 +38,7 @@ using namespace Engine::Platform;
 using namespace Engine::Platform::Render;
 using EngineLogging::Logger;
 using namespace Engine::Editors::CameraSystem::Constants;
+using namespace Engine::Editors::CameraSystem::Defaults;
 
 namespace Engine {
 namespace Editors {
@@ -58,59 +59,74 @@ SceneObject::~SceneObject() {
 CameraSystemEditor::CameraSystemEditor()
     : m_window(nullptr)
     , m_objectRenderer(nullptr)
-    , m_captureEnabled(false)
-    , m_tofDataEnabled(false)
-    , m_tofColorCodeByCamera(false)  // Color coding disabled by default (points are white)
-    , m_captureOutputDir("C:\\Users\\inque\\OneDrive\\Desktop\\Work\\games\\thegame\\build\\bin\\Release\\pics")
-    , m_vipresEnabled(false)
-    , m_vipresComputeColor(false)
+    // === Camera Controls - Toggles (from UIDefaults.h) ===
+    , m_captureEnabled(CAPTURE_ENABLED)
+    , m_tofDataEnabled(TOF_DATA_ENABLED)
+    , m_extractColorEnabled(EXTRACT_COLOR_ENABLED)
+    , m_tofRenderColorMode(static_cast<TOFRenderColorMode>(TOF_RENDER_COLOR_MODE))
+    , m_captureOutputDir("./pics")  // Relative path for cross-platform compatibility
+    , m_vipresEnabled(VIPRES_ENABLED)
+    , m_vipresComputeColor(VIPRES_COMPUTE_COLOR)
     , m_vipresCameraEnabled()
-    , m_vipresSamplingDensity(SAMPLING_DENSITY_DEFAULT)
-    , m_vipresDepthLimit(DEPTH_LIMIT_DEFAULT)
-    , m_vipresGriddingEnabled(false)
-    , m_vipresRemeshEnabled(false)
-    , m_vipresAutoRecomputeMesh(false)
-    , m_vipresRemeshAlgorithm(0)  // Default to GriddedQuads
-    , m_vipresRemeshMaxDistance(REMESH_MAX_DISTANCE_DEFAULT)
-    , m_vipresRemeshMaxNeighbors(REMESH_MAX_NEIGHBORS_DEFAULT)
-    , m_vipresRemeshProjectionPlane(0)  // Default to XY plane
-    , m_vipresRemeshDelaunayThreshold(REMESH_DELAUNAY_THRESHOLD_DEFAULT)
-    , m_vipresRemeshPoissonRadius(REMESH_POISSON_RADIUS_DEFAULT)
-    , m_vipresRemeshPoissonDepth(REMESH_POISSON_DEPTH_DEFAULT)
-    , m_vipresRemeshPoissonDensity(REMESH_POISSON_DENSITY_DEFAULT)
-    , m_vipresRemeshPoissonSmoothNormals(true)
-    , m_vipresRemeshFCTMSliceThickness(REMESH_FCTM_SLICE_THICKNESS_DEFAULT)
-    , m_vipresRemeshGeodesicKNeighbors(REMESH_GEODESIC_K_NEIGHBORS_DEFAULT)
-    , m_vipresRemeshGeodesicNumSeeds(REMESH_GEODESIC_NUM_SEEDS_DEFAULT)
-    , m_vipresRemeshGeodesicInteriorBias(REMESH_GEODESIC_INTERIOR_BIAS_DEFAULT)
-    , m_vipresFreeCameraObjectEnabled(true)
-    , m_vipresNoisyTofEnabled(false)
-    , m_vipresNoiseAmount(NOISE_AMOUNT_DEFAULT)
-    , m_vipresGridSize(GRID_SIZE_DEFAULT)
-    , m_vipresGridMode(TOFGridMode::GridValue)
-    , m_tofLowPassCutoff(LOW_PASS_CUTOFF_DEFAULT)
-    , m_tofSamplingRate(TOF_SAMPLING_RATE_DEFAULT)
-    , m_tofLowPassEnabled(false) // Low-pass filter disabled by default
-    , m_tofTsdfEnabled(false)   // TSDF disabled by default
-    , m_tofTsdfStoreColor(false)  // TSDF color storage disabled by default
-    , m_tofTsdfTruncationDistance(TSDF_TRUNCATION_DISTANCE_DEFAULT)
-    , m_tofTsdfWeightDecay(TSDF_WEIGHT_DECAY_DEFAULT)
-    , m_smartOccupancyEnabled(false)
-    , m_smartOccupancyNeighborConsistency(false)
-    , m_smartOccupancyNeighborRadius(2.0f)  // Default: 2 grid cells radius
-    , m_smartOccupancyResidualThreshold(1.5f)  // Default: 1.5 units (r0) - for ±1 unit noise, outliers are >1.5 units
-    , m_smartOccupancyPersistence(false)
-    , m_smartOccupancyPersistenceGamma(2.0f)  // Default: γ=2 (less aggressive than 4)
-    , m_smartOccupancyVariance(false)
-    , m_smartOccupancyVarianceThreshold(1.0f)  // Default: σ0=1.0 (matches ±1 unit noise stddev)
-    , m_smartOccupancyEviction(false)
-    , m_smartOccupancyEvictionDecay(2.0f)  // Decay value used in (decay^count)/100
-    , m_smartOccupancyEvictionIncrement(1.5f)  // Multiply weight by this when occupied
-    , m_smartOccupancyEvictionMinStartValue(0.1f)  // Minimum start value
-    , m_smartOccupancyEviction2(false)
-    , m_smartOccupancyEviction2Radius(2.0f)  // Default: check neighbors within 2 grid units
-    , m_smartOccupancyEviction2MinNeighbors(3)  // Default: require at least 3 neighbors
-    , m_weightThreshold(0.5f)  // Default: filter points below 0.5 weight
+    // === TOF Controls - Sliders (from UIDefaults.h, clamped in body) ===
+    , m_vipresSamplingDensity(VIPRES_SAMPLING_DENSITY)
+    , m_vipresDepthLimit(VIPRES_DEPTH_LIMIT)
+    , m_vipresGriddingEnabled(VIPRES_GRIDDING_ENABLED)
+    , m_vipresRemeshEnabled(VIPRES_REMESH_ENABLED)
+    , m_vipresAutoRecomputeMesh(VIPRES_AUTO_RECOMPUTE_MESH)
+    , m_vipresRemeshAlgorithm(VIPRES_REMESH_ALGORITHM)
+    , m_vipresRemeshMaxDistance(VIPRES_REMESH_MAX_DISTANCE)
+    , m_vipresRemeshMaxNeighbors(VIPRES_REMESH_MAX_NEIGHBORS)
+    , m_vipresRemeshProjectionPlane(VIPRES_REMESH_PROJECTION_PLANE)
+    , m_vipresRemeshDelaunayThreshold(VIPRES_REMESH_DELAUNAY_THRESHOLD)
+    , m_vipresRemeshPoissonRadius(VIPRES_REMESH_POISSON_RADIUS)
+    , m_vipresRemeshPoissonDepth(VIPRES_REMESH_POISSON_DEPTH)
+    , m_vipresRemeshPoissonDensity(VIPRES_REMESH_POISSON_DENSITY)
+    , m_vipresRemeshPoissonSmoothNormals(VIPRES_REMESH_POISSON_SMOOTH_NORMALS)
+    , m_vipresRemeshFCTMSliceThickness(VIPRES_REMESH_FCTM_SLICE_THICKNESS)
+    , m_vipresRemeshGeodesicKNeighbors(VIPRES_REMESH_GEODESIC_K_NEIGHBORS)
+    , m_vipresRemeshGeodesicNumSeeds(REMESH_GEODESIC_NUM_SEEDS_DEFAULT)  // From GlobalConstants
+    , m_vipresRemeshGeodesicInteriorBias(VIPRES_REMESH_GEODESIC_INTERIOR_BIAS)
+    , m_vipresRemeshDensityVoxelSize(REMESH_DENSITY_VOXEL_SIZE_DEFAULT)
+    , m_vipresRemeshDensitySmoothRadius(REMESH_DENSITY_SMOOTH_RADIUS_DEFAULT)
+    , m_vipresRemeshDensityIsoValue(REMESH_DENSITY_ISO_VALUE_DEFAULT)
+    , m_vipresFreeCameraObjectEnabled(VIPRES_FREE_CAMERA_OBJECT_ENABLED)
+    , m_vipresNoisyTofEnabled(VIPRES_NOISY_TOF_ENABLED)
+    , m_vipresNoiseAmount(VIPRES_NOISE_AMOUNT)
+    , m_vipresGridSize(VIPRES_GRID_SIZE)
+    , m_vipresGridMode(static_cast<TOFGridMode>(VIPRES_GRID_MODE))
+    , m_tofLowPassCutoff(TOF_LOW_PASS_CUTOFF)
+    , m_tofSamplingRate(TOF_SAMPLING_RATE)
+    , m_tofLowPassEnabled(TOF_LOW_PASS_ENABLED)
+    , m_tofTsdfEnabled(TOF_TSDF_ENABLED)
+    , m_tofTsdfStoreColor(TOF_TSDF_STORE_COLOR)
+    , m_tofTsdfTruncationDistance(TOF_TSDF_TRUNCATION_DISTANCE)
+    , m_tofTsdfWeightDecay(TOF_TSDF_WEIGHT_DECAY)
+    // === Smart Occupancy - Toggles and Sliders (from UIDefaults.h) ===
+    , m_smartOccupancyEnabled(SMART_OCCUPANCY_ENABLED)
+    , m_smartOccupancyNeighborConsistency(SMART_OCCUPANCY_NEIGHBOR_CONSISTENCY)
+    , m_smartOccupancyNeighborRadius(SMART_OCCUPANCY_NEIGHBOR_RADIUS)
+    , m_smartOccupancyResidualThreshold(SMART_OCCUPANCY_RESIDUAL_THRESHOLD)
+    , m_smartOccupancyPersistence(SMART_OCCUPANCY_PERSISTENCE)
+    , m_smartOccupancyPersistenceGamma(SMART_OCCUPANCY_PERSISTENCE_GAMMA)
+    , m_smartOccupancyVariance(SMART_OCCUPANCY_VARIANCE)
+    , m_smartOccupancyVarianceThreshold(SMART_OCCUPANCY_VARIANCE_THRESHOLD)
+    , m_smartOccupancyEviction(SMART_OCCUPANCY_EVICTION)
+    , m_smartOccupancyEvictionDecay(SMART_OCCUPANCY_EVICTION_DECAY)
+    , m_smartOccupancyEvictionIncrement(SMART_OCCUPANCY_EVICTION_INCREMENT)
+    , m_smartOccupancyEvictionMinStartValue(SMART_OCCUPANCY_EVICTION_MIN_START_VALUE)
+    , m_smartOccupancyEviction2(SMART_OCCUPANCY_EVICTION2)
+    , m_smartOccupancyEviction2AppearanceThreshold(SMART_OCCUPANCY_EVICTION2_APPEARANCE_THRESHOLD)
+    , m_smartOccupancyEviction2RemovalThreshold(SMART_OCCUPANCY_EVICTION2_REMOVAL_THRESHOLD)
+    , m_weightThreshold(WEIGHT_THRESHOLD)
+    // === Segmentation (from UIDefaults.h) ===
+    , m_segmentationIdEnabled(SEGMENTATION_ID_ENABLED)
+    , m_segmentMatchRadius(SEGMENT_MATCH_RADIUS)
+    // === Surface Flow (from UIDefaults.h) ===
+    , m_surfaceFlowEnabled(SURFACE_FLOW_ENABLED)
+    , m_surfaceFlowRadius(SURFACE_FLOW_RADIUS)
+    , m_surfaceFlowThreshold(SURFACE_FLOW_THRESHOLD)
+    // === Internal state ===
     , m_currentFPS(0.0f)
     , m_fpsUpdateTime(0.0f)
     , m_fpsFrameCount(0)
@@ -131,18 +147,20 @@ CameraSystemEditor::CameraSystemEditor()
     , m_nextCameraToCapture(0)
     , m_glfwWindow(nullptr)
     , m_meshShader(nullptr)
+    , m_albedoShader(nullptr)
     , m_pendingCameraSwitch(SIZE_MAX)
     , m_hasSafeParameters(false)
     , m_framesSinceStartup(0)
     , m_justRestoredParameters(false)
+    // === Camera state (from UIDefaults.h) ===
     , m_freeCameraPos(10.0f, 10.0f, 5.0f)
-    , m_freeCameraYaw(0.0f)
-    , m_freeCameraPitch(0.0f)
-    , m_movementSpeed(CAMERA_MOVEMENT_SPEED)
+    , m_freeCameraYaw(FREE_CAMERA_YAW)
+    , m_freeCameraPitch(FREE_CAMERA_PITCH)
+    , m_movementSpeed(Defaults::CAMERA_MOVEMENT_SPEED)
     , m_mouseRightDown(false)
     , m_lastMouseX(0.0)
     , m_lastMouseY(0.0)
-    // Nuklear UI is now handled by m_nuklearUI member
+    // === Animation state ===
     , m_globalAnimationPlaying(false)
     , m_globalAnimationTime(0.0f)
     , m_configLoaded(false)
@@ -153,8 +171,40 @@ CameraSystemEditor::CameraSystemEditor()
     , m_currentFrame(0)
     , m_frameProcessingCounter(0)
     , m_isPlaying(false)
-    , m_loopEnabled(false)
+    , m_loopEnabled(LOOP_ENABLED)
 {
+    // Clamp slider values to their valid ranges (in case UIDefaults exceed limits)
+    m_vipresSamplingDensity = std::clamp(m_vipresSamplingDensity, SAMPLING_DENSITY_MIN, SAMPLING_DENSITY_MAX);
+    m_vipresDepthLimit = std::clamp(m_vipresDepthLimit, DEPTH_LIMIT_MIN, DEPTH_LIMIT_MAX);
+    m_vipresGridSize = std::clamp(m_vipresGridSize, GRID_SIZE_MIN, GRID_SIZE_MAX);
+    m_tofSamplingRate = std::clamp(m_tofSamplingRate, TOF_SAMPLING_RATE_MIN, TOF_SAMPLING_RATE_MAX);
+    m_tofLowPassCutoff = std::clamp(m_tofLowPassCutoff, LOW_PASS_CUTOFF_MIN, LOW_PASS_CUTOFF_MAX);
+    m_tofTsdfTruncationDistance = std::clamp(m_tofTsdfTruncationDistance, TSDF_TRUNCATION_DISTANCE_MIN, TSDF_TRUNCATION_DISTANCE_MAX);
+    m_tofTsdfWeightDecay = std::clamp(m_tofTsdfWeightDecay, TSDF_WEIGHT_DECAY_MIN, TSDF_WEIGHT_DECAY_MAX);
+    m_vipresNoiseAmount = std::clamp(m_vipresNoiseAmount, NOISE_AMOUNT_MIN, NOISE_AMOUNT_MAX);
+    m_vipresRemeshMaxDistance = std::clamp(m_vipresRemeshMaxDistance, REMESH_MAX_DISTANCE_MIN, REMESH_MAX_DISTANCE_MAX);
+    m_vipresRemeshMaxNeighbors = std::clamp(m_vipresRemeshMaxNeighbors, REMESH_MAX_NEIGHBORS_MIN, REMESH_MAX_NEIGHBORS_MAX);
+    m_vipresRemeshDelaunayThreshold = std::clamp(m_vipresRemeshDelaunayThreshold, REMESH_DELAUNAY_THRESHOLD_MIN, REMESH_DELAUNAY_THRESHOLD_MAX);
+    m_vipresRemeshPoissonRadius = std::clamp(m_vipresRemeshPoissonRadius, REMESH_POISSON_RADIUS_MIN, REMESH_POISSON_RADIUS_MAX);
+    m_vipresRemeshPoissonDepth = std::clamp(m_vipresRemeshPoissonDepth, REMESH_POISSON_DEPTH_MIN, REMESH_POISSON_DEPTH_MAX);
+    m_vipresRemeshPoissonDensity = std::clamp(m_vipresRemeshPoissonDensity, REMESH_POISSON_DENSITY_MIN, REMESH_POISSON_DENSITY_MAX);
+    m_vipresRemeshFCTMSliceThickness = std::clamp(m_vipresRemeshFCTMSliceThickness, REMESH_FCTM_SLICE_THICKNESS_MIN, REMESH_FCTM_SLICE_THICKNESS_MAX);
+    m_vipresRemeshGeodesicKNeighbors = std::clamp(m_vipresRemeshGeodesicKNeighbors, REMESH_GEODESIC_K_NEIGHBORS_MIN, REMESH_GEODESIC_K_NEIGHBORS_MAX);
+    m_vipresRemeshGeodesicInteriorBias = std::clamp(m_vipresRemeshGeodesicInteriorBias, REMESH_GEODESIC_INTERIOR_BIAS_MIN, REMESH_GEODESIC_INTERIOR_BIAS_MAX);
+    m_smartOccupancyNeighborRadius = std::clamp(m_smartOccupancyNeighborRadius, OCCUPANCY_NEIGHBOR_RADIUS_MIN, OCCUPANCY_NEIGHBOR_RADIUS_MAX);
+    m_smartOccupancyResidualThreshold = std::clamp(m_smartOccupancyResidualThreshold, OCCUPANCY_RESIDUAL_THRESHOLD_MIN, OCCUPANCY_RESIDUAL_THRESHOLD_MAX);
+    m_smartOccupancyPersistenceGamma = std::clamp(m_smartOccupancyPersistenceGamma, OCCUPANCY_PERSISTENCE_GAMMA_MIN, OCCUPANCY_PERSISTENCE_GAMMA_MAX);
+    m_smartOccupancyVarianceThreshold = std::clamp(m_smartOccupancyVarianceThreshold, OCCUPANCY_VARIANCE_THRESHOLD_MIN, OCCUPANCY_VARIANCE_THRESHOLD_MAX);
+    m_smartOccupancyEvictionDecay = std::clamp(m_smartOccupancyEvictionDecay, OCCUPANCY_EVICTION_DECAY_MIN, OCCUPANCY_EVICTION_DECAY_MAX);
+    m_smartOccupancyEvictionIncrement = std::clamp(m_smartOccupancyEvictionIncrement, OCCUPANCY_EVICTION_INCREMENT_MIN, OCCUPANCY_EVICTION_INCREMENT_MAX);
+    m_smartOccupancyEvictionMinStartValue = std::clamp(m_smartOccupancyEvictionMinStartValue, OCCUPANCY_EVICTION_MIN_START_MIN, OCCUPANCY_EVICTION_MIN_START_MAX);
+    m_smartOccupancyEviction2AppearanceThreshold = std::clamp(m_smartOccupancyEviction2AppearanceThreshold, OCCUPANCY_EVICTION2_APPEARANCE_THRESHOLD_MIN, OCCUPANCY_EVICTION2_APPEARANCE_THRESHOLD_MAX);
+    m_smartOccupancyEviction2RemovalThreshold = std::clamp(m_smartOccupancyEviction2RemovalThreshold, OCCUPANCY_EVICTION2_REMOVAL_THRESHOLD_MIN, OCCUPANCY_EVICTION2_REMOVAL_THRESHOLD_MAX);
+    m_weightThreshold = std::clamp(m_weightThreshold, OCCUPANCY_WEIGHT_THRESHOLD_MIN, OCCUPANCY_WEIGHT_THRESHOLD_MAX);
+    
+    // Initialize World grid visibility from UIDefaults
+    m_world.SetGridVisible(GRID_VISIBLE);
+    
     // Initialize low-pass filter coefficients with default values (for new algorithms module)
     Algorithms::ComputeLowPassFilterCoefficients(m_tofLowPassCutoff, m_tofSamplingRate, m_lowPassFilterCoefficients);
         
@@ -241,6 +291,11 @@ bool CameraSystemEditor::Initialize(int windowWidth, int windowHeight) {
     if (window) {
         glfwSetWindowUserPointer(window, this);
         
+        // Uninstall the Window class's key callback - it expects the user pointer to be
+        // a Window*, but we've overwritten it with CameraSystemEditor*. We use glfwGetKey()
+        // for polling instead of callbacks, so the key callback is not needed.
+        glfwSetKeyCallback(window, nullptr);
+        
         glfwSetFramebufferSizeCallback(window, [](GLFWwindow* win, int width, int height) {
             CameraSystemEditor* editor = static_cast<CameraSystemEditor*>(glfwGetWindowUserPointer(win));
             if (!editor || !editor->m_window) return;
@@ -249,9 +304,6 @@ bool CameraSystemEditor::Initialize(int windowWidth, int windowHeight) {
             float aspect = (float)width / (float)height;
             editor->m_projection = glm::perspective(glm::radians(45.0f), aspect, 0.1f, 100000.0f);
         });
-        
-        // Scroll callback disabled - Nuklear will handle scroll manually if needed
-        // We don't install this to avoid conflicts with camera controls
     }
     
     LOG_INFO("CameraSystem", "Camera system editor initialized successfully");
@@ -285,6 +337,23 @@ bool CameraSystemEditor::CreateShaders() {
     }
     m_meshShader->Validate();
     LOG_INFO("CameraSystem", "Mesh shader loaded successfully (using engine shader files)");
+    
+    // Load albedo shader for capturing unlit texture/vertex colors
+    m_albedoShader = new Shader();
+    m_albedoShader->CreateFromFiles("engine/platform/render/shaders/albedo.vert", "engine/platform/render/shaders/albedo.frag");
+    if (!m_albedoShader->IsValid()) {
+        m_albedoShader->CreateFromFiles("../../engine/platform/render/shaders/albedo.vert", "../../engine/platform/render/shaders/albedo.frag");
+    }
+    if (!m_albedoShader->IsValid()) {
+        m_albedoShader->CreateFromFiles("shaders/albedo.vert", "shaders/albedo.frag");
+    }
+    if (!m_albedoShader->IsValid()) {
+        LOG_WARNING("CameraSystem", "Albedo shader failed to compile - compute color will use lit colors");
+        // Not a fatal error - we can fall back to the mesh shader
+    } else {
+        m_albedoShader->Validate();
+        LOG_INFO("CameraSystem", "Albedo shader loaded successfully");
+    }
     
     // Grid shader is now handled by World class
     bool valid = m_meshShader->IsValid();
@@ -675,7 +744,6 @@ void CameraSystemEditor::UpdateAnimatedCameras() {
         
         if (currentFrame) {
             // Update camera position and target (only for non-free cameras)
-            glm::vec3 oldPos = m_cameras[i].position;
             m_cameras[i].position = currentFrame->position;
             m_cameras[i].target = currentFrame->position + currentFrame->orientation;
             
@@ -905,7 +973,6 @@ void CameraSystemEditor::CaptureScreenshots() {
     
     // Capture one camera per frame to avoid blocking
     // Start from m_nextCameraToCapture and find the next uncaptured camera
-    size_t camerasToCapture = 0;
     size_t startIndex = m_nextCameraToCapture;
     bool foundUncaptured = false;
     
@@ -972,7 +1039,6 @@ void CameraSystemEditor::CaptureScreenshots() {
             // Mark this camera as captured only if save succeeded
             m_capturedCamerasForFrame[idx] = true;
             m_nextCameraToCapture = (idx + 1) % m_cameras.size();
-            camerasToCapture++;
             
             LOG_INFO_FMT("CameraSystem", "Successfully captured frame %d from camera '%s' (index %zu) to %s", 
                         m_currentFrame, cam.name.c_str(), idx, filename.c_str());
@@ -1281,6 +1347,21 @@ glm::vec3 CameraSystemEditor::UnprojectPixelWithMatrices(const glm::vec2& screen
 void CameraSystemEditor::UpdatePointCloud() {
     LOG_INFO("CameraSystem", "UpdatePointCloud called");
     
+    // ========================================================================
+    // TOF PIPELINE START
+    // ========================================================================
+    // The TOF pipeline is responsible for:
+    //   1. Rendering depth from each anchor camera
+    //   2. Extracting 3D point positions from depth buffer
+    //   3. Extracting color from rendered image (if Compute Color is enabled)
+    //   4. Applying noise (if enabled)
+    //   5. Assigning segment IDs based on nearest object
+    //   6. TSDF integration (if enabled)
+    //   7. Gridding (if enabled)
+    //   8. Low-pass filtering (if enabled)
+    //   9. Smart occupancy weighting (if enabled)
+    // ========================================================================
+    
     // Increment frame processing counter to refresh noise at every frame
     m_frameProcessingCounter++;
     
@@ -1292,7 +1373,6 @@ void CameraSystemEditor::UpdatePointCloud() {
     // Clear point cloud write buffer (we'll process into it)
     m_pointCloud[m_pointCloudWriteBuffer].clear();
     
-    // Depth data calculation is controlled by TOF, not VIPRES
     if (!m_tofDataEnabled || m_cameras.empty()) {
         return;
     }
@@ -1317,27 +1397,71 @@ void CameraSystemEditor::UpdatePointCloud() {
         }
         
         glm::mat4 camView = CalculateCameraView(cam);
-            
-            glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
-            glEnable(GL_DEPTH_TEST);
-            glDepthMask(GL_TRUE);  // Enable depth writes
-            glDisable(GL_CULL_FACE);
-            glViewport(0, 0, fullWidth, fullHeight);
+        
+        // Set clear color to black for color extraction (so we can distinguish objects from background)
+        glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+        glEnable(GL_DEPTH_TEST);
+        glDepthMask(GL_TRUE);  // Enable depth writes
+        glDisable(GL_CULL_FACE);
+        glViewport(0, 0, fullWidth, fullHeight);
         
         if (m_world.IsGridVisible()) {
             RenderGrid();
         }
         
-        if (m_meshShader && m_meshShader->IsValid()) {
-            m_meshShader->UseShader();
-            GLint uniformView = m_meshShader->GetViewLocation();
-            GLint uniformProjection = m_meshShader->GetProjectionLocation();
+        // Do we need to capture unlit colors from the scene?
+        // Yes if: Extract Color from Images toggle is enabled
+        bool needColors = m_extractColorEnabled;
+        
+        // Choose shader based on whether we need unlit colors
+        // Use albedo shader for pure texture colors (no lighting)
+        // Fall back to mesh shader if albedo shader not available
+        Shader* renderShader = m_meshShader;
+        bool useAlbedoShader = needColors && m_albedoShader && m_albedoShader->IsValid();
+        if (useAlbedoShader) {
+            renderShader = m_albedoShader;
+        }
+        
+        if (renderShader && renderShader->IsValid()) {
+            renderShader->UseShader();
+            GLuint shaderID = renderShader->GetShaderID();
+            
+            GLint uniformView = glGetUniformLocation(shaderID, "view");
+            GLint uniformProjection = glGetUniformLocation(shaderID, "projection");
             if (uniformView != -1) glUniformMatrix4fv(uniformView, 1, GL_FALSE, glm::value_ptr(camView));
             if (uniformProjection != -1) glUniformMatrix4fv(uniformProjection, 1, GL_FALSE, glm::value_ptr(m_projection));
             
             for (size_t i = 0; i < m_objects.size(); i++) {
                 if (m_objects[i] && m_objects[i]->visible) {
-                    RenderObject(m_objects[i].get());
+                    // For albedo shader, we need to set useTexture and model uniforms
+                    if (useAlbedoShader) {
+                        GLint uniformModel = glGetUniformLocation(shaderID, "model");
+                        GLint uniformUseTexture = glGetUniformLocation(shaderID, "useTexture");
+                        GLint uniformUseBones = glGetUniformLocation(shaderID, "useBones");
+                        
+                        // Build model matrix (same as ObjectRenderer)
+                        glm::mat4 modelMatrix = glm::mat4(1.0f);
+                        modelMatrix = glm::translate(modelMatrix, m_objects[i]->position);
+                        modelMatrix = glm::rotate(modelMatrix, glm::radians(-90.0f), glm::vec3(0.0f, 1.0f, 0.0f));
+                        modelMatrix = glm::rotate(modelMatrix, glm::radians(-90.0f), glm::vec3(0.0f, 0.0f, 1.0f));
+                        modelMatrix = glm::rotate(modelMatrix, glm::radians(m_objects[i]->rotation.z), glm::vec3(0.0f, 1.0f, 0.0f));
+                        modelMatrix = glm::rotate(modelMatrix, glm::radians(m_objects[i]->rotation.x), glm::vec3(1.0f, 0.0f, 0.0f));
+                        modelMatrix = glm::rotate(modelMatrix, glm::radians(m_objects[i]->rotation.y), glm::vec3(0.0f, 0.0f, 1.0f));
+                        modelMatrix = glm::scale(modelMatrix, m_objects[i]->scale);
+                        
+                        if (uniformModel != -1) glUniformMatrix4fv(uniformModel, 1, GL_FALSE, glm::value_ptr(modelMatrix));
+                        if (uniformUseBones != -1) glUniform1i(uniformUseBones, 0);
+                        
+                        // Render the model - set useTexture based on whether the model has textures
+                        if (m_objects[i]->model) {
+                            bool hasTextures = m_objects[i]->model->HasTextures();
+                            if (uniformUseTexture != -1) glUniform1i(uniformUseTexture, hasTextures ? 1 : 0);
+                            m_objects[i]->model->RenderModel();
+                        }
+                    } else {
+                        RenderObject(m_objects[i].get());
+                    }
                 }
             }
         }
@@ -1350,8 +1474,9 @@ void CameraSystemEditor::UpdatePointCloud() {
         glReadBuffer(GL_BACK);
         glReadPixels(0, 0, fullWidth, fullHeight, GL_DEPTH_COMPONENT, GL_FLOAT, depthBuffer.data());
         
+        // Read color buffer if we need colors (already determined above for shader selection)
         std::vector<unsigned char> colorBuffer;
-        if (m_vipresComputeColor) {
+        if (needColors) {
             colorBuffer.resize(fullWidth * fullHeight * 4);
             glReadPixels(0, 0, fullWidth, fullHeight, GL_RGBA, GL_UNSIGNED_BYTE, colorBuffer.data());
         }
@@ -1369,10 +1494,8 @@ void CameraSystemEditor::UpdatePointCloud() {
         const float tan_half_fov_large = tan_half_fov * aspect_ratio;
         const bool widthLeHeight = (fullWidth <= fullHeight);
         const glm::mat4 invView = glm::inverse(camView);
-        const glm::vec3 defaultColor = m_tofColorCodeByCamera ? 
-            glm::vec3(std::sin(camIdx * 0.618f) * 0.5f + 0.5f,
-                     std::sin(camIdx * 0.618f + 2.094f) * 0.5f + 0.5f,
-                     std::sin(camIdx * 0.618f + 4.189f) * 0.5f + 0.5f) : glm::vec3(1.0f);
+        // Always use white as fallback color - the actual object color will be read from colorBuffer if available
+        const glm::vec3 fallbackColor = glm::vec3(1.0f);
         const float inv255 = 0.003921568627451f;  // 1.0f / 255.0f
         std::mt19937 rng;
         std::uniform_real_distribution<float> noiseDist(-m_vipresNoiseAmount, m_vipresNoiseAmount);
@@ -1422,44 +1545,71 @@ void CameraSystemEditor::UpdatePointCloud() {
                     worldPos4 /= worldPos4.w;
                 }
                 
-                glm::vec3 color = defaultColor;
-                if (m_vipresComputeColor && !colorBuffer.empty()) {
-                    const int pixelIndex = (yIndex + x) * 4;
+                // Extract color from the rendered image at this TOF coordinate
+                // This is the object's actual color from the image data
+                // Used for:
+                //   - VIPRES remeshing (when Compute Color is enabled)
+                //   - Point cloud display (when Color by Object mode is selected)
+                glm::vec3 color = fallbackColor;
+                if (needColors && !colorBuffer.empty()) {
+                    const int pixelIndex = (yIndex + x) * 4;  // RGBA format
                     if (pixelIndex + 2 < static_cast<int>(colorBuffer.size())) {
+                        // Extract RGB channels from the image at this pixel coordinate
                         color = glm::vec3(
-                            colorBuffer[pixelIndex] * inv255,
-                            colorBuffer[pixelIndex + 1] * inv255,
-                            colorBuffer[pixelIndex + 2] * inv255
+                            colorBuffer[pixelIndex] * inv255,      // R
+                            colorBuffer[pixelIndex + 1] * inv255,  // G
+                            colorBuffer[pixelIndex + 2] * inv255   // B
                         );
+                        
                     }
                 }
                 
                 PointCloudPoint point;
                 point.position = glm::vec3(worldPos4);
                 point.color = color;
+                point.cameraId = static_cast<int32_t>(camIdx);
+                
+                // Assign initial segment ID based on nearest scene object
+                if (m_segmentationIdEnabled && !m_objects.empty()) {
+                    float minDist = std::numeric_limits<float>::max();
+                    int32_t nearestObjIdx = -1;
+                    for (size_t objIdx = 0; objIdx < m_objects.size(); objIdx++) {
+                        if (!m_objects[objIdx] || !m_objects[objIdx]->visible) continue;
+                        float dist = glm::length(point.position - m_objects[objIdx]->position);
+                        if (dist < minDist) {
+                            minDist = dist;
+                            nearestObjIdx = static_cast<int32_t>(objIdx);
+                        }
+                    }
+                    point.segmentId = nearestObjIdx;
+                }
+                
                 m_filteredTofData[m_filteredTofWriteBuffer].push_back(point);
             }
         }
         
+        // Unbind shader after rendering for this camera
+        glUseProgram(0);
     }
     
     UpdateCamera();
     
-    // Swap filtered TOF data buffers using std::swap: write buffer becomes read buffer for processing
+    // Swap filtered TOF data: write buffer becomes read buffer for processing
     std::swap(m_filteredTofReadBuffer, m_filteredTofWriteBuffer);
     
+    // ------------------------------------------------------------------------
+    // TOF POST-PROCESSING PIPELINE
+    // ------------------------------------------------------------------------
     // Process filtered TOF data from read buffer into final point cloud
-    // Processing order: Get buffer data -> (noise already applied during sampling) -> TSDF (if enabled) -> Gridding -> Low-pass
-    // Note: TSDF and Low-pass are mutually exclusive
+
     std::vector<PointCloudPoint> processedData = m_filteredTofData[m_filteredTofReadBuffer];
     
-    // Step 1: Apply TSDF if enabled (before gridding, mutually exclusive with low-pass)
+    // TOF Step 1: Apply TSDF if enabled (before gridding, mutually exclusive with low-pass)
     if (m_tofTsdfEnabled) {
         // Ensure low-pass is disabled (mutually exclusive)
         if (m_tofLowPassEnabled) {
             m_tofLowPassEnabled = false;
             Algorithms::ClearLowPassFilterState(m_lowPassFilterState);
-            m_tofProcessing.ClearLowPassFilterState();
         }
         
         // Find camera positions for TSDF integration
@@ -1489,31 +1639,40 @@ void CameraSystemEditor::UpdatePointCloud() {
         ExtractTSDFPointCloud(processedData);
     }
     
-    // Step 2: Apply gridding if enabled (using TOFProcessing)
+    // TOF Step 2: Apply gridding if enabled (using TOFProcessing)
+    // NOTE: Some variables have "vipres" prefix for historical reasons but are part of TOF pipeline
     std::vector<GridKey> pointGridKeys;  // Track grid keys for smart occupancy
     
     if (m_vipresGriddingEnabled) {
         // ApplyGridding clears and populates the grid, so no need to clear here
         m_tofProcessing.ApplyGridding(processedData, m_pointCloudGrid, m_vipresGridMode, m_vipresGridSize);
         
-        // Step 3: Apply smart occupancy weights if enabled (ONLY on gridded data)
-        // Smart occupancy algorithms require gridding to be enabled
-        if (m_smartOccupancyEnabled && m_vipresGriddingEnabled) {
-            ApplySmartOccupancyWeights(m_pointCloudGrid);
-        } else {
-            // Set default weights to 1.0 if smart occupancy is disabled or gridding is disabled
-            for (auto& pair : m_pointCloudGrid) {
-                pair.second.weight = 1.0f;
-            }
-        }
-        
-        // Step 4: Apply weight-based low-pass filter if enabled (AFTER occupancy filtering)
-        if (m_tofLowPassEnabled && m_vipresGriddingEnabled && !m_tofTsdfEnabled) {
+        // TOF Step 3: Apply low-pass filter if enabled (BEFORE smart occupancy)
+        // Low-pass smooths the raw data first
+        if (m_tofLowPassEnabled && !m_tofTsdfEnabled) {
             // This ensures filter responds immediately to slider changes
             Algorithms::ComputeLowPassFilterCoefficients(m_tofLowPassCutoff, m_tofSamplingRate, m_lowPassFilterCoefficients);
             
             // Apply weight-based low-pass filter to gridded points
             Algorithms::ApplyWeightBasedLowPassFilter(m_pointCloudGrid, m_lowPassFilterCoefficients, m_lowPassFilterState);
+        }
+        
+        // TOF Step 4: Apply smart occupancy weights if enabled (AFTER low-pass filter)
+        // Smart occupancy analyzes the smoothed data for consistency/persistence
+        if (m_smartOccupancyEnabled) {
+            ApplySmartOccupancyWeights(m_pointCloudGrid);
+        } else {
+            // Set default weights to 1.0 if smart occupancy is disabled
+            for (auto& pair : m_pointCloudGrid) {
+                pair.second.weight = 1.0f;
+            }
+        }
+        
+        // TOF Step 5: Apply segmentation IDs if enabled (AFTER all filtering)
+        // This assigns IDs to points based on spatial overlap - points from different cameras
+        // that fall into the same grid cell are considered part of the same object
+        if (m_segmentationIdEnabled) {
+            AssignSegmentationIds(m_pointCloudGrid);
         }
         
         // Convert gridded data to point cloud (after weights and low-pass are applied)
@@ -1535,10 +1694,86 @@ void CameraSystemEditor::UpdatePointCloud() {
         for (auto& point : processedData) {
             point.weight = 1.0f;
         }
+        
+        // Apply segmentation IDs for non-gridded data
+        // Segment IDs are already assigned during point extraction based on nearest object
+        // Here we just need to collect active segment IDs
+        if (m_segmentationIdEnabled) {
+            m_activeSegmentIds.clear();
+            for (const auto& point : processedData) {
+                if (point.segmentId >= 0) {
+                    m_activeSegmentIds.insert(point.segmentId);
+                }
+            }
+        }
     }
     
-    // Final step: Copy processed data to point cloud buffer
-    m_pointCloud[m_pointCloudWriteBuffer] = processedData;
+    // ========================================================================
+    // TOF Step 6: Surface Flow Filtering (temporal smoothing)
+    // ========================================================================
+    // Uses 3-frame history to detect local surface motion and remove outlier points
+    // that don't match the local flow pattern. This stabilizes the point cloud.
+    // ========================================================================
+    if (m_surfaceFlowEnabled && m_vipresGriddingEnabled) {
+        // Update the 3-frame history with current frame data
+        m_tofProcessing.UpdateSurfaceFlowHistory(m_pointCloudGrid);
+        
+        // Apply surface flow filtering if we have enough history
+        if (m_tofProcessing.GetSurfaceFlowFrameCount() >= 2) {
+            m_tofProcessing.ApplySurfaceFlowFilter(
+                m_pointCloudGrid,
+                m_surfaceFlowRadius,
+                m_surfaceFlowThreshold,
+                m_vipresGridSize
+            );
+            
+            // Rebuild processedData from filtered grid
+            processedData.clear();
+            pointGridKeys.clear();
+            processedData.reserve(m_pointCloudGrid.size());
+            pointGridKeys.reserve(m_pointCloudGrid.size());
+            
+            for (const auto& pair : m_pointCloudGrid) {
+                pointGridKeys.push_back(pair.first);
+                processedData.push_back(pair.second);
+            }
+        }
+    }
+    
+    // ========================================================================
+    // TOF PIPELINE END
+    // ========================================================================
+    // The processed point cloud (with colors, weights, segment IDs) is now ready.
+    // Filter out excluded segment IDs before passing to rendering and VIPRES.
+    // ========================================================================
+    
+    // Final step: Filter by segment ID inclusion and copy to point cloud buffer
+    m_pointCloud[m_pointCloudWriteBuffer].clear();
+    m_pointCloud[m_pointCloudWriteBuffer].reserve(processedData.size());
+    
+    for (const auto& point : processedData) {
+        // Check if this segment ID should be included
+        if (m_segmentationIdEnabled) {
+            auto it = m_segmentIdIncluded.find(point.segmentId);
+            // If segment ID is explicitly disabled, skip this point
+            if (it != m_segmentIdIncluded.end() && !it->second) {
+                continue;
+            }
+        }
+        m_pointCloud[m_pointCloudWriteBuffer].push_back(point);
+    }
+    
+    // Also filter the grid map for VIPRES
+    if (m_segmentationIdEnabled) {
+        for (auto it = m_pointCloudGrid.begin(); it != m_pointCloudGrid.end();) {
+            auto segIt = m_segmentIdIncluded.find(it->second.segmentId);
+            if (segIt != m_segmentIdIncluded.end() && !segIt->second) {
+                it = m_pointCloudGrid.erase(it);
+            } else {
+                ++it;
+            }
+        }
+    }
     
     // Swap point cloud buffers using std::swap: write buffer becomes read buffer for rendering
     // This ensures rendering always uses a complete, consistent frame
@@ -1556,18 +1791,9 @@ void CameraSystemEditor::UpdatePointCloud() {
 
 // Compute second-order Butterworth low-pass filter coefficients
 void CameraSystemEditor::ComputeLowPassFilterCoefficients(float cutoffHz, float sampleRate) {
-    // Update new algorithms module coefficients
     Algorithms::ComputeLowPassFilterCoefficients(cutoffHz, sampleRate, m_lowPassFilterCoefficients);
-    
-    // Also update old TOFProcessing coefficients for backward compatibility
-    m_tofProcessing.ComputeLowPassFilterCoefficients(cutoffHz, sampleRate);
 }
 
-// Second-order low-pass filter implementation (Butterworth design) for 3D positions
-// Applied to gridded points using GridKey
-glm::vec3 CameraSystemEditor::ApplyLowPassFilterPosition(const GridKey& key, const glm::vec3& inputPos) {
-    return m_tofProcessing.ApplyLowPassFilterPosition(key, inputPos);
-}
 
 // TSDF Integration: Add a point measurement to the TSDF grid
 void CameraSystemEditor::IntegrateTSDF(const GridKey& key, const glm::vec3& pointPos, const glm::vec3& cameraPos, const glm::vec3& color) {
@@ -1591,22 +1817,22 @@ void CameraSystemEditor::CleanupTSDF(float minWeightThreshold, float weightDecay
     m_tofProcessing.CleanupTSDF(minWeightThreshold, weightDecay);
 }
 
-// Second-order low-pass filter implementation for non-gridded points using position hash
-glm::vec3 CameraSystemEditor::ApplyLowPassFilterPosition(size_t positionHash, const glm::vec3& inputPos) {
-    return m_tofProcessing.ApplyLowPassFilterPosition(positionHash, inputPos);
-}
 
 // Smart Occupancy: Apply weight algorithms directly to grid map
 // NOTE: All occupancy algorithms ONLY operate on gridded data - gridding must be enabled
 void CameraSystemEditor::ApplySmartOccupancyWeights(std::map<GridKey, PointCloudPoint>& pointCloudGrid) {
     // Require gridding to be enabled - occupancy algorithms only work on gridded data
     if (!m_vipresGriddingEnabled) {
+        LOG_WARNING("CameraSystem", "ApplySmartOccupancyWeights: Gridding not enabled, skipping");
         return;  // Do not run occupancy algorithms if gridding is disabled
     }
     
     if (pointCloudGrid.empty()) {
+        LOG_WARNING("CameraSystem", "ApplySmartOccupancyWeights: pointCloudGrid is empty, no data to process");
         return;  // No data to process
     }
+    
+    LOG_INFO_FMT("CameraSystem", "ApplySmartOccupancyWeights: Processing %zu grid points", pointCloudGrid.size());
     
     // Build parameters from member variables
     GridBased::OccupancyParams params;
@@ -1624,11 +1850,55 @@ void CameraSystemEditor::ApplySmartOccupancyWeights(std::map<GridKey, PointCloud
     params.evictionMinStartValue = m_smartOccupancyEvictionMinStartValue;
     params.evictionRemovalThreshold = 5;  // Hardcoded removal threshold
     params.eviction2Enabled = m_smartOccupancyEviction2;
-    params.eviction2Radius = m_smartOccupancyEviction2Radius;
-    params.eviction2MinNeighbors = m_smartOccupancyEviction2MinNeighbors;
+    params.eviction2AppearanceThreshold = m_smartOccupancyEviction2AppearanceThreshold;
+    params.eviction2RemovalThreshold = m_smartOccupancyEviction2RemovalThreshold;
     
     // Call the occupancy algorithms module
     GridBased::ApplyOccupancyAlgorithms(pointCloudGrid, params, m_occupancyState);
+}
+
+// Segmentation ID assignment: Uses object-based IDs assigned during TOF capture
+// Points are assigned to the nearest scene object during capture
+// For gridded data, uses majority voting to determine the grid cell's segment ID
+// Label positions are calculated as (min_x, min_y, max_z) for each segment
+void CameraSystemEditor::AssignSegmentationIds(std::map<GridKey, PointCloudPoint>& pointCloudGrid) {
+    if (pointCloudGrid.empty()) {
+        m_activeSegmentIds.clear();
+        m_segmentLabelPos.clear();
+        return;
+    }
+    
+    // Track bounds for each segment: min_x, min_y, max_z
+    std::map<int32_t, float> minX, minY, maxZ;
+    
+    m_activeSegmentIds.clear();
+    
+    for (const auto& pair : pointCloudGrid) {
+        int32_t segId = pair.second.segmentId;
+        const glm::vec3& pos = pair.second.position;
+        
+        // Skip unassigned points
+        if (segId < 0) continue;
+        
+        m_activeSegmentIds.insert(segId);
+        
+        // Initialize or update bounds
+        if (minX.count(segId) == 0) {
+            minX[segId] = pos.x;
+            minY[segId] = pos.y;
+            maxZ[segId] = pos.z;
+        } else {
+            if (pos.x < minX[segId]) minX[segId] = pos.x;
+            if (pos.y < minY[segId]) minY[segId] = pos.y;
+            if (pos.z > maxZ[segId]) maxZ[segId] = pos.z;
+        }
+    }
+    
+    // Build label positions: (min_x, min_y, max_z)
+    m_segmentLabelPos.clear();
+    for (int32_t segId : m_activeSegmentIds) {
+        m_segmentLabelPos[segId] = glm::vec3(minX[segId], minY[segId], maxZ[segId]);
+    }
 }
 
 std::vector<float> CameraSystemEditor::GetPointCloudWeights() const {
@@ -1690,12 +1960,51 @@ void CameraSystemEditor::RenderPointCloud() {
     glEnable(GL_DEPTH_TEST);
     glPointSize(2.0f);  // Match old implementation point size
     
-    // Filter points by weight threshold before rendering
+    // Filter points by weight threshold and apply render color mode before rendering
     std::vector<PointCloudPoint> filteredPoints;
     filteredPoints.reserve(m_pointCloud[m_pointCloudReadBuffer].size());
     for (const auto& point : m_pointCloud[m_pointCloudReadBuffer]) {
         if (point.weight >= m_weightThreshold) {
-            filteredPoints.push_back(point);
+            PointCloudPoint renderPoint = point;
+            
+            // Apply render color mode (stored color is preserved in original point)
+            switch (m_tofRenderColorMode) {
+                case TOFRenderColorMode::BaseColor:
+                    // White/base color for all points
+                    renderPoint.color = glm::vec3(1.0f);
+                    break;
+                case TOFRenderColorMode::ColorByCamera: {
+                    // Color code by camera source using predefined distinct colors
+                    // These are vibrant, easily distinguishable colors
+                    static const glm::vec3 cameraColors[] = {
+                        glm::vec3(1.0f, 0.2f, 0.2f),   // Red
+                        glm::vec3(0.2f, 1.0f, 0.2f),   // Green
+                        glm::vec3(0.2f, 0.4f, 1.0f),   // Blue
+                        glm::vec3(1.0f, 1.0f, 0.2f),   // Yellow
+                        glm::vec3(1.0f, 0.2f, 1.0f),   // Magenta
+                        glm::vec3(0.2f, 1.0f, 1.0f),   // Cyan
+                        glm::vec3(1.0f, 0.6f, 0.2f),   // Orange
+                        glm::vec3(0.6f, 0.2f, 1.0f),   // Purple
+                        glm::vec3(0.2f, 1.0f, 0.6f),   // Teal
+                        glm::vec3(1.0f, 0.4f, 0.6f),   // Pink
+                    };
+                    static const int numColors = sizeof(cameraColors) / sizeof(cameraColors[0]);
+                    int colorIdx = point.cameraId % numColors;
+                    if (colorIdx < 0) colorIdx = 0;
+                    renderPoint.color = cameraColors[colorIdx];
+                    break;
+                }
+                case TOFRenderColorMode::ColorByObject:
+                    // Use original object color from image data only if extract color was enabled
+                    // Otherwise default to white
+                    if (!m_extractColorEnabled) {
+                        renderPoint.color = glm::vec3(1.0f);
+                    }
+                    // else: keep point.color as-is (already has extracted color)
+                    break;
+            }
+            
+            filteredPoints.push_back(renderPoint);
         }
     }
     
@@ -1733,6 +2042,18 @@ void CameraSystemEditor::RenderPointCloud() {
 }
 
 void CameraSystemEditor::GenerateRemesh() {
+    // ========================================================================
+    // VIPRES PIPELINE
+    // ========================================================================
+    // The VIPRES pipeline is responsible for:
+    //   1. Generating a mesh from the TOF point cloud data
+    //   2. Applying colors from the TOF point cloud to the mesh vertices
+    // 
+    // Input: TOF point cloud (from m_pointCloud[m_pointCloudReadBuffer])
+    //        - Contains positions, colors (from image), weights, segment IDs
+    // Output: Mesh vertices and indices (m_remeshVertices, m_remeshIndices)
+    // ========================================================================
+    
     m_remeshVertices.clear();
     m_remeshIndices.clear();
     m_remeshNeedsUpdate = false;
@@ -1758,6 +2079,8 @@ void CameraSystemEditor::GenerateRemesh() {
         algorithm = Engine::Editors::CameraSystem::Algorithm::GeodesicTree;
     } else if (m_vipresRemeshAlgorithm == 6) {
         algorithm = Engine::Editors::CameraSystem::Algorithm::GTree;
+    } else if (m_vipresRemeshAlgorithm == 7) {
+        algorithm = Engine::Editors::CameraSystem::Algorithm::DensitySDF;
     }
     
     // Set up algorithm parameters
@@ -1774,10 +2097,13 @@ void CameraSystemEditor::GenerateRemesh() {
     params.geodesicKNeighbors = m_vipresRemeshGeodesicKNeighbors;
     params.geodesicNumSeeds = m_vipresRemeshGeodesicNumSeeds;
     params.geodesicInteriorBias = m_vipresRemeshGeodesicInteriorBias;
+    params.densityVoxelSize = m_vipresRemeshDensityVoxelSize;
+    params.densitySmoothRadius = m_vipresRemeshDensitySmoothRadius;
+    params.densityIsoValue = m_vipresRemeshDensityIsoValue;
     params.useWeights = m_smartOccupancyEnabled && m_vipresGriddingEnabled;  // Use weights if smart occupancy is enabled
     
     // Convert CameraSystemEditor types to Remeshing types
-    // Use type aliases to avoid name collision with CameraSystemEditor's nested types
+    // Note: Segment ID filtering is already done at the end of the TOF pipeline
     using RemeshPointCloudPoint = ::Engine::Editors::CameraSystem::PointCloudPoint;
     using RemeshGridKey = ::Engine::Editors::CameraSystem::GridKey;
     
@@ -1957,13 +2283,6 @@ void CameraSystemEditor::RenderScene() {
             // If remesh is enabled, render the remeshed mesh instead of point cloud
             RenderRemesh();
         } else {
-            // Otherwise, render the point cloud
-            // Debug: log point cloud status
-            static int debugCount = 0;
-            if (debugCount++ < 10) {
-                LOG_INFO_FMT("CameraSystem", "Rendering TOF point cloud: enabled=%d, bufferInit=%d, pointCount=%zu", 
-                           m_tofDataEnabled, m_pointCloudBuffersInitialized, m_pointCloud[m_pointCloudReadBuffer].size());
-            }
             RenderPointCloud();
         }
     }
@@ -1995,13 +2314,11 @@ void CameraSystemEditor::RenderScene() {
     
     GLuint shaderProgramID = m_meshShader->GetShaderID();
     
-    int directionalLightCount = 0;
     int pointLightCount = 0;
     int spotLightCount = 0;
     
     for (const auto& light : m_lights) {
-        if (light.type == LightType::Directional) directionalLightCount++;
-        else if (light.type == LightType::Point) pointLightCount++;
+        if (light.type == LightType::Point) pointLightCount++;
         else if (light.type == LightType::Spot) spotLightCount++;
     }
     
@@ -2142,11 +2459,205 @@ void CameraSystemEditor::RenderScene() {
             RenderObject(obj.get());
         }
     }
+    
+    // DEBUG: Render red spheres at segment ID label positions
+    if (m_segmentationIdEnabled && !m_activeSegmentIds.empty()) {
+        RenderDebugLabelMarkers();
+    }
 }
 
 void CameraSystemEditor::RenderUI() {
     // Delegate to UI class
     m_ui.Render(*this);
+    
+    // Render segment ID labels in 3D space if enabled
+    if (m_segmentationIdEnabled && !m_activeSegmentIds.empty()) {
+        RenderSegmentIdLabels();
+    }
+}
+
+// Render red markers at the world positions where segment ID labels appear (for visual debugging)
+void CameraSystemEditor::RenderDebugLabelMarkers() {
+    if (m_objects.empty() || m_activeSegmentIds.empty()) return;
+    if (!m_meshShader || !m_meshShader->IsValid()) return;
+    
+    std::vector<glm::vec3> debugPoints;
+    
+    for (int32_t segId : m_activeSegmentIds) {
+        if (segId < 0 || static_cast<size_t>(segId) >= m_objects.size()) continue;
+        
+        const auto& obj = m_objects[segId];
+        if (!obj || !obj->visible) continue;
+        
+        // Build the same model matrix as ObjectRenderer uses
+        glm::mat4 modelMatrix = glm::mat4(1.0f);
+        modelMatrix = glm::translate(modelMatrix, obj->position);
+        modelMatrix = glm::rotate(modelMatrix, glm::radians(-90.0f), glm::vec3(0.0f, 1.0f, 0.0f));
+        modelMatrix = glm::rotate(modelMatrix, glm::radians(-90.0f), glm::vec3(0.0f, 0.0f, 1.0f));
+        modelMatrix = glm::rotate(modelMatrix, glm::radians(obj->rotation.z), glm::vec3(0.0f, 1.0f, 0.0f));
+        modelMatrix = glm::rotate(modelMatrix, glm::radians(obj->rotation.x), glm::vec3(1.0f, 0.0f, 0.0f));
+        modelMatrix = glm::rotate(modelMatrix, glm::radians(obj->rotation.y), glm::vec3(0.0f, 0.0f, 1.0f));
+        modelMatrix = glm::scale(modelMatrix, obj->scale);
+        
+        // Get top of model in model space (Y is up in model space)
+        glm::vec3 modelTopPos(0.0f, 0.0f, 0.0f);
+        if (obj->model && obj->model->GetMeshCount() > 0) {
+            float minX, maxX, minY, maxY, minZ, maxZ;
+            obj->model->GetBounds(minX, maxX, minY, maxY, minZ, maxZ);
+            modelTopPos.x = (minX + maxX) * 0.5f;
+            modelTopPos.y = maxY;
+            modelTopPos.z = (minZ + maxZ) * 0.5f;
+        }
+        
+        // Transform to world space
+        glm::vec4 worldPos4 = modelMatrix * glm::vec4(modelTopPos, 1.0f);
+        glm::vec3 worldPos = glm::vec3(worldPos4);
+        worldPos.z += 2.0f;  // Offset above
+        
+        debugPoints.push_back(worldPos);
+    }
+    
+    if (debugPoints.empty()) return;
+    
+    // Render debug points using a simple VAO/VBO approach
+    static GLuint debugVAO = 0, debugVBO = 0;
+    if (debugVAO == 0) {
+        glGenVertexArrays(1, &debugVAO);
+        glGenBuffers(1, &debugVBO);
+    }
+    
+    // Prepare data: position + color (red)
+    struct DebugVertex {
+        glm::vec3 pos;
+        glm::vec3 color;
+    };
+    std::vector<DebugVertex> vertices;
+    for (const auto& p : debugPoints) {
+        vertices.push_back({p, glm::vec3(1.0f, 0.0f, 0.0f)});  // Red
+    }
+    
+    glBindVertexArray(debugVAO);
+    glBindBuffer(GL_ARRAY_BUFFER, debugVBO);
+    glBufferData(GL_ARRAY_BUFFER, vertices.size() * sizeof(DebugVertex), vertices.data(), GL_DYNAMIC_DRAW);
+    
+    // Position attribute (location 0)
+    glEnableVertexAttribArray(0);
+    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(DebugVertex), (void*)0);
+    // Color attribute (location 5 for vCol in shader)
+    glEnableVertexAttribArray(5);
+    glVertexAttribPointer(5, 3, GL_FLOAT, GL_FALSE, sizeof(DebugVertex), (void*)offsetof(DebugVertex, color));
+    
+    // Use mesh shader with identity model matrix
+    m_meshShader->UseShader();
+    glm::mat4 identity = glm::mat4(1.0f);
+    GLint uniformModel = m_meshShader->GetModelLocation();
+    if (uniformModel != -1) {
+        glUniformMatrix4fv(uniformModel, 1, GL_FALSE, glm::value_ptr(identity));
+    }
+    
+    glDisable(GL_DEPTH_TEST);
+    glPointSize(15.0f);
+    glDrawArrays(GL_POINTS, 0, static_cast<GLsizei>(vertices.size()));
+    glPointSize(1.0f);
+    glEnable(GL_DEPTH_TEST);
+    
+    glBindVertexArray(0);
+}
+
+// Render segment ID labels directly above each scene object
+// Uses the same model matrix transformation as ObjectRenderer
+void CameraSystemEditor::RenderSegmentIdLabels() {
+    if (!m_glfwWindow || m_activeSegmentIds.empty() || m_objects.empty()) return;
+    
+    // Get window size - use glfwGetWindowSize for logical coordinates (Nuklear uses logical, not framebuffer pixels)
+    // On Retina displays, framebuffer is 2x the window size
+    int windowWidth, windowHeight;
+    glfwGetWindowSize(m_glfwWindow, &windowWidth, &windowHeight);
+    if (windowWidth <= 0 || windowHeight <= 0) return;
+    
+    // Also get framebuffer size to calculate scale factor
+    // Note: framebuffer size may differ from window size on Retina displays
+    // but Nuklear uses window coordinates, so we use windowWidth/windowHeight
+    
+    // Get Nuklear context
+    struct nk_context* ctx = m_nuklearUI.GetContext();
+    if (!ctx) return;
+    
+    for (int32_t segId : m_activeSegmentIds) {
+        if (segId < 0 || static_cast<size_t>(segId) >= m_objects.size()) continue;
+        
+        const auto& obj = m_objects[segId];
+        if (!obj || !obj->visible) continue;
+        
+        // Build model matrix (must match RenderDebugLabelMarkers and ObjectRenderer)
+        glm::mat4 modelMatrix = glm::mat4(1.0f);
+        modelMatrix = glm::translate(modelMatrix, obj->position);
+        modelMatrix = glm::rotate(modelMatrix, glm::radians(-90.0f), glm::vec3(0.0f, 1.0f, 0.0f));
+        modelMatrix = glm::rotate(modelMatrix, glm::radians(-90.0f), glm::vec3(0.0f, 0.0f, 1.0f));
+        modelMatrix = glm::rotate(modelMatrix, glm::radians(obj->rotation.z), glm::vec3(0.0f, 1.0f, 0.0f));
+        modelMatrix = glm::rotate(modelMatrix, glm::radians(obj->rotation.x), glm::vec3(1.0f, 0.0f, 0.0f));
+        modelMatrix = glm::rotate(modelMatrix, glm::radians(obj->rotation.y), glm::vec3(0.0f, 0.0f, 1.0f));
+        modelMatrix = glm::scale(modelMatrix, obj->scale);
+        
+        // Get top of model in model space (Y is up in model space)
+        glm::vec3 modelTopPos(0.0f, 0.0f, 0.0f);
+        if (obj->model && obj->model->GetMeshCount() > 0) {
+            float minX, maxX, minY, maxY, minZ, maxZ;
+            obj->model->GetBounds(minX, maxX, minY, maxY, minZ, maxZ);
+            modelTopPos.x = (minX + maxX) * 0.5f;
+            modelTopPos.y = maxY;
+            modelTopPos.z = (minZ + maxZ) * 0.5f;
+        }
+        
+        // Transform model-space top position to world space
+        glm::vec4 worldPos4 = modelMatrix * glm::vec4(modelTopPos, 1.0f);
+        glm::vec3 worldPos = glm::vec3(worldPos4);
+        worldPos.z += 2.0f;  // Offset above the object
+        
+        // Project to clip space
+        glm::mat4 mvp = m_projection * m_view;
+        glm::vec4 clipPos = mvp * glm::vec4(worldPos, 1.0f);
+        
+        // Skip if behind camera
+        if (clipPos.w <= 0.01f) continue;
+        
+        // Perspective divide to NDC
+        glm::vec3 ndc = glm::vec3(clipPos) / clipPos.w;
+        
+        // Skip if outside view frustum
+        if (ndc.x < -1.0f || ndc.x > 1.0f || ndc.y < -1.0f || ndc.y > 1.0f) {
+            continue;
+        }
+        
+        // Convert NDC to screen coordinates
+        // NDC: x [-1,1] left-right, y [-1,1] bottom-top
+        // Screen: x [0,width] left-right, y [0,height] top-bottom
+        float screenX = (ndc.x + 1.0f) * 0.5f * static_cast<float>(windowWidth);
+        float screenY = (1.0f - ndc.y) * 0.5f * static_cast<float>(windowHeight);  // Flip Y for screen coords
+        
+        // Clamp to screen bounds
+        screenX = std::max(25.0f, std::min(screenX, static_cast<float>(windowWidth) - 50.0f));
+        screenY = std::max(25.0f, std::min(screenY, static_cast<float>(windowHeight) - 50.0f));
+        
+        // Create label text
+        char labelText[32];
+        std::snprintf(labelText, sizeof(labelText), "[%d]", segId);
+        
+        // Create unique window name for each segment
+        char windowName[64];
+        std::snprintf(windowName, sizeof(windowName), "##SegID%d", segId);
+        
+        // Render as a small Nuklear window
+        struct nk_rect labelRect = nk_rect(screenX - 20, screenY - 12, 45, 26);
+        nk_style_push_color(ctx, &ctx->style.window.background, nk_rgba(0, 0, 0, 200));
+        if (nk_begin(ctx, windowName, labelRect, 
+                     NK_WINDOW_NO_SCROLLBAR | NK_WINDOW_NO_INPUT | NK_WINDOW_BORDER)) {
+            nk_layout_row_dynamic(ctx, 20, 1);
+            nk_label_colored(ctx, labelText, NK_TEXT_CENTERED, nk_rgb(255, 255, 0));
+        }
+        nk_end(ctx);
+        nk_style_pop_color(ctx);
+    }
 }
 
 // Run() helper function implementations
@@ -2517,7 +3028,8 @@ void CameraSystemEditor::SaveSafeParameters() {
     m_safeParameters.loopEnabled = m_loopEnabled;
     m_safeParameters.captureEnabled = m_captureEnabled;
     m_safeParameters.tofDataEnabled = m_tofDataEnabled;
-    m_safeParameters.tofColorCodeByCamera = m_tofColorCodeByCamera;
+    m_safeParameters.extractColorEnabled = m_extractColorEnabled;
+    m_safeParameters.tofRenderColorMode = m_tofRenderColorMode;
     m_safeParameters.vipresEnabled = m_vipresEnabled;
     m_safeParameters.vipresComputeColor = m_vipresComputeColor;
     m_safeParameters.vipresSamplingDensity = m_vipresSamplingDensity;
@@ -2571,7 +3083,8 @@ void CameraSystemEditor::RestoreSafeParameters() {
     m_loopEnabled = m_safeParameters.loopEnabled;
     m_captureEnabled = m_safeParameters.captureEnabled;
     m_tofDataEnabled = m_safeParameters.tofDataEnabled;
-    m_tofColorCodeByCamera = m_safeParameters.tofColorCodeByCamera;
+    m_extractColorEnabled = m_safeParameters.extractColorEnabled;
+    m_tofRenderColorMode = m_safeParameters.tofRenderColorMode;
     m_vipresEnabled = m_safeParameters.vipresEnabled;
     m_vipresComputeColor = m_safeParameters.vipresComputeColor;
     m_vipresSamplingDensity = m_safeParameters.vipresSamplingDensity;
@@ -2608,10 +3121,8 @@ void CameraSystemEditor::RestoreSafeParameters() {
     m_tofTsdfWeightDecay = m_safeParameters.tofTsdfWeightDecay;
     // Recompute filter coefficients after restoring parameters
     Algorithms::ComputeLowPassFilterCoefficients(m_tofLowPassCutoff, m_tofSamplingRate, m_lowPassFilterCoefficients);
-    m_tofProcessing.ComputeLowPassFilterCoefficients(m_tofLowPassCutoff, m_tofSamplingRate);
     // Clear filter state and TSDF when restoring
     Algorithms::ClearLowPassFilterState(m_lowPassFilterState);
-    m_tofProcessing.ClearLowPassFilterState();
     ClearTSDF();
     
     for (int i = 0; i < 7; i++) {
@@ -2650,6 +3161,12 @@ void CameraSystemEditor::Cleanup() {
         m_meshShader->ClearShader();
         delete m_meshShader;
         m_meshShader = nullptr;
+    }
+    
+    if (m_albedoShader) {
+        m_albedoShader->ClearShader();
+        delete m_albedoShader;
+        m_albedoShader = nullptr;
     }
     
     // Grid shader and buffers are now handled by World class

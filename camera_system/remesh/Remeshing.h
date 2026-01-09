@@ -34,10 +34,12 @@ struct PointCloudPoint {
     glm::vec3 position;
     glm::vec3 color;
     float weight;  // Weight for mesh algorithms (0.0-1.0, default 1.0)
+    int32_t segmentId;  // Segmentation ID for object identification (-1 = unassigned)
+    int32_t cameraId;   // Camera that captured this point (-1 = unknown)
     
-    PointCloudPoint() : position(0.0f), color(1.0f), weight(1.0f) {}
-    PointCloudPoint(const glm::vec3& pos, const glm::vec3& col) : position(pos), color(col), weight(1.0f) {}
-    PointCloudPoint(const glm::vec3& pos, const glm::vec3& col, float w) : position(pos), color(col), weight(w) {}
+    PointCloudPoint() : position(0.0f), color(1.0f), weight(1.0f), segmentId(-1), cameraId(-1) {}
+    PointCloudPoint(const glm::vec3& pos, const glm::vec3& col) : position(pos), color(col), weight(1.0f), segmentId(-1), cameraId(-1) {}
+    PointCloudPoint(const glm::vec3& pos, const glm::vec3& col, float w) : position(pos), color(col), weight(w), segmentId(-1), cameraId(-1) {}
 };
 
 // 2D point for Delaunay triangulation
@@ -66,7 +68,8 @@ enum class Algorithm {
     PoissonLike,
     FCTM,
     GeodesicTree,
-    GTree
+    GTree,
+    DensitySDF       // Density-based SDF reconstruction with marching cubes
 };
 
 // Algorithm parameters
@@ -85,6 +88,13 @@ struct AlgorithmParameters {
     float geodesicInteriorBias; // Bias weight for staying inside point cloud (0.0-1.0, higher = more interior)
     bool useWeights;            // Whether to use point weights in mesh generation
     
+    // DensitySDF parameters (density-based SDF reconstruction)
+    float densityVoxelSize;     // Size of voxels for density field (world units)
+    float densitySmoothRadius;  // Gaussian smoothing radius for density field
+    float densityIsoValue;      // Iso-value for surface extraction (0.5 = half max density)
+    int densityBoxFeatures;     // Number of random box features for local pattern analysis
+    float densitySignRadius;    // Radius for normal estimation (sign determination)
+    
     AlgorithmParameters()
         : maxDistance(1.0f)
         , maxNeighbors(20)
@@ -99,6 +109,11 @@ struct AlgorithmParameters {
         , geodesicNumSeeds(0)
         , geodesicInteriorBias(0.5f)
         , useWeights(false)
+        , densityVoxelSize(2.0f)
+        , densitySmoothRadius(0.0f)  // 0 = match training ratio (splatSigma/voxelSize = 1.5)
+        , densityIsoValue(0.5f)
+        , densityBoxFeatures(32)
+        , densitySignRadius(4.0f)
     {}
 };
 
@@ -160,6 +175,11 @@ private:
     );
     
     RemeshResult GenerateGTree(
+        const std::vector<PointCloudPoint>& pointCloud,
+        const AlgorithmParameters& params
+    );
+    
+    RemeshResult GenerateDensitySDF(
         const std::vector<PointCloudPoint>& pointCloud,
         const AlgorithmParameters& params
     );
