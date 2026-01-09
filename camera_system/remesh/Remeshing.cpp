@@ -2641,6 +2641,13 @@ RemeshResult Remeshing::GenerateDensitySDF(
     float minSdf = std::numeric_limits<float>::max();
     float maxSdf = std::numeric_limits<float>::lowest();
     
+    // Debug: track prediction statistics
+    float sumPredictedDist = 0.0f;
+    float sumRawDist = 0.0f;
+    float maxPredictedDist = 0.0f;
+    float maxGradientDist = 0.0f;
+    int sampleCount = 0;
+    
     for (int z = 0; z < field.dimZ; z++) {
         for (int y = 0; y < field.dimY; y++) {
             for (int x = 0; x < field.dimX; x++) {
@@ -2676,23 +2683,34 @@ RemeshResult Remeshing::GenerateDensitySDF(
                 DensitySDF::PredictDelta(features, deltaX, deltaY, deltaZ);
                 
                 // The predicted delta vector tells us direction and distance to surface
+                // IMPORTANT: Model was trained with voxelSize=0.02f. The predicted delta is in
+                // training world units. We need to scale to inference world units.
+                const float trainingVoxelSize = 0.02f;
+                float scaleFactor = field.voxelSize / trainingVoxelSize;
+                
+                // Scale the delta vector to inference coordinate space
+                deltaX *= scaleFactor;
+                deltaY *= scaleFactor;
+                deltaZ *= scaleFactor;
+                
                 float predictedDist = std::sqrt(deltaX*deltaX + deltaY*deltaY + deltaZ*deltaZ);
                 
                 // Determine sign: use gradient if available, otherwise use delta direction
                 float sign = 1.0f;
                 if (gradMag > 0.001f * maxDensity / field.voxelSize) {
                     // Good gradient available - use it for sign
-                    // If gradient points same way as delta, we're outside (positive SDF)
-                    // If gradient points opposite, we're inside (negative SDF)
+                    // Gradient points toward high density (toward object center/inside)
+                    // Delta = query - closest_surface, so delta points FROM surface TO query:
+                    //   - If query is OUTSIDE: delta points outward (opposite to gradient) → dot < 0
+                    //   - If query is INSIDE: delta points toward center (same as gradient) → dot > 0
                     glm::vec3 normalizedGrad = densityGradient[idx] / gradMag;
                     glm::vec3 deltaDir = glm::vec3(deltaX, deltaY, deltaZ);
                     float deltaMag = predictedDist;
                     if (deltaMag > 0.0001f) {
                         deltaDir /= deltaMag;
-                        // Gradient points toward high density (inside)
-                        // Delta points from query to surface
-                        // If they agree, query is outside
-                        sign = glm::dot(normalizedGrad, deltaDir) < 0.0f ? -1.0f : 1.0f;
+                        // dot < 0 → outside → positive SDF
+                        // dot > 0 → inside → negative SDF
+                        sign = glm::dot(normalizedGrad, deltaDir) < 0.0f ? 1.0f : -1.0f;
                     } else {
                         // Very close to surface - use density to determine sign
                         sign = (d > densityThreshold) ? -1.0f : 1.0f;
@@ -2708,9 +2726,17 @@ RemeshResult Remeshing::GenerateDensitySDF(
                     // Weighted blend - trust gradient more when it's strong
                     float gradWeight = std::min(1.0f, gradMag / (0.1f * maxDensity / field.voxelSize));
                     distance = sign * (gradWeight * gradientDist + (1.0f - gradWeight) * predictedDist);
+                    maxGradientDist = std::max(maxGradientDist, gradientDist);
                 } else {
                     distance = sign * predictedDist;
                 }
+                
+                // Track statistics
+                float rawDist = std::sqrt(deltaX*deltaX + deltaY*deltaY + deltaZ*deltaZ) / scaleFactor;
+                sumRawDist += rawDist;
+                sumPredictedDist += predictedDist;
+                maxPredictedDist = std::max(maxPredictedDist, predictedDist);
+                sampleCount++;
                 
                 // Clamp SDF to reasonable range
                 float maxDist = field.voxelSize * 20.0f;
@@ -2727,6 +2753,13 @@ RemeshResult Remeshing::GenerateDensitySDF(
     
     fprintf(stderr, "[DensitySDF] SDF range: [%.3f, %.3f], inside: %d (%.1f%%)\n", 
             minSdf, maxSdf, insideCount, 100.0f * insideCount / totalVoxels);
+    
+    if (sampleCount > 0) {
+        fprintf(stderr, "[DensitySDF] Model predictions: avgRaw=%.6f, avgScaled=%.4f, maxScaled=%.4f, scaleFactor=%.1f\n",
+                sumRawDist / sampleCount, sumPredictedDist / sampleCount, maxPredictedDist,
+                field.voxelSize / 0.02f);
+        fprintf(stderr, "[DensitySDF] Gradient-based distance: maxGradientDist=%.4f\n", maxGradientDist);
+    }
     
     // =========================================================================
     // STEP 7: Light Gaussian smoothing of SDF (optional, helps regularize)

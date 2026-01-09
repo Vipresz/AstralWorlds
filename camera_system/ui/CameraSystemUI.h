@@ -52,7 +52,8 @@ private:
     bool m_initialized;
     
     // Helper methods for rendering different UI sections
-    void RenderStatusBar(CameraSystemEditor& editor);
+    void RenderStatusBar(CameraSystemEditor& editor);       // Top menu bar
+    void RenderBottomStatusBar(CameraSystemEditor& editor); // Bottom status bar
     void RenderCameraControls(CameraSystemEditor& editor);
     void RenderTOFControls(CameraSystemEditor& editor);
     void RenderVIPRESControls(CameraSystemEditor& editor);

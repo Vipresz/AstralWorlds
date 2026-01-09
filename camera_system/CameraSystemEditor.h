@@ -11,6 +11,7 @@
 #include "nuklear/NuklearUI.h"
 #include "ui/CameraSystemUI.h"
 #include "objects/ObjectManager.h"
+#include "config/UIConfig.h"
 #include <GL/glew.h>
 #include <GLFW/glfw3.h>
 #include <glm/glm.hpp>
@@ -97,6 +98,9 @@ public:
     
     // Load configuration from JSON file
     bool LoadConfig(const std::string& configFile);
+    
+    // Reset all UI slider values to the values from ui_defaults.toml
+    void ResetToConfigDefaults();
     
     // Add a new object to the scene
     bool AddObject(const std::string& meshFilePath, const std::string& animationFilePath = "", 
@@ -203,12 +207,15 @@ private:
     TOFRenderColorMode m_tofRenderColorMode;                  // How to color TOF points during rendering
     std::string m_captureOutputDir;                         // Output directory for captures
     
+    // UI panel visibility
+    bool m_showObjectsPanel;                                 // Show/hide Objects panel
+    
     // VIPRES (Visual Point Cloud Rendering) state
     bool m_vipresEnabled;                                   // VIPRES mode toggle
     bool m_vipresComputeColor;                              // Enable color collection from framebuffer
     int m_vipresSamplingDensity;                            // Sampling density (1-100, where 1=every pixel, 100=every 100th pixel)
     float m_vipresDepthLimit;                               // Maximum depth limit (0.001-100000 units, log scale)
-    bool m_vipresGriddingEnabled;                           // Enable grid-based point storage
+    // Note: Gridding is now controlled by m_vipresGridMode (Disabled = gridding off)
     bool m_vipresRemeshEnabled;                             // Enable mesh generation from point cloud
     bool m_vipresAutoRecomputeMesh;                         // Auto-recompute mesh every frame
     int m_vipresRemeshAlgorithm;                           // Remeshing algorithm index (0=GriddedQuads, 1=NearestNeighbor, 2=Delaunay2D, 3=PoissonLike, 4=FCTM, 5=GeodesicTree)

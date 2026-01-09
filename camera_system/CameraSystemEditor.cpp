@@ -65,13 +65,13 @@ CameraSystemEditor::CameraSystemEditor()
     , m_extractColorEnabled(EXTRACT_COLOR_ENABLED)
     , m_tofRenderColorMode(static_cast<TOFRenderColorMode>(TOF_RENDER_COLOR_MODE))
     , m_captureOutputDir("./pics")  // Relative path for cross-platform compatibility
+    , m_showObjectsPanel(false)  // Objects panel hidden by default
     , m_vipresEnabled(VIPRES_ENABLED)
     , m_vipresComputeColor(VIPRES_COMPUTE_COLOR)
     , m_vipresCameraEnabled()
     // === TOF Controls - Sliders (from UIDefaults.h, clamped in body) ===
     , m_vipresSamplingDensity(VIPRES_SAMPLING_DENSITY)
     , m_vipresDepthLimit(VIPRES_DEPTH_LIMIT)
-    , m_vipresGriddingEnabled(VIPRES_GRIDDING_ENABLED)
     , m_vipresRemeshEnabled(VIPRES_REMESH_ENABLED)
     , m_vipresAutoRecomputeMesh(VIPRES_AUTO_RECOMPUTE_MESH)
     , m_vipresRemeshAlgorithm(VIPRES_REMESH_ALGORITHM)
@@ -94,7 +94,7 @@ CameraSystemEditor::CameraSystemEditor()
     , m_vipresNoisyTofEnabled(VIPRES_NOISY_TOF_ENABLED)
     , m_vipresNoiseAmount(VIPRES_NOISE_AMOUNT)
     , m_vipresGridSize(VIPRES_GRID_SIZE)
-    , m_vipresGridMode(static_cast<TOFGridMode>(VIPRES_GRID_MODE))
+    , m_vipresGridMode(TOFGridMode::Disabled)  // Gridding disabled by default
     , m_tofLowPassCutoff(TOF_LOW_PASS_CUTOFF)
     , m_tofSamplingRate(TOF_SAMPLING_RATE)
     , m_tofLowPassEnabled(TOF_LOW_PASS_ENABLED)
@@ -232,6 +232,20 @@ CameraSystemEditor::~CameraSystemEditor() {
 
 bool CameraSystemEditor::Initialize(int windowWidth, int windowHeight) {
     LOG_INFO("CameraSystem", "Initializing camera system editor...");
+    
+    // Load UI defaults from TOML config file
+    // Try multiple paths: relative to working directory, then relative to executable
+    UIConfig& config = UIConfig::Instance();
+    bool configLoaded = config.LoadFromFile("camera_system/ui_defaults.toml");
+    if (!configLoaded) {
+        configLoaded = config.LoadFromFile("../camera_system/ui_defaults.toml");
+    }
+    if (!configLoaded) {
+        configLoaded = config.LoadFromFile("../../camera_system/ui_defaults.toml");
+    }
+    if (!configLoaded) {
+        LOG_WARNING("CameraSystem", "Could not load ui_defaults.toml - using hardcoded defaults");
+    }
     
     try {
         m_window = new Window(windowWidth, windowHeight);
@@ -396,6 +410,112 @@ void CameraSystemEditor::ResetFrameArrays() {
             m_cameraFrames[i][j].orientation = glm::vec3(0.0f, 0.0f, 1.0f);
         }
     }
+}
+
+void CameraSystemEditor::ResetToConfigDefaults() {
+    UIConfig& cfg = UIConfig::Instance();
+    
+    // Reload the config file to pick up any changes
+    cfg.Reload();
+    
+    LOG_INFO("CameraSystem", "Resetting UI to config defaults...");
+    
+    // Camera settings
+    m_movementSpeed = cfg.GetCameraMovementSpeed();
+    m_freeCameraYaw = cfg.GetCameraYaw();
+    m_freeCameraPitch = cfg.GetCameraPitch();
+    
+    // Grid settings
+    m_world.SetGridVisible(cfg.GetGridVisible());
+    
+    // Camera Controls - Toggles
+    m_loopEnabled = cfg.GetLoopEnabled();
+    // Don't reset capture enabled - that's a runtime action toggle
+    m_tofDataEnabled = cfg.GetTofDataEnabled();
+    m_vipresEnabled = cfg.GetVipresEnabled();
+    m_vipresFreeCameraObjectEnabled = cfg.GetVipresFreeObjectEnabled();
+    
+    // TOF Controls - Toggles
+    m_extractColorEnabled = cfg.GetExtractColorEnabled();
+    m_tofRenderColorMode = static_cast<TOFRenderColorMode>(cfg.GetTofRenderColorMode());
+    // Note: gridding is now controlled by m_vipresGridMode (Disabled = gridding off)
+    // If config had gridding disabled, set mode to Disabled
+    if (!cfg.GetGriddingEnabled()) {
+        m_vipresGridMode = TOFGridMode::Disabled;
+    }
+    m_tofLowPassEnabled = cfg.GetLowPassEnabled();
+    m_tofTsdfEnabled = cfg.GetTsdfEnabled();
+    m_tofTsdfStoreColor = cfg.GetTsdfStoreColor();
+    m_vipresNoisyTofEnabled = cfg.GetNoisyTofEnabled();
+    
+    // TOF Controls - Sliders
+    m_vipresSamplingDensity = cfg.GetSamplingDensity();
+    m_vipresDepthLimit = cfg.GetDepthLimit();
+    m_tofSamplingRate = cfg.GetTofSamplingRate();
+    m_vipresGridSize = cfg.GetGridSize();
+    // Grid mode now has Disabled at index 0, so old config values need +1 if gridding was enabled
+    int configGridMode = cfg.GetGridMode();
+    if (cfg.GetGriddingEnabled() && configGridMode >= 0 && configGridMode <= 2) {
+        // Old config: 0=Average, 1=FirstCome, 2=GridValue -> New: 1=Average, 2=FirstCome, 3=GridValue
+        m_vipresGridMode = static_cast<TOFGridMode>(configGridMode + 1);
+    } else if (!cfg.GetGriddingEnabled()) {
+        m_vipresGridMode = TOFGridMode::Disabled;
+    } else {
+        m_vipresGridMode = static_cast<TOFGridMode>(configGridMode);
+    }
+    m_tofTsdfTruncationDistance = cfg.GetTsdfTruncationDistance();
+    m_tofTsdfWeightDecay = cfg.GetTsdfWeightDecay();
+    m_tofLowPassCutoff = cfg.GetLowPassCutoff();
+    m_vipresNoiseAmount = cfg.GetNoiseAmount();
+    
+    // Smart Occupancy settings
+    m_smartOccupancyEnabled = cfg.GetOccupancyEnabled();
+    m_smartOccupancyNeighborConsistency = cfg.GetOccupancyNeighborConsistency();
+    m_smartOccupancyPersistence = cfg.GetOccupancyPersistence();
+    m_smartOccupancyVariance = cfg.GetOccupancyVariance();
+    m_smartOccupancyEviction = cfg.GetOccupancyEviction();
+    m_smartOccupancyEviction2 = cfg.GetOccupancyEviction2();
+    
+    m_smartOccupancyNeighborRadius = cfg.GetOccupancyNeighborRadius();
+    m_smartOccupancyResidualThreshold = cfg.GetOccupancyResidualThreshold();
+    m_smartOccupancyPersistenceGamma = cfg.GetOccupancyPersistenceGamma();
+    m_smartOccupancyVarianceThreshold = cfg.GetOccupancyVarianceThreshold();
+    m_smartOccupancyEvictionDecay = cfg.GetOccupancyEvictionDecay();
+    m_smartOccupancyEvictionIncrement = cfg.GetOccupancyEvictionIncrement();
+    m_smartOccupancyEvictionMinStartValue = cfg.GetOccupancyEvictionMinStartValue();
+    m_smartOccupancyEviction2AppearanceThreshold = cfg.GetOccupancyEviction2AppearThreshold();
+    m_smartOccupancyEviction2RemovalThreshold = cfg.GetOccupancyEviction2RemovalThreshold();
+    m_weightThreshold = cfg.GetWeightThreshold();
+    
+    // VIPRES settings
+    m_vipresComputeColor = cfg.GetVipresComputeColor();
+    m_segmentationIdEnabled = cfg.GetSegmentationIdEnabled();
+    m_surfaceFlowEnabled = cfg.GetSurfaceFlowEnabled();
+    m_vipresRemeshEnabled = cfg.GetRemeshEnabled();
+    m_vipresAutoRecomputeMesh = cfg.GetAutoRecomputeMesh();
+    m_vipresRemeshPoissonSmoothNormals = cfg.GetRemeshPoissonSmoothNormals();
+    
+    m_surfaceFlowRadius = cfg.GetSurfaceFlowRadius();
+    m_surfaceFlowThreshold = cfg.GetSurfaceFlowThreshold();
+    m_vipresRemeshAlgorithm = cfg.GetRemeshAlgorithm();
+    m_vipresRemeshMaxDistance = cfg.GetRemeshMaxDistance();
+    m_vipresRemeshMaxNeighbors = cfg.GetRemeshMaxNeighbors();
+    m_vipresRemeshProjectionPlane = cfg.GetRemeshProjectionPlane();
+    m_vipresRemeshDelaunayThreshold = cfg.GetRemeshDelaunayThreshold();
+    m_vipresRemeshPoissonRadius = cfg.GetRemeshPoissonRadius();
+    m_vipresRemeshPoissonDepth = cfg.GetRemeshPoissonDepth();
+    m_vipresRemeshPoissonDensity = cfg.GetRemeshPoissonDensity();
+    m_vipresRemeshFCTMSliceThickness = cfg.GetRemeshFctmSliceThickness();
+    m_vipresRemeshGeodesicKNeighbors = cfg.GetRemeshGeodesicKNeighbors();
+    m_vipresRemeshGeodesicInteriorBias = cfg.GetRemeshGeodesicInteriorBias();
+    m_segmentMatchRadius = cfg.GetSegmentMatchRadius();
+    
+    // DensitySDF settings
+    m_vipresRemeshDensityVoxelSize = cfg.GetDensityVoxelSize();
+    m_vipresRemeshDensitySmoothRadius = cfg.GetDensitySmoothRadius();
+    m_vipresRemeshDensityIsoValue = cfg.GetDensityIsoValue();
+    
+    LOG_INFO("CameraSystem", "UI reset to config defaults complete");
 }
 
 bool CameraSystemEditor::LoadConfig(const std::string& configFile) {
@@ -1411,8 +1531,13 @@ void CameraSystemEditor::UpdatePointCloud() {
         }
         
         // Do we need to capture unlit colors from the scene?
-        // Yes if: Extract Color from Images toggle is enabled
-        bool needColors = m_extractColorEnabled;
+        // Yes if any of:
+        //   - Extract Color from TOF toggle is enabled
+        //   - Compute Color for VIPRES is enabled
+        //   - Color by Object render mode is selected
+        bool needColors = m_extractColorEnabled || 
+                          m_vipresComputeColor || 
+                          (m_tofRenderColorMode == TOFRenderColorMode::ColorByObject);
         
         // Choose shader based on whether we need unlit colors
         // Use albedo shader for pure texture colors (no lighting)
@@ -1643,7 +1768,8 @@ void CameraSystemEditor::UpdatePointCloud() {
     // NOTE: Some variables have "vipres" prefix for historical reasons but are part of TOF pipeline
     std::vector<GridKey> pointGridKeys;  // Track grid keys for smart occupancy
     
-    if (m_vipresGriddingEnabled) {
+    bool griddingEnabled = (m_vipresGridMode != TOFGridMode::Disabled);
+    if (griddingEnabled) {
         // ApplyGridding clears and populates the grid, so no need to clear here
         m_tofProcessing.ApplyGridding(processedData, m_pointCloudGrid, m_vipresGridMode, m_vipresGridSize);
         
@@ -1714,7 +1840,7 @@ void CameraSystemEditor::UpdatePointCloud() {
     // Uses 3-frame history to detect local surface motion and remove outlier points
     // that don't match the local flow pattern. This stabilizes the point cloud.
     // ========================================================================
-    if (m_surfaceFlowEnabled && m_vipresGriddingEnabled) {
+    if (m_surfaceFlowEnabled && griddingEnabled) {
         // Update the 3-frame history with current frame data
         m_tofProcessing.UpdateSurfaceFlowHistory(m_pointCloudGrid);
         
@@ -1822,7 +1948,7 @@ void CameraSystemEditor::CleanupTSDF(float minWeightThreshold, float weightDecay
 // NOTE: All occupancy algorithms ONLY operate on gridded data - gridding must be enabled
 void CameraSystemEditor::ApplySmartOccupancyWeights(std::map<GridKey, PointCloudPoint>& pointCloudGrid) {
     // Require gridding to be enabled - occupancy algorithms only work on gridded data
-    if (!m_vipresGriddingEnabled) {
+    if (m_vipresGridMode == TOFGridMode::Disabled) {
         LOG_WARNING("CameraSystem", "ApplySmartOccupancyWeights: Gridding not enabled, skipping");
         return;  // Do not run occupancy algorithms if gridding is disabled
     }
@@ -1995,12 +2121,12 @@ void CameraSystemEditor::RenderPointCloud() {
                     break;
                 }
                 case TOFRenderColorMode::ColorByObject:
-                    // Use original object color from image data only if extract color was enabled
-                    // Otherwise default to white
-                    if (!m_extractColorEnabled) {
-                        renderPoint.color = glm::vec3(1.0f);
-                    }
-                    // else: keep point.color as-is (already has extracted color)
+                    // Use original object color from image data
+                    // Colors are captured when any of these are enabled:
+                    //   - Extract Color from TOF
+                    //   - Compute Color (VIPRES)
+                    //   - Color by Object mode (automatically enables color capture)
+                    // So we always keep point.color as-is in this mode
                     break;
             }
             
@@ -2100,7 +2226,7 @@ void CameraSystemEditor::GenerateRemesh() {
     params.densityVoxelSize = m_vipresRemeshDensityVoxelSize;
     params.densitySmoothRadius = m_vipresRemeshDensitySmoothRadius;
     params.densityIsoValue = m_vipresRemeshDensityIsoValue;
-    params.useWeights = m_smartOccupancyEnabled && m_vipresGriddingEnabled;  // Use weights if smart occupancy is enabled
+    params.useWeights = m_smartOccupancyEnabled && (m_vipresGridMode != TOFGridMode::Disabled);  // Use weights if smart occupancy is enabled
     
     // Convert CameraSystemEditor types to Remeshing types
     // Note: Segment ID filtering is already done at the end of the TOF pipeline
@@ -2134,7 +2260,7 @@ void CameraSystemEditor::GenerateRemesh() {
     Engine::Editors::CameraSystem::RemeshResult result = remeshing.GenerateMesh(
         remeshPointCloud,
         remeshPointCloudGrid,
-        m_vipresGriddingEnabled,
+        (m_vipresGridMode != TOFGridMode::Disabled),
         m_vipresGridSize,
         algorithm,
         params
@@ -3034,7 +3160,7 @@ void CameraSystemEditor::SaveSafeParameters() {
     m_safeParameters.vipresComputeColor = m_vipresComputeColor;
     m_safeParameters.vipresSamplingDensity = m_vipresSamplingDensity;
     m_safeParameters.vipresDepthLimit = m_vipresDepthLimit;
-    m_safeParameters.vipresGriddingEnabled = m_vipresGriddingEnabled;
+    m_safeParameters.vipresGriddingEnabled = (m_vipresGridMode != TOFGridMode::Disabled);
     m_safeParameters.vipresRemeshEnabled = m_vipresRemeshEnabled;
     m_safeParameters.vipresAutoRecomputeMesh = m_vipresAutoRecomputeMesh;
     m_safeParameters.vipresRemeshAlgorithm = m_vipresRemeshAlgorithm;
@@ -3089,7 +3215,12 @@ void CameraSystemEditor::RestoreSafeParameters() {
     m_vipresComputeColor = m_safeParameters.vipresComputeColor;
     m_vipresSamplingDensity = m_safeParameters.vipresSamplingDensity;
     m_vipresDepthLimit = m_safeParameters.vipresDepthLimit;
-    m_vipresGriddingEnabled = m_safeParameters.vipresGriddingEnabled;
+    // Note: vipresGriddingEnabled is now derived from m_vipresGridMode
+    // If saved state was disabled and current mode is not Disabled, we keep current mode
+    // If saved state was disabled and current mode is not Disabled, set to Disabled
+    if (!m_safeParameters.vipresGriddingEnabled && m_vipresGridMode != TOFGridMode::Disabled) {
+        m_vipresGridMode = TOFGridMode::Disabled;
+    }
     m_vipresRemeshEnabled = m_safeParameters.vipresRemeshEnabled;
     m_vipresAutoRecomputeMesh = m_safeParameters.vipresAutoRecomputeMesh;
     m_vipresRemeshAlgorithm = m_safeParameters.vipresRemeshAlgorithm;

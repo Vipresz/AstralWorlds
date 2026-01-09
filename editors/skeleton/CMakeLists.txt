@@ -81,13 +81,13 @@ if(USE_HOMEBREW)
         ${CMAKE_CURRENT_SOURCE_DIR}/../../engine/platform
     )
 else()
-    include_directories(
+include_directories(
         ${GAME_LIBS_DIR}/glm-1.0.2
         ${NUKLEAR_DIR}
         ${NUKLEAR_DIR}/demo/glfw_opengl3
-        ${CMAKE_CURRENT_SOURCE_DIR}/../../engine
-        ${CMAKE_CURRENT_SOURCE_DIR}/../../engine/platform
-    )
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../engine
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../engine/platform
+)
 endif()
 
 # ============================================================================
@@ -120,20 +120,20 @@ if(USE_HOMEBREW)
         ${BREW_PREFIX}/opt/assimp/include
     )
 else()
-    find_library(GLEW_LIB 
-        NAMES glew32 glew
+find_library(GLEW_LIB 
+    NAMES glew32 glew
         PATHS ${GAME_LIBS_DIR}/glew-2.1.0/lib/Release
-    )
+)
 
-    find_library(GLFW_LIB
-        NAMES glfw3 glfw
+find_library(GLFW_LIB
+    NAMES glfw3 glfw
         PATHS ${GAME_LIBS_DIR}/glfw-3.4
-    )
+)
 
-    find_library(ASSIMP_LIB
-        NAMES assimp-vc143-mt assimp
-        PATHS ${CMAKE_CURRENT_SOURCE_DIR}/../../build/lib/Release
-    )
+find_library(ASSIMP_LIB
+    NAMES assimp-vc143-mt assimp
+    PATHS ${CMAKE_CURRENT_SOURCE_DIR}/../../build/lib/Release
+)
 endif()
 
 # Source files for command-line editor
@@ -181,13 +181,13 @@ if(GLEW_LIB)
     # Copy GLEW DLL to executable directory (Windows only)
     if(NOT USE_HOMEBREW)
         set(GLEW_DLL_DIR "${GAME_LIBS_DIR}/glew-2.1.0/bin/Release/x64")
-        if(EXISTS "${GLEW_DLL_DIR}/glew32.dll")
-            add_custom_command(TARGET visual_skeleton_editor POST_BUILD
-                COMMAND ${CMAKE_COMMAND} -E copy_if_different
-                "${GLEW_DLL_DIR}/glew32.dll"
-                "${CMAKE_BINARY_DIR}/bin/$<CONFIG>"
-                COMMENT "Copying GLEW DLL to visual_skeleton_editor output directory"
-            )
+    if(EXISTS "${GLEW_DLL_DIR}/glew32.dll")
+        add_custom_command(TARGET visual_skeleton_editor POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${GLEW_DLL_DIR}/glew32.dll"
+            "${CMAKE_BINARY_DIR}/bin/$<CONFIG>"
+            COMMENT "Copying GLEW DLL to visual_skeleton_editor output directory"
+        )
         endif()
     endif()
 endif()

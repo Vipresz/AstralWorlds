@@ -103,26 +103,26 @@ if(USE_HOMEBREW)
     endif()
 else()
     # Windows: Use game_libs directory
-    set(GLEW_ROOT "${GAME_LIBS_DIR}/glew-2.1.0")
-    set(GLEW_INCLUDE_DIR "${GLEW_ROOT}/include")
-    set(GLEW_LIB_DIR "${GLEW_ROOT}/lib/Release/x64")
-    set(GLEW_DLL_DIR "${GLEW_ROOT}/bin/Release/x64")
+set(GLEW_ROOT "${GAME_LIBS_DIR}/glew-2.1.0")
+set(GLEW_INCLUDE_DIR "${GLEW_ROOT}/include")
+set(GLEW_LIB_DIR "${GLEW_ROOT}/lib/Release/x64")
+set(GLEW_DLL_DIR "${GLEW_ROOT}/bin/Release/x64")
 
-    if(EXISTS "${GLEW_INCLUDE_DIR}/GL/glew.h" AND EXISTS "${GLEW_LIB_DIR}/glew32.lib")
-        target_include_directories(Platform PUBLIC ${GLEW_INCLUDE_DIR})
-        target_link_libraries(Platform PUBLIC "${GLEW_LIB_DIR}/glew32.lib")
-        message(STATUS "Found GLEW: ${GLEW_ROOT}")
+if(EXISTS "${GLEW_INCLUDE_DIR}/GL/glew.h" AND EXISTS "${GLEW_LIB_DIR}/glew32.lib")
+    target_include_directories(Platform PUBLIC ${GLEW_INCLUDE_DIR})
+    target_link_libraries(Platform PUBLIC "${GLEW_LIB_DIR}/glew32.lib")
+    message(STATUS "Found GLEW: ${GLEW_ROOT}")
         set(GLEW_FOUND_LOCAL TRUE)
-        
-        # Copy DLL to output directory
-        if(EXISTS "${GLEW_DLL_DIR}/glew32.dll")
-            add_custom_command(TARGET Platform POST_BUILD
-                COMMAND ${CMAKE_COMMAND} -E copy_if_different
-                "${GLEW_DLL_DIR}/glew32.dll"
-                "$<TARGET_FILE_DIR:Platform>"
-                COMMENT "Copying GLEW DLL to output directory"
-            )
-        endif()
+    
+    # Copy DLL to output directory
+    if(EXISTS "${GLEW_DLL_DIR}/glew32.dll")
+        add_custom_command(TARGET Platform POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${GLEW_DLL_DIR}/glew32.dll"
+            "$<TARGET_FILE_DIR:Platform>"
+            COMMENT "Copying GLEW DLL to output directory"
+        )
+    endif()
     endif()
 endif()
 
@@ -149,19 +149,19 @@ if(USE_HOMEBREW)
     endif()
 else()
     # Windows: Build from source
-    set(GLFW_ROOT "${GAME_LIBS_DIR}/glfw-3.4")
-    set(GLFW_INCLUDE_DIR "${GLFW_ROOT}/include")
+set(GLFW_ROOT "${GAME_LIBS_DIR}/glfw-3.4")
+set(GLFW_INCLUDE_DIR "${GLFW_ROOT}/include")
 
-    if(EXISTS "${GLFW_INCLUDE_DIR}/GLFW/glfw3.h")
-        set(GLFW_BUILD_DOCS OFF CACHE BOOL "" FORCE)
-        set(GLFW_BUILD_TESTS OFF CACHE BOOL "" FORCE)
-        set(GLFW_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
-        set(GLFW_INSTALL OFF CACHE BOOL "" FORCE)
-        
-        add_subdirectory("${GLFW_ROOT}" "${CMAKE_BINARY_DIR}/glfw" EXCLUDE_FROM_ALL)
-        target_include_directories(glfw INTERFACE ${GLFW_INCLUDE_DIR})
-        target_link_libraries(Platform PUBLIC glfw)
-        message(STATUS "Found GLFW (building from source): ${GLFW_ROOT}")
+if(EXISTS "${GLFW_INCLUDE_DIR}/GLFW/glfw3.h")
+    set(GLFW_BUILD_DOCS OFF CACHE BOOL "" FORCE)
+    set(GLFW_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+    set(GLFW_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+    set(GLFW_INSTALL OFF CACHE BOOL "" FORCE)
+    
+    add_subdirectory("${GLFW_ROOT}" "${CMAKE_BINARY_DIR}/glfw" EXCLUDE_FROM_ALL)
+    target_include_directories(glfw INTERFACE ${GLFW_INCLUDE_DIR})
+    target_link_libraries(Platform PUBLIC glfw)
+    message(STATUS "Found GLFW (building from source): ${GLFW_ROOT}")
         set(GLFW_FOUND_LOCAL TRUE)
     endif()
 endif()
@@ -184,12 +184,12 @@ if(USE_HOMEBREW)
     endif()
 else()
     # Windows: Use game_libs directory
-    set(GLM_ROOT "${GAME_LIBS_DIR}/glm-1.0.2")
-    set(GLM_INCLUDE_DIR "${GLM_ROOT}")
+set(GLM_ROOT "${GAME_LIBS_DIR}/glm-1.0.2")
+set(GLM_INCLUDE_DIR "${GLM_ROOT}")
 
-    if(EXISTS "${GLM_INCLUDE_DIR}/glm/glm.hpp")
-        target_include_directories(Platform PUBLIC ${GLM_INCLUDE_DIR})
-        message(STATUS "Found GLM: ${GLM_ROOT}")
+if(EXISTS "${GLM_INCLUDE_DIR}/glm/glm.hpp")
+    target_include_directories(Platform PUBLIC ${GLM_INCLUDE_DIR})
+    message(STATUS "Found GLM: ${GLM_ROOT}")
         set(GLM_FOUND_LOCAL TRUE)
     endif()
 endif()
@@ -217,78 +217,78 @@ if(USE_HOMEBREW)
     endif()
 else()
     # Windows: Try new 6.0.2 location first
-    set(ASSIMP_NEW_ROOT "${GAME_LIBS_DIR}/assimp-6.0.2")
-    set(ASSIMP_OLD_ROOT "${GAME_LIBS_DIR}/assimp")
+set(ASSIMP_NEW_ROOT "${GAME_LIBS_DIR}/assimp-6.0.2")
+set(ASSIMP_OLD_ROOT "${GAME_LIBS_DIR}/assimp")
     set(ASSIMP_LIB_DIR "${GAME_LIBS_DIR}/assimp_lib")
-    set(ASSIMP_INCLUDE_DIR "${ASSIMP_NEW_ROOT}/include")
-    
-    set(ASSIMP_CMAKE_MODULES_DIR "${ASSIMP_NEW_ROOT}/cmake-modules")
-    set(ASSIMP_HAS_COMPLETE_SOURCE FALSE)
+set(ASSIMP_INCLUDE_DIR "${ASSIMP_NEW_ROOT}/include")
 
-    if(EXISTS "${ASSIMP_INCLUDE_DIR}/assimp/Importer.hpp" 
-       AND EXISTS "${ASSIMP_NEW_ROOT}/CMakeLists.txt"
-       AND EXISTS "${ASSIMP_NEW_ROOT}/contrib/zlib")
-        if(EXISTS "${ASSIMP_CMAKE_MODULES_DIR}/assimp-plain-config.cmake.in")
-            set(ASSIMP_HAS_COMPLETE_SOURCE TRUE)
-        endif()
+set(ASSIMP_CMAKE_MODULES_DIR "${ASSIMP_NEW_ROOT}/cmake-modules")
+set(ASSIMP_HAS_COMPLETE_SOURCE FALSE)
+
+if(EXISTS "${ASSIMP_INCLUDE_DIR}/assimp/Importer.hpp" 
+   AND EXISTS "${ASSIMP_NEW_ROOT}/CMakeLists.txt"
+   AND EXISTS "${ASSIMP_NEW_ROOT}/contrib/zlib")
+    if(EXISTS "${ASSIMP_CMAKE_MODULES_DIR}/assimp-plain-config.cmake.in")
+        set(ASSIMP_HAS_COMPLETE_SOURCE TRUE)
     endif()
+endif()
 
-    if(ASSIMP_HAS_COMPLETE_SOURCE)
-        set(ASSIMP_BUILD_TESTS OFF CACHE BOOL "" FORCE)
-        set(ASSIMP_BUILD_SAMPLES OFF CACHE BOOL "" FORCE)
-        set(ASSIMP_INSTALL OFF CACHE BOOL "" FORCE)
-        set(ASSIMP_BUILD_ASSIMP_TOOLS OFF CACHE BOOL "" FORCE)
-        set(ASSIMP_BUILD_DOCS OFF CACHE BOOL "" FORCE)
+if(ASSIMP_HAS_COMPLETE_SOURCE)
+    set(ASSIMP_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+    set(ASSIMP_BUILD_SAMPLES OFF CACHE BOOL "" FORCE)
+    set(ASSIMP_INSTALL OFF CACHE BOOL "" FORCE)
+    set(ASSIMP_BUILD_ASSIMP_TOOLS OFF CACHE BOOL "" FORCE)
+    set(ASSIMP_BUILD_DOCS OFF CACHE BOOL "" FORCE)
         set(ASSIMP_BUILD_ZLIB ON CACHE BOOL "" FORCE)
-        
-        add_subdirectory("${ASSIMP_NEW_ROOT}" "${CMAKE_BINARY_DIR}/assimp" EXCLUDE_FROM_ALL)
-        target_link_libraries(Platform PUBLIC assimp)
-        target_include_directories(Platform PUBLIC ${ASSIMP_INCLUDE_DIR})
-        
-        message(STATUS "Found Assimp 6.0.2 source: ${ASSIMP_NEW_ROOT}")
+    
+    add_subdirectory("${ASSIMP_NEW_ROOT}" "${CMAKE_BINARY_DIR}/assimp" EXCLUDE_FROM_ALL)
+    target_link_libraries(Platform PUBLIC assimp)
+    target_include_directories(Platform PUBLIC ${ASSIMP_INCLUDE_DIR})
+    
+    message(STATUS "Found Assimp 6.0.2 source: ${ASSIMP_NEW_ROOT}")
         message(STATUS "  Building from source (may take a few minutes on first build)")
         set(ASSIMP_FOUND_LOCAL TRUE)
-    else()
+else()
         message(STATUS "Assimp source incomplete, trying pre-built libraries...")
-        
-        find_path(ASSIMP_INCLUDE_DIR_FOUND 
-            NAMES assimp/Importer.hpp
-            PATHS
-                "${ASSIMP_NEW_ROOT}/include"
-                "${ASSIMP_OLD_ROOT}/include"
-                "${GAME_LIBS_DIR}/assimp/include"
-            PATH_SUFFIXES include
-            NO_DEFAULT_PATH
-        )
-        
-        find_library(ASSIMP_LIBRARY
-            NAMES assimp assimp-vc143-mt assimp-vc142-mt
-            PATHS
-                "${ASSIMP_LIB_DIR}"
-                "${ASSIMP_NEW_ROOT}/lib"
-                "${ASSIMP_OLD_ROOT}/lib"
-                "${GAME_LIBS_DIR}/assimp/lib"
-            PATH_SUFFIXES lib lib/Release lib/x64 Release/lib Debug/lib
-            NO_DEFAULT_PATH
-        )
-        
-        if(ASSIMP_INCLUDE_DIR_FOUND AND ASSIMP_LIBRARY)
-            target_include_directories(Platform PUBLIC ${ASSIMP_INCLUDE_DIR_FOUND})
-            target_link_libraries(Platform PUBLIC ${ASSIMP_LIBRARY})
-            message(STATUS "Found Assimp (pre-built): ${ASSIMP_INCLUDE_DIR_FOUND}")
+    
+    find_path(ASSIMP_INCLUDE_DIR_FOUND 
+        NAMES assimp/Importer.hpp
+        PATHS
+            "${ASSIMP_NEW_ROOT}/include"
+            "${ASSIMP_OLD_ROOT}/include"
+            "${GAME_LIBS_DIR}/assimp/include"
+        PATH_SUFFIXES include
+        NO_DEFAULT_PATH
+    )
+    
+    find_library(ASSIMP_LIBRARY
+        NAMES assimp assimp-vc143-mt assimp-vc142-mt
+        PATHS
+            "${ASSIMP_LIB_DIR}"
+            "${ASSIMP_NEW_ROOT}/lib"
+            "${ASSIMP_OLD_ROOT}/lib"
+            "${GAME_LIBS_DIR}/assimp/lib"
+        PATH_SUFFIXES lib lib/Release lib/x64 Release/lib Debug/lib
+        NO_DEFAULT_PATH
+    )
+    
+    if(ASSIMP_INCLUDE_DIR_FOUND AND ASSIMP_LIBRARY)
+        target_include_directories(Platform PUBLIC ${ASSIMP_INCLUDE_DIR_FOUND})
+        target_link_libraries(Platform PUBLIC ${ASSIMP_LIBRARY})
+        message(STATUS "Found Assimp (pre-built): ${ASSIMP_INCLUDE_DIR_FOUND}")
             set(ASSIMP_FOUND_LOCAL TRUE)
-            
+        
             # Copy DLL if it exists
             set(ASSIMP_DLL "${ASSIMP_LIB_DIR}/assimp-vc143-mt.dll")
             if(NOT EXISTS "${ASSIMP_DLL}")
                 set(ASSIMP_DLL "${ASSIMP_OLD_ROOT}/assimp-vc143-mt.dll")
             endif()
-            if(EXISTS "${ASSIMP_DLL}")
-                add_custom_command(TARGET Platform POST_BUILD
-                    COMMAND ${CMAKE_COMMAND} -E copy_if_different
-                    "${ASSIMP_DLL}"
-                    $<TARGET_FILE_DIR:Game>
-                )
+        if(EXISTS "${ASSIMP_DLL}")
+            add_custom_command(TARGET Platform POST_BUILD
+                COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                "${ASSIMP_DLL}"
+                $<TARGET_FILE_DIR:Game>
+            )
             endif()
         endif()
     endif()

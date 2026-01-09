@@ -15,6 +15,7 @@ using GridKey = Engine::Editors::CameraSystem::GridKey;
 
 // Grid mode for TOF point cloud processing
 enum class TOFGridMode {
+    Disabled,   // Gridding disabled - use raw points
     Average,    // Average all points that snap to the same grid coordinate
     FirstCome,  // Save only the first point that maps to a grid cell
     GridValue   // Use the snapped grid position (center of grid cell)

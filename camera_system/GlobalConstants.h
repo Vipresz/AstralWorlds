@@ -141,13 +141,13 @@ constexpr float REMESH_GEODESIC_INTERIOR_BIAS_MIN = 0.0f;
 constexpr float REMESH_GEODESIC_INTERIOR_BIAS_MAX = 1.0f;
 
 /// Remesh Density Voxel Size (units)
-constexpr float REMESH_DENSITY_VOXEL_SIZE_DEFAULT = 2.0f;
+constexpr float REMESH_DENSITY_VOXEL_SIZE_DEFAULT = .5f;
 
 /// Remesh Density Smooth Radius (units)
-constexpr float REMESH_DENSITY_SMOOTH_RADIUS_DEFAULT = 2.0f;
+constexpr float REMESH_DENSITY_SMOOTH_RADIUS_DEFAULT = .5f;
 
 /// Remesh Density Iso Value (0.0-1.0)
-constexpr float REMESH_DENSITY_ISO_VALUE_DEFAULT = 0.5f;
+constexpr float REMESH_DENSITY_ISO_VALUE_DEFAULT = 0.3f;
 
 // ============================================================================
 // Object Slider Defaults and Limits

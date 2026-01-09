@@ -148,6 +148,8 @@ set(SOURCES
     config/ConfigManager.cpp
     config/ConfigManager.h
     config/ConfigManager.inl
+    config/UIConfig.cpp
+    config/UIConfig.h
     nuklear/NuklearUI.cpp
     nuklear/NuklearUI.h
     nuklear/NuklearImpl.cpp
