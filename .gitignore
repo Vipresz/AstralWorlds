@@ -60,3 +60,9 @@ __pycache__/
 
 # Large generated model headers
 camera_system/DensitySDFModel.h
+
+# Ouster SDK (external repository)
+camera_system/ouster/ouster-sdk/
+
+# Generated point cloud images
+camera_system/ouster/*.png
