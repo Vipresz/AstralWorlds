@@ -87,7 +87,7 @@ struct OccupancyState {
     // Strategy 2 state: removal count tracking
     std::map<GridKey, int> evictionRemovalCounts;  // Track removal count for each grid cell
     
-    // Eviction-based-2 state
+    // Eviction Neighbor based states state
     std::map<GridKey, PointCloudPoint> eviction2Map1;
     std::map<GridKey, PointCloudPoint> eviction2Map2;
     std::vector<std::tuple<int, int, int>> eviction2NeighborOffsets;

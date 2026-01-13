@@ -45,29 +45,31 @@ public:
     
     // Initialize logger with log file path
     bool Initialize(const std::string& logFilePath = "debug.log") {
-        std::lock_guard<std::mutex> lock(m_mutex);
+        {
+            std::lock_guard<std::mutex> lock(m_mutex);
+            
+            if (m_logFile.is_open()) {
+                m_logFile.close();
+            }
+            
+            m_logFile.open(logFilePath, std::ios::out | std::ios::trunc);
+            if (!m_logFile.is_open()) {
+                std::cerr << "Failed to open log file: " << logFilePath << std::endl;
+                return false;
+            }
+            
+            m_logFilePath = logFilePath;
+            
+            // Write a simple test message directly to file first
+            try {
+                m_logFile << "=== LOGGER INITIALIZED ===" << std::endl;
+                m_logFile.flush();
+            } catch (...) {
+                // Ignore - will try again with Log()
+            }
+        } // Release lock before calling Log()
         
-        if (m_logFile.is_open()) {
-            m_logFile.close();
-        }
-        
-        m_logFile.open(logFilePath, std::ios::out | std::ios::trunc);
-        if (!m_logFile.is_open()) {
-            std::cerr << "Failed to open log file: " << logFilePath << std::endl;
-            return false;
-        }
-        
-        m_logFilePath = logFilePath;
-        
-        // Write a simple test message directly to file first
-        try {
-            m_logFile << "=== LOGGER INITIALIZED ===" << std::endl;
-            m_logFile.flush();
-        } catch (...) {
-            // Ignore - will try again with Log()
-        }
-        
-        // Now try using Log() method
+        // Now try using Log() method (outside the lock to avoid deadlock)
         Log(LogLevel::LevelInfo, "Logger", "Logger initialized. Log file: " + logFilePath);
         return true;
     }
@@ -161,9 +163,11 @@ public:
     }
     
     void Shutdown() {
+        // Log before acquiring the lock to avoid deadlock
+        Log(LogLevel::LevelInfo, "Logger", "Logger shutting down");
+        
         std::lock_guard<std::mutex> lock(m_mutex);
         if (m_logFile.is_open()) {
-            Log(LogLevel::LevelInfo, "Logger", "Logger shutting down");
             m_logFile.close();
         }
     }

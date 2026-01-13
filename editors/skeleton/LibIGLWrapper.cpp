@@ -244,7 +244,6 @@ std::vector<std::vector<std::pair<int, float>>> LibIGLWrapper::GenerateWeights(
     int maxBonesPerVertex)
 {
     m_lastError = "";
-    std::vector<std::vector<std::pair<int, float>>> result(vertices.size());
     
     if (!m_libiglAvailable) {
         m_lastError = "libigl not available - using fallback method";
