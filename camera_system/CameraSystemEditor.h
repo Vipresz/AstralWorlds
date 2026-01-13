@@ -11,6 +11,7 @@
 #include "nuklear/NuklearUI.h"
 #include "ui/CameraSystemUI.h"
 #include "objects/ObjectManager.h"
+#include "config/UIConfig.h"
 #include <GL/glew.h>
 #include <GLFW/glfw3.h>
 #include <glm/glm.hpp>
@@ -18,6 +19,7 @@
 #include <vector>
 #include <string>
 #include <map>
+#include <set>
 #include <memory>
 #include <filesystem>
 #include <chrono>
@@ -41,6 +43,14 @@ namespace Render {
 namespace Engine {
 namespace Editors {
 namespace CameraSystem {
+
+// TOF Render Color Mode - controls how TOF points are colored during rendering
+// (the original image color is always stored with each point for data saving)
+enum class TOFRenderColorMode {
+    BaseColor = 0,      // White/base color for all points (default)
+    ColorByCamera = 1,  // Color code by camera source
+    ColorByObject = 2   // Use original object color from image data
+};
 
 // Forward declarations
 class ObjectRenderer;
@@ -89,6 +99,9 @@ public:
     // Load configuration from JSON file
     bool LoadConfig(const std::string& configFile);
     
+    // Reset all UI slider values to the values from ui_defaults.toml
+    void ResetToConfigDefaults();
+    
     // Add a new object to the scene
     bool AddObject(const std::string& meshFilePath, const std::string& animationFilePath = "", 
                    const std::string& name = "");
@@ -111,6 +124,7 @@ private:
     Platform::Window* m_window;
     GLFWwindow* m_glfwWindow;  // Cached GLFW window pointer for safe access
     Platform::Render::Shader* m_meshShader;
+    Platform::Render::Shader* m_albedoShader;  // Simple shader for capturing unlit texture/vertex colors
     
     // World (grid and environment)
     World m_world;
@@ -189,15 +203,19 @@ private:
     // Capture state
     bool m_captureEnabled;                                   // Capture toggle state
     bool m_tofDataEnabled;                                   // TOF/depth data capture toggle state
-    bool m_tofColorCodeByCamera;                            // Color code TOF points by camera (default: false, uses white)
+    bool m_extractColorEnabled;                              // Extract colors from images for TOF data
+    TOFRenderColorMode m_tofRenderColorMode;                  // How to color TOF points during rendering
     std::string m_captureOutputDir;                         // Output directory for captures
+    
+    // UI panel visibility
+    bool m_showObjectsPanel;                                 // Show/hide Objects panel
     
     // VIPRES (Visual Point Cloud Rendering) state
     bool m_vipresEnabled;                                   // VIPRES mode toggle
     bool m_vipresComputeColor;                              // Enable color collection from framebuffer
     int m_vipresSamplingDensity;                            // Sampling density (1-100, where 1=every pixel, 100=every 100th pixel)
     float m_vipresDepthLimit;                               // Maximum depth limit (0.001-100000 units, log scale)
-    bool m_vipresGriddingEnabled;                           // Enable grid-based point storage
+    // Note: Gridding is now controlled by m_vipresGridMode (Disabled = gridding off)
     bool m_vipresRemeshEnabled;                             // Enable mesh generation from point cloud
     bool m_vipresAutoRecomputeMesh;                         // Auto-recompute mesh every frame
     int m_vipresRemeshAlgorithm;                           // Remeshing algorithm index (0=GriddedQuads, 1=NearestNeighbor, 2=Delaunay2D, 3=PoissonLike, 4=FCTM, 5=GeodesicTree)
@@ -233,6 +251,9 @@ private:
     int m_vipresRemeshGeodesicKNeighbors;                  // K neighbors for GeodesicTree (references current algorithm)
     int m_vipresRemeshGeodesicNumSeeds;                    // Number of seed points for GeodesicTree (references current algorithm)
     float m_vipresRemeshGeodesicInteriorBias;              // Interior bias for GeodesicTree (references current algorithm)
+    float m_vipresRemeshDensityVoxelSize;                  // Voxel size for DensitySDF algorithm
+    float m_vipresRemeshDensitySmoothRadius;               // Gaussian smooth radius for DensitySDF algorithm
+    float m_vipresRemeshDensityIsoValue;                   // Iso-value threshold for DensitySDF surface extraction
     bool m_vipresFreeCameraObjectEnabled;                    // Enable object rendering in free camera view
     bool m_vipresNoisyTofEnabled;                           // Enable noisy TOF data capture
     float m_vipresNoiseAmount;                              // Noise amount for TOF measurements (+- range)
@@ -258,10 +279,22 @@ private:
     float m_smartOccupancyEvictionDecay;                   // Decay value used in (decay^count)/100 formula
     float m_smartOccupancyEvictionIncrement;               // Multiply weight by this when occupied
     float m_smartOccupancyEvictionMinStartValue;           // Minimum start value added to increment/decrement deltas
-    bool m_smartOccupancyEviction2;                        // Eviction-based-2 weight algorithm enabled (density-based filtering)
-    float m_smartOccupancyEviction2Radius;                 // Radius (r) for neighbor search in grid units
-    int m_smartOccupancyEviction2MinNeighbors;             // Minimum number of neighbors required to keep a point
+    bool m_smartOccupancyEviction2;                        // Eviction-based-2 weight algorithm enabled (consecutive frame persistence)
+    int m_smartOccupancyEviction2AppearanceThreshold;      // N: consecutive frames point must be seen to be confirmed
+    int m_smartOccupancyEviction2RemovalThreshold;         // M: consecutive frames unseen before point is removed
     float m_weightThreshold;                              // Minimum weight threshold for rendering (0.0-1.0)
+    
+    // Segmentation ID tracking (applies IDs to TOF data based on spatial overlap)
+    bool m_segmentationIdEnabled;                          // Enable segmentation ID assignment
+    std::set<int32_t> m_activeSegmentIds;                  // Currently active/detected segment IDs
+    std::map<int32_t, bool> m_segmentIdIncluded;           // Whether each segment ID is included in final output (for VIPRES)
+    std::map<int32_t, glm::vec3> m_segmentLabelPos;        // Label position for each segment (min_x, min_y, max_z)
+    float m_segmentMatchRadius;                            // Max distance to match segments across frames
+    
+    // Surface flow filtering (temporal smoothing using 3-frame history)
+    bool m_surfaceFlowEnabled;                             // Enable surface flow filtering
+    float m_surfaceFlowRadius;                             // Neighborhood radius for local flow estimation
+    float m_surfaceFlowThreshold;                          // Velocity deviation threshold for outlier rejection
     
     // Occupancy algorithm state (managed by GridBased namespace)
     GridBased::OccupancyState m_occupancyState;
@@ -288,7 +321,8 @@ private:
         bool loopEnabled;
         bool captureEnabled;
         bool tofDataEnabled;
-        bool tofColorCodeByCamera;
+        bool extractColorEnabled;
+        TOFRenderColorMode tofRenderColorMode;
         bool vipresEnabled;
         bool vipresComputeColor;
         int vipresSamplingDensity;
@@ -402,11 +436,14 @@ private:
     void GenerateRemesh();                                  // Generate mesh from point cloud
     void RenderRemesh();                                    // Render the remeshed mesh
     
+    // Segmentation ID assignment: Apply IDs to TOF data based on spatial overlap
+    void AssignSegmentationIds(std::map<GridKey, PointCloudPoint>& pointCloudGrid);
+    void RenderSegmentIdLabels();                           // Render ID numbers above detected segments
+    void RenderDebugLabelMarkers();                         // DEBUG: Render red markers at label positions
+    
     // Low-pass filter for TOF point positions (applied after conversion to world coordinates)
-    // Delegated to TOFProcessing class
+    // Uses algorithms/LowPassFilter.h - filter is applied via Algorithms::ApplyWeightBasedLowPassFilter
     void ComputeLowPassFilterCoefficients(float cutoffHz, float sampleRate);
-    glm::vec3 ApplyLowPassFilterPosition(const Engine::Editors::CameraSystem::GridKey& key, const glm::vec3& inputPos);
-    glm::vec3 ApplyLowPassFilterPosition(size_t positionHash, const glm::vec3& inputPos);
     
     // TSDF (Truncated Signed Distance Function) for point cloud smoothing
     // Delegated to TOFProcessing class

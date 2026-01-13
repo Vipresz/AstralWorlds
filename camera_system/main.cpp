@@ -11,22 +11,26 @@ using EngineLogging::Logger;
 int main(int argc, char* argv[]) {
     // Parse command line arguments
     std::string configFile;
+    std::string objFile;
     for (int i = 1; i < argc; i++) {
         std::string arg = argv[i];
         if (arg == "--config" && i + 1 < argc) {
             configFile = argv[++i];
+        } else if (arg == "--obj" && i + 1 < argc) {
+            objFile = argv[++i];
         } else if (arg == "--help" || arg == "-h") {
             std::cout << "Camera System Editor" << std::endl;
-            std::cout << "Usage: camera_system_editor.exe [--config <config.json>]" << std::endl;
+            std::cout << "Usage: camera_system_editor [options]" << std::endl;
             std::cout << "  --config <file>  Load configuration from JSON file" << std::endl;
+            std::cout << "  --obj <file>     Load an OBJ/FBX model file directly" << std::endl;
             std::cout << "  --help, -h       Show this help message" << std::endl;
             return 0;
         }
     }
     
-    // Initialize logger first with absolute path
+    // Initialize logger with relative path (works on any platform)
     EngineLogging::Logger& logger = EngineLogging::Logger::GetInstance();
-    const std::string logFilePath = "C:\\Users\\inque\\OneDrive\\Desktop\\Work\\games\\thegame\\build\\bin\\Release\\camera_system_editor_debug.log";
+    const std::string logFilePath = "camera_system_editor_debug.log";
     logger.Initialize(logFilePath);
     logger.SetMinLevel(EngineLogging::LogLevel::LevelInfo);
     
@@ -73,6 +77,19 @@ int main(int argc, char* argv[]) {
                 return 1;
             }
             LOG_INFO("CameraSystem", "Configuration loaded successfully");
+        }
+        
+        // Load OBJ file if provided
+        if (!objFile.empty()) {
+            std::cout << "Loading model: " << objFile << std::endl;
+            LOG_INFO_FMT("CameraSystem", "Loading model from command line: %s", objFile.c_str());
+            if (!editor.AddObject(objFile)) {
+                LOG_ERROR_FMT("CameraSystem", "Failed to load model: %s", objFile.c_str());
+                std::cerr << "Error: Failed to load model file: " << objFile << std::endl;
+                logger.Shutdown();
+                return 1;
+            }
+            LOG_INFO("CameraSystem", "Model loaded successfully");
         }
         
         std::cout << "Controls:" << std::endl;

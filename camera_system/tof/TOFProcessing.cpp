@@ -13,116 +13,6 @@ TOFProcessing::TOFProcessing() {
 TOFProcessing::~TOFProcessing() {
 }
 
-// Compute second-order Butterworth low-pass filter coefficients
-void TOFProcessing::ComputeLowPassFilterCoefficients(float cutoffHz, float sampleRate) {
-    if (cutoffHz <= 0.0f || sampleRate <= 0.0f) {
-        m_lowPassCoefficients.valid = false;
-        return;
-    }
-    
-    // Normalized cutoff frequency (0 to 0.5, where 0.5 is Nyquist)
-    float normalizedCutoff = cutoffHz / sampleRate;
-    if (normalizedCutoff >= 0.5f) {
-        normalizedCutoff = 0.499f;  // Clamp to just below Nyquist
-    }
-    
-    // Pre-warp for bilinear transform: k = tan(π * fc / fs)
-    // This ensures the digital filter matches the analog cutoff frequency
-    const float PI = 3.14159265359f;
-    float k = std::tan(PI * normalizedCutoff);
-    float k2 = k * k;
-    const float sqrt2 = 1.41421356237f;  // sqrt(2) - Butterworth Q factor
-    
-    // Second-order Butterworth low-pass filter coefficients
-    // Analog transfer function: H(s) = ωc² / (s² + √2·ωc·s + ωc²)
-    // After bilinear transform to z-domain:
-    float a0 = 1.0f + sqrt2 * k + k2;
-    m_lowPassCoefficients.a1 = 2.0f * (k2 - 1.0f) / a0;
-    m_lowPassCoefficients.a2 = (1.0f - sqrt2 * k + k2) / a0;
-    
-    // Numerator coefficients (all equal for Butterworth)
-    m_lowPassCoefficients.b0 = k2 / a0;
-    m_lowPassCoefficients.b1 = 2.0f * k2 / a0;
-    m_lowPassCoefficients.b2 = k2 / a0;
-    
-    m_lowPassCoefficients.valid = true;
-}
-
-// Second-order low-pass filter implementation (Butterworth design) for 3D positions
-// Applied to gridded points using GridKey
-glm::vec3 TOFProcessing::ApplyLowPassFilterPosition(const GridKey& key, const glm::vec3& inputPos) {
-    if (!m_lowPassCoefficients.valid) {
-        return inputPos;  // No filtering if coefficients are invalid
-    }
-    
-    // Get or create filter state for this grid key
-    LowPassFilterState& state = m_lowPassFilterStateGrid[key];
-    
-    // Initialize state if needed
-    if (!state.initialized) {
-        state.x1 = inputPos;
-        state.x2 = inputPos;
-        state.y1 = inputPos;
-        state.y2 = inputPos;
-        state.initialized = true;
-    }
-    
-    glm::vec3 output;
-    const float b0 = m_lowPassCoefficients.b0;
-    const float b1 = m_lowPassCoefficients.b1;
-    const float b2 = m_lowPassCoefficients.b2;
-    const float a1 = m_lowPassCoefficients.a1;
-    const float a2 = m_lowPassCoefficients.a2;
-    
-    output.x = b0 * inputPos.x + b1 * state.x1.x + b2 * state.x2.x - a1 * state.y1.x - a2 * state.y2.x;
-    output.y = b0 * inputPos.y + b1 * state.x1.y + b2 * state.x2.y - a1 * state.y1.y - a2 * state.y2.y;
-    output.z = b0 * inputPos.z + b1 * state.x1.z + b2 * state.x2.z - a1 * state.y1.z - a2 * state.y2.z;
-    
-    state.x2 = state.x1;
-    state.x1 = inputPos;
-    state.y2 = state.y1;
-    state.y1 = output;
-    
-    return output;
-}
-
-// Second-order low-pass filter implementation for non-gridded points using position hash
-glm::vec3 TOFProcessing::ApplyLowPassFilterPosition(size_t positionHash, const glm::vec3& inputPos) {
-    if (!m_lowPassCoefficients.valid) {
-        return inputPos;  // No filtering if coefficients are invalid
-    }
-    
-    // Get or create filter state for this position hash
-    LowPassFilterState& state = m_lowPassFilterStateNonGrid[positionHash];
-    
-    // Initialize state if needed
-    if (!state.initialized) {
-        state.x1 = inputPos;
-        state.x2 = inputPos;
-        state.y1 = inputPos;
-        state.y2 = inputPos;
-        state.initialized = true;
-    }
-    
-    glm::vec3 output;
-    const float b0 = m_lowPassCoefficients.b0;
-    const float b1 = m_lowPassCoefficients.b1;
-    const float b2 = m_lowPassCoefficients.b2;
-    const float a1 = m_lowPassCoefficients.a1;
-    const float a2 = m_lowPassCoefficients.a2;
-    
-    output.x = b0 * inputPos.x + b1 * state.x1.x + b2 * state.x2.x - a1 * state.y1.x - a2 * state.y2.x;
-    output.y = b0 * inputPos.y + b1 * state.x1.y + b2 * state.x2.y - a1 * state.y1.y - a2 * state.y2.y;
-    output.z = b0 * inputPos.z + b1 * state.x1.z + b2 * state.x2.z - a1 * state.y1.z - a2 * state.y2.z;
-    
-    state.x2 = state.x1;
-    state.x1 = inputPos;
-    state.y2 = state.y1;
-    state.y1 = output;
-    
-    return output;
-}
-
 // TSDF Integration: Add a point measurement to the TSDF grid
 void TOFProcessing::IntegrateTSDF(const GridKey& key, const glm::vec3& pointPos, const glm::vec3& cameraPos, 
                                   float gridSize, float truncationDistance, float weightDecay, 
@@ -291,11 +181,11 @@ void TOFProcessing::ProcessGriddedPoint(const GridKey& key, const glm::vec3& pos
 }
 
 // Extract point cloud from gridded data
+// NOTE: Low-pass filtering should be applied separately using algorithms/LowPassFilter.h
 void TOFProcessing::ExtractGriddedPointCloud(const std::map<GridKey, PointCloudPoint>& pointCloudGrid,
                                               const std::map<GridKey, GridAccumulator>& gridAccumulators,
                                               TOFGridMode mode,
-                                              std::vector<PointCloudPoint>& output,
-                                              bool lowPassEnabled) {
+                                              std::vector<PointCloudPoint>& output) {
     output.clear();
     
     if (mode == TOFGridMode::Average) {
@@ -304,41 +194,21 @@ void TOFProcessing::ExtractGriddedPointCloud(const std::map<GridKey, PointCloudP
             const GridAccumulator& acc = pair.second;
             PointCloudPoint point;
             const float invCount = 1.0f / static_cast<float>(acc.count);
-            glm::vec3 avgPosition = acc.positionSum * invCount;
-            
-            if (lowPassEnabled && m_lowPassCoefficients.valid) {
-                avgPosition = ApplyLowPassFilterPosition(pair.first, avgPosition);
-            }
-            
-            point.position = avgPosition;
+            point.position = acc.positionSum * invCount;
             point.color = acc.colorSum * invCount;
             output.push_back(point);
         }
     } else {
         output.reserve(pointCloudGrid.size());
         for (const auto& pair : pointCloudGrid) {
-            PointCloudPoint point = pair.second;
-            
-            // Apply low-pass filter to gridded points AFTER gridding
-            if (lowPassEnabled && m_lowPassCoefficients.valid) {
-                point.position = ApplyLowPassFilterPosition(pair.first, point.position);
-            }
-            
-            output.push_back(point);
+            output.push_back(pair.second);
         }
     }
-}
-
-// Clear low-pass filter state
-void TOFProcessing::ClearLowPassFilterState() {
-    m_lowPassFilterStateGrid.clear();
-    m_lowPassFilterStateNonGrid.clear();
 }
 
 // Clear all TOF processing data
 void TOFProcessing::ClearAll() {
     ClearTSDF();
-    ClearLowPassFilterState();
 }
 
 // Main gridding function - processes entire point cloud into grid
@@ -347,7 +217,6 @@ void TOFProcessing::ApplyGridding(const std::vector<PointCloudPoint>& inputPoint
                                  TOFGridMode mode,
                                  float gridSize) {
     outputGrid.clear();
-    const float invGridSize = 1.0f / gridSize;
     
     if (mode == TOFGridMode::Average) {
         // Collect all values per grid coordinate in lists
@@ -365,9 +234,18 @@ void TOFProcessing::ApplyGridding(const std::vector<PointCloudPoint>& inputPoint
             
             glm::vec3 posSum(0.0f);
             glm::vec3 colorSum(0.0f);
+            std::map<int32_t, int> segmentVotes;  // Majority voting for segment ID
+            std::map<int32_t, int> cameraVotes;   // Majority voting for camera ID
+            
             for (const auto& p : points) {
                 posSum += p.position;
                 colorSum += p.color;
+                if (p.segmentId >= 0) {
+                    segmentVotes[p.segmentId]++;
+                }
+                if (p.cameraId >= 0) {
+                    cameraVotes[p.cameraId]++;
+                }
             }
             
             PointCloudPoint averagedPoint;
@@ -376,10 +254,32 @@ void TOFProcessing::ApplyGridding(const std::vector<PointCloudPoint>& inputPoint
             // Normalize weight by number of points: points/100, capped at 1.0
             averagedPoint.weight = std::min(1.0f, static_cast<float>(points.size()) / 100.0f);
             
+            // Use majority voting for segment ID
+            int32_t bestSegId = -1;
+            int bestSegCount = 0;
+            for (const auto& vote : segmentVotes) {
+                if (vote.second > bestSegCount) {
+                    bestSegCount = vote.second;
+                    bestSegId = vote.first;
+                }
+            }
+            averagedPoint.segmentId = bestSegId;
+            
+            // Use majority voting for camera ID
+            int32_t bestCamId = -1;
+            int bestCamCount = 0;
+            for (const auto& vote : cameraVotes) {
+                if (vote.second > bestCamCount) {
+                    bestCamCount = vote.second;
+                    bestCamId = vote.first;
+                }
+            }
+            averagedPoint.cameraId = bestCamId;
+            
             outputGrid[gridKey] = averagedPoint;
         }
     } else if (mode == TOFGridMode::FirstCome) {
-        // Save first value, ignore others
+        // Save first value, ignore others (preserves segment ID from first point)
         for (const auto& point : inputPoints) {
             GridKey gridKey = WorldToGridKey(point.position, gridSize);
             
@@ -391,15 +291,33 @@ void TOFProcessing::ApplyGridding(const std::vector<PointCloudPoint>& inputPoint
         }
     } else {  // TOFGridMode::GridValue
         // Use grid coordinate itself (snap to grid center)
-        std::set<GridKey> gridKeys;
+        // Collect segment IDs and camera IDs for majority voting, and average colors
+        std::map<GridKey, std::map<int32_t, int>> gridSegmentVotes;
+        std::map<GridKey, std::map<int32_t, int>> gridCameraVotes;
+        std::map<GridKey, glm::vec3> gridColorSum;
+        std::map<GridKey, int> gridColorCount;
         
         for (const auto& point : inputPoints) {
             GridKey gridKey = WorldToGridKey(point.position, gridSize);
-            gridKeys.insert(gridKey);
+            if (point.segmentId >= 0) {
+                gridSegmentVotes[gridKey][point.segmentId]++;
+            }
+            if (point.cameraId >= 0) {
+                gridCameraVotes[gridKey][point.cameraId]++;
+            }
+            if (gridColorSum.count(gridKey) == 0) {
+                gridColorSum[gridKey] = point.color;
+                gridColorCount[gridKey] = 1;
+            } else {
+                gridColorSum[gridKey] += point.color;
+                gridColorCount[gridKey]++;
+            }
         }
         
         // Create points at grid centers
-        for (const GridKey& gridKey : gridKeys) {
+        for (const auto& pair : gridColorSum) {
+            const GridKey& gridKey = pair.first;
+            
             glm::vec3 snappedPos(
                 gridKey.x * gridSize,
                 gridKey.y * gridSize,
@@ -408,8 +326,34 @@ void TOFProcessing::ApplyGridding(const std::vector<PointCloudPoint>& inputPoint
             
             PointCloudPoint gridPoint;
             gridPoint.position = snappedPos;
-            gridPoint.color = glm::vec3(1.0f);
+            gridPoint.color = pair.second / static_cast<float>(gridColorCount[gridKey]);
             gridPoint.weight = 1.0f;
+            
+            // Use majority voting for segment ID
+            if (gridSegmentVotes.count(gridKey)) {
+                int32_t bestSegId = -1;
+                int bestCount = 0;
+                for (const auto& vote : gridSegmentVotes[gridKey]) {
+                    if (vote.second > bestCount) {
+                        bestCount = vote.second;
+                        bestSegId = vote.first;
+                    }
+                }
+                gridPoint.segmentId = bestSegId;
+            }
+            
+            // Use majority voting for camera ID
+            if (gridCameraVotes.count(gridKey)) {
+                int32_t bestCamId = -1;
+                int bestCount = 0;
+                for (const auto& vote : gridCameraVotes[gridKey]) {
+                    if (vote.second > bestCount) {
+                        bestCount = vote.second;
+                        bestCamId = vote.first;
+                    }
+                }
+                gridPoint.cameraId = bestCamId;
+            }
             
             outputGrid[gridKey] = gridPoint;
         }
@@ -424,6 +368,162 @@ GridKey TOFProcessing::WorldToGridKey(const glm::vec3& position, float gridSize)
     key.y = static_cast<int>(std::round(position.y * invGridSize));
     key.z = static_cast<int>(std::round(position.z * invGridSize));
     return key;
+}
+
+// Update surface flow history with current frame data
+// Shifts buffers: buffer[2] = buffer[1], buffer[1] = buffer[0], buffer[0] = currentFrame
+void TOFProcessing::UpdateSurfaceFlowHistory(const std::map<GridKey, PointCloudPoint>& currentFrame) {
+    // Shift buffers - oldest frame is discarded
+    m_surfaceFlowHistory.frameBuffers[2] = std::move(m_surfaceFlowHistory.frameBuffers[1]);
+    m_surfaceFlowHistory.frameBuffers[1] = std::move(m_surfaceFlowHistory.frameBuffers[0]);
+    m_surfaceFlowHistory.frameBuffers[0] = currentFrame;
+    
+    // Increment frame count up to maximum of 3
+    if (m_surfaceFlowHistory.frameCount < 3) {
+        m_surfaceFlowHistory.frameCount++;
+    }
+}
+
+// Clear surface flow history
+void TOFProcessing::ClearSurfaceFlowHistory() {
+    m_surfaceFlowHistory.Clear();
+}
+
+// Apply surface flow filtering to remove outlier points that don't match local motion patterns
+// Algorithm:
+// 1. For each point in current frame (buffer 0), find corresponding points in previous frames
+//    by searching within a neighborhood radius (points may have moved)
+// 2. Estimate local flow vectors by finding nearest neighbors in previous frames
+// 3. Compute mean flow for the local neighborhood
+// 4. Remove points whose motion deviates significantly from the local mean flow
+void TOFProcessing::ApplySurfaceFlowFilter(std::map<GridKey, PointCloudPoint>& pointCloud,
+                                           float neighborRadius,
+                                           float flowThreshold,
+                                           float gridSize) {
+    // Need at least 2 frames of history to compute flow
+    if (m_surfaceFlowHistory.frameCount < 2) {
+        return;
+    }
+    
+    const auto& prevFrame = m_surfaceFlowHistory.frameBuffers[1];
+    if (prevFrame.empty()) {
+        return;
+    }
+    
+    // Build spatial index for previous frame (simple grid-based)
+    // Key: grid cell at coarser resolution for neighbor search
+    const float searchGridSize = neighborRadius;
+    std::map<GridKey, std::vector<const PointCloudPoint*>> prevSpatialIndex;
+    
+    for (const auto& pair : prevFrame) {
+        GridKey searchKey = WorldToGridKey(pair.second.position, searchGridSize);
+        prevSpatialIndex[searchKey].push_back(&pair.second);
+    }
+    
+    // For each point in current frame, compute flow and check consistency
+    std::vector<GridKey> keysToRemove;
+    
+    for (auto& pair : pointCloud) {
+        const GridKey& key = pair.first;
+        PointCloudPoint& point = pair.second;
+        
+        // Only process points with valid segment IDs
+        if (point.segmentId < 0) {
+            continue;
+        }
+        
+        // Find neighbors in previous frame within radius
+        GridKey searchKey = WorldToGridKey(point.position, searchGridSize);
+        std::vector<glm::vec3> localFlows;
+        
+        // Search in 3x3x3 neighborhood of search grid cells
+        for (int dx = -1; dx <= 1; dx++) {
+            for (int dy = -1; dy <= 1; dy++) {
+                for (int dz = -1; dz <= 1; dz++) {
+                    GridKey neighborSearchKey(searchKey.x + dx, searchKey.y + dy, searchKey.z + dz);
+                    
+                    auto it = prevSpatialIndex.find(neighborSearchKey);
+                    if (it == prevSpatialIndex.end()) continue;
+                    
+                    for (const PointCloudPoint* prevPoint : it->second) {
+                        // Only match points from same segment
+                        if (prevPoint->segmentId != point.segmentId) {
+                            continue;
+                        }
+                        
+                        float dist = glm::length(point.position - prevPoint->position);
+                        if (dist < neighborRadius) {
+                            // Flow vector from previous to current
+                            glm::vec3 flow = point.position - prevPoint->position;
+                            localFlows.push_back(flow);
+                        }
+                    }
+                }
+            }
+        }
+        
+        // Need enough flow samples for reliable estimation
+        if (localFlows.size() < 3) {
+            // Not enough data - keep point but mark as uncertain
+            continue;
+        }
+        
+        // Compute mean flow
+        glm::vec3 meanFlow(0.0f);
+        for (const auto& flow : localFlows) {
+            meanFlow += flow;
+        }
+        meanFlow /= static_cast<float>(localFlows.size());
+        
+        // Compute this point's flow (use nearest neighbor in prev frame)
+        float minDist = std::numeric_limits<float>::max();
+        glm::vec3 pointFlow(0.0f);
+        bool foundMatch = false;
+        
+        for (int dx = -1; dx <= 1; dx++) {
+            for (int dy = -1; dy <= 1; dy++) {
+                for (int dz = -1; dz <= 1; dz++) {
+                    GridKey neighborSearchKey(searchKey.x + dx, searchKey.y + dy, searchKey.z + dz);
+                    
+                    auto it = prevSpatialIndex.find(neighborSearchKey);
+                    if (it == prevSpatialIndex.end()) continue;
+                    
+                    for (const PointCloudPoint* prevPoint : it->second) {
+                        if (prevPoint->segmentId != point.segmentId) {
+                            continue;
+                        }
+                        
+                        float dist = glm::length(point.position - prevPoint->position);
+                        if (dist < minDist && dist < neighborRadius) {
+                            minDist = dist;
+                            pointFlow = point.position - prevPoint->position;
+                            foundMatch = true;
+                        }
+                    }
+                }
+            }
+        }
+        
+        if (!foundMatch) {
+            // No match in previous frame - this could be a new point or an outlier
+            // Keep it for now (don't remove new valid points)
+            continue;
+        }
+        
+        // Check if point's flow deviates from local mean
+        float flowDeviation = glm::length(pointFlow - meanFlow);
+        
+        if (flowDeviation > flowThreshold) {
+            // This point's motion is inconsistent with local surface flow
+            // Mark for removal
+            keysToRemove.push_back(key);
+        }
+    }
+    
+    // Remove outlier points
+    for (const GridKey& key : keysToRemove) {
+        pointCloud.erase(key);
+    }
 }
 
 } // namespace CameraSystem

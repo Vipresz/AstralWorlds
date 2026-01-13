@@ -1,6 +1,7 @@
 #include "CameraSystemUI.h"
 #include "../CameraSystemEditor.h"
 #include "../GlobalConstants.h"
+#include "../algorithms/LowPassFilter.h"
 #include "UIHelpers.h"
 #include "Plotting.h"
 using namespace Engine::Editors::CameraSystem::Plotting;
@@ -18,6 +19,35 @@ using namespace Engine::Editors::CameraSystem::Constants;
 namespace Engine {
 namespace Editors {
 namespace CameraSystem {
+
+// Top menu bar height (single row with dropdowns)
+// This replaces UI_STATUS_BAR_HEIGHT for window positioning
+static constexpr float UI_MENU_BAR_HEIGHT = 30.0f;
+
+// Helper function to apply custom checkbox styling (grey=off, green=on)
+static void ApplyCheckboxStyle(struct nk_context* ctx) {
+    if (!ctx) return;
+    
+    // Checkbox background colors (the box itself)
+    struct nk_color greyOff = nk_rgb(80, 80, 80);       // Dark grey when unchecked
+    struct nk_color greyHover = nk_rgb(100, 100, 100);  // Lighter grey on hover
+    struct nk_color greenOn = nk_rgb(50, 180, 80);      // Green when checked
+    struct nk_color greenHover = nk_rgb(70, 200, 100);  // Brighter green on hover
+    struct nk_color border = nk_rgb(60, 60, 60);        // Border color
+    
+    // Style the checkbox (toggle) widget
+    ctx->style.checkbox.normal = nk_style_item_color(greyOff);
+    ctx->style.checkbox.hover = nk_style_item_color(greyHover);
+    ctx->style.checkbox.active = nk_style_item_color(greenOn);
+    ctx->style.checkbox.cursor_normal = nk_style_item_color(greenOn);
+    ctx->style.checkbox.cursor_hover = nk_style_item_color(greenHover);
+    ctx->style.checkbox.text_normal = nk_rgb(200, 200, 200);
+    ctx->style.checkbox.text_hover = nk_rgb(255, 255, 255);
+    ctx->style.checkbox.text_active = nk_rgb(255, 255, 255);
+    ctx->style.checkbox.border_color = border;
+    ctx->style.checkbox.border = 1.0f;
+    ctx->style.checkbox.padding = nk_vec2(3, 3);
+}
 
 CameraSystemUI::CameraSystemUI()
     : m_nuklearUI(nullptr)
@@ -37,7 +67,9 @@ void CameraSystemUI::Initialize(NuklearUI* nuklearUI, GLFWwindow* glfwWindow) {
 
 void CameraSystemUI::GetWindowSize(int& width, int& height) {
     if (m_glfwWindow) {
-        glfwGetFramebufferSize(m_glfwWindow, &width, &height);
+        // Use glfwGetWindowSize for logical coordinates (what Nuklear expects)
+        // NOT glfwGetFramebufferSize which returns physical pixels (2x on Retina)
+        glfwGetWindowSize(m_glfwWindow, &width, &height);
     } else {
         width = 0;
         height = 0;
@@ -62,6 +94,9 @@ void CameraSystemUI::Render(CameraSystemEditor& editor) {
         return;
     }
     
+    // Apply custom checkbox styling (grey=off, green=on)
+    ApplyCheckboxStyle(ctx);
+    
     try {
         if (!m_glfwWindow) return;
         
@@ -77,12 +112,13 @@ void CameraSystemUI::Render(CameraSystemEditor& editor) {
         }
         
         // Render all UI sections
-        RenderStatusBar(editor);
+        RenderStatusBar(editor);          // Top menu bar
         RenderCameraControls(editor);
         RenderTOFControls(editor);
         RenderVIPRESControls(editor);
         RenderObjectsPanel(editor);
         RenderStatisticsPanel(editor);
+        RenderBottomStatusBar(editor);    // Bottom status bar (rendered last to be on top)
         
         // Render Nuklear UI to screen (must be called after all UI windows are built)
         // This matches the old version where nk_glfw3_render was called at the end of RenderUI()
@@ -105,32 +141,132 @@ void CameraSystemUI::RenderStatusBar(CameraSystemEditor& editor) {
     
     int width, height;
     GetWindowSize(width, height);
+    // TOP MENU BAR - Single row with dropdown menus
+    const float menuBarHeight = 30.0f;
     
-    // Status bar at the top
-    if (nk_begin(ctx, "Status Bar", nk_rect(0.0f, 0.0f, static_cast<float>(width), UI_STATUS_BAR_HEIGHT),
+    if (nk_begin(ctx, "Menu Bar", nk_rect(0.0f, 0.0f, static_cast<float>(width), menuBarHeight),
                  NK_WINDOW_NO_SCROLLBAR | NK_WINDOW_BACKGROUND)) {
         
-        std::string statusText = "Camera System Editor";
-        if (editor.m_configLoaded) {
-            statusText += " | Config: Loaded";
-            statusText += editor.m_isPlaying ? " | Playing" : " | Paused";
-            statusText += " | Frame: " + std::to_string(editor.m_currentFrame) + "/" + std::to_string(editor.m_totalFrames - 1);
-            statusText += editor.m_captureEnabled ? " | Capture: ON" : " | Capture: OFF";
-        } else {
-            statusText += " | No Config Loaded";
+        nk_menubar_begin(ctx);
+        nk_layout_row_begin(ctx, NK_STATIC, 25.0f, 3);
+        
+        // ----- File Menu -----
+        nk_layout_row_push(ctx, 45.0f);
+        if (nk_menu_begin_label(ctx, "File", NK_TEXT_LEFT, nk_vec2(180, 200))) {
+            nk_layout_row_dynamic(ctx, 25, 1);
+            
+            // Show Objects panel toggle
+            nk_bool showObjects = editor.m_showObjectsPanel ? nk_true : nk_false;
+            if (nk_checkbox_label(ctx, "Show Objects", &showObjects)) {
+                editor.m_showObjectsPanel = (showObjects == nk_true);
+            }
+            
+            nk_layout_row_dynamic(ctx, 25, 1);
+            if (nk_menu_item_label(ctx, "Reset to Config", NK_TEXT_LEFT)) {
+                editor.ResetToConfigDefaults();
+            }
+            nk_menu_end(ctx);
         }
         
-        char fpsText[32];
-        std::snprintf(fpsText, sizeof(fpsText), "%.1f Hz", editor.m_currentFPS);
+        // ----- Pipelines Menu -----
+        nk_layout_row_push(ctx, 75.0f);
+        if (nk_menu_begin_label(ctx, "Pipelines", NK_TEXT_LEFT, nk_vec2(200, 300))) {
+            nk_layout_row_dynamic(ctx, 25, 1);
+            
+            // TOF Data toggle
+            nk_bool tofEnabled = editor.m_tofDataEnabled ? nk_true : nk_false;
+            if (nk_checkbox_label(ctx, "TOF Data", &tofEnabled)) {
+                editor.m_tofDataEnabled = (tofEnabled == nk_true);
+            }
+            
+            // VIPRES toggle
+            nk_bool vipresEnabled = editor.m_vipresEnabled ? nk_true : nk_false;
+            if (nk_checkbox_label(ctx, "VIPRES", &vipresEnabled)) {
+                editor.m_vipresEnabled = (vipresEnabled == nk_true);
+            }
+            
+            // Separator
+            nk_layout_row_dynamic(ctx, 5, 1);
+            nk_spacing(ctx, 1);
+            
+            // ----- Settings Submenu -----
+            nk_layout_row_dynamic(ctx, 25, 1);
+            if (nk_tree_push(ctx, NK_TREE_NODE, "Settings", NK_MINIMIZED)) {
+                
+                // Extract Color toggle
+                nk_bool extractColor = editor.m_extractColorEnabled ? nk_true : nk_false;
+                if (nk_checkbox_label(ctx, "Extract Color from TOF", &extractColor)) {
+                    editor.m_extractColorEnabled = (extractColor == nk_true);
+                }
+                
+                // Compute Color toggle
+                nk_bool computeColor = editor.m_vipresComputeColor ? nk_true : nk_false;
+                if (nk_checkbox_label(ctx, "Compute Color", &computeColor)) {
+                    editor.m_vipresComputeColor = (computeColor == nk_true);
+                }
+                
+                nk_tree_pop(ctx);
+            }
+            
+            nk_menu_end(ctx);
+        }
         
-        nk_layout_row_begin(ctx, NK_STATIC, UI_STATUS_BAR_HEIGHT, 2);
-        nk_layout_row_push(ctx, static_cast<float>(width) - UI_FPS_COLUMN_WIDTH);
-        nk_label(ctx, statusText.c_str(), NK_TEXT_LEFT);
-        nk_layout_row_push(ctx, UI_FPS_COLUMN_WIDTH);
-        nk_label(ctx, fpsText, NK_TEXT_RIGHT);
+        // Spacer to fill the rest
+        nk_layout_row_push(ctx, static_cast<float>(width) - 45.0f - 75.0f - 30.0f);
+        nk_spacing(ctx, 1);
+        
         nk_layout_row_end(ctx);
+        nk_menubar_end(ctx);
     }
     nk_end(ctx);
+    
+}
+
+void CameraSystemUI::RenderBottomStatusBar(CameraSystemEditor& editor) {
+    struct nk_context* ctx = m_nuklearUI->GetContext();
+    if (!ctx) return;
+    
+    int width, height;
+    GetWindowSize(width, height);
+    
+    if (width <= 0 || height <= 0) return;
+    
+    const float statusBarHeight = 30.0f;
+    const float w = static_cast<float>(width);
+    const float h = static_cast<float>(height);
+    const float statusBarY = h - statusBarHeight;
+    
+    // Build status text
+    std::string statusText = "";
+    if (editor.m_configLoaded) {
+        statusText += editor.m_isPlaying ? "Playing" : "Paused";
+        statusText += " | Frame: " + std::to_string(editor.m_currentFrame) + "/" + std::to_string(editor.m_totalFrames - 1);
+        if (editor.m_captureEnabled) statusText += " | Capture: ON";
+    } else {
+        statusText += "No Config";
+    }
+    statusText += " | TOF: ";
+    statusText += editor.m_tofDataEnabled ? "ON" : "OFF";
+    statusText += " | VIPRES: ";
+    statusText += editor.m_vipresEnabled ? "ON" : "OFF";
+    
+    char fpsText[32];
+    std::snprintf(fpsText, sizeof(fpsText), "%.1f Hz", editor.m_currentFPS);
+    statusText += " | " + std::string(fpsText);
+    
+    // Create status bar window at bottom of screen
+    struct nk_rect statusRect = nk_rect(0, statusBarY, w, statusBarHeight);
+    
+    nk_style_push_vec2(ctx, &ctx->style.window.padding, nk_vec2(8, 4));
+    
+    if (nk_begin(ctx, "BottomBar", statusRect,
+                 NK_WINDOW_NO_SCROLLBAR | NK_WINDOW_BORDER | NK_WINDOW_BACKGROUND)) {
+        nk_layout_row_dynamic(ctx, 20, 1);
+        nk_label(ctx, statusText.c_str(), NK_TEXT_LEFT);
+    }
+    nk_end(ctx);
+    
+    nk_style_pop_vec2(ctx);
 }
 
 void CameraSystemUI::RenderCameraControls(CameraSystemEditor& editor) {
@@ -138,9 +274,9 @@ void CameraSystemUI::RenderCameraControls(CameraSystemEditor& editor) {
     if (!ctx) return;
     
     if (nk_begin(ctx, "Camera Controls", 
-                 nk_rect(UI_CAMERA_CONTROLS_X, UI_STATUS_BAR_HEIGHT + UI_WINDOW_OFFSET_Y, 
+                 nk_rect(UI_CAMERA_CONTROLS_X, UI_MENU_BAR_HEIGHT + UI_WINDOW_OFFSET_Y, 
                         UI_CAMERA_CONTROLS_WIDTH, UI_CAMERA_CONTROLS_HEIGHT),
-                 NK_WINDOW_BORDER | NK_WINDOW_TITLE | NK_WINDOW_SCALABLE | NK_WINDOW_MOVABLE)) {
+                 NK_WINDOW_BORDER | NK_WINDOW_TITLE | NK_WINDOW_SCALABLE | NK_WINDOW_MOVABLE | NK_WINDOW_MINIMIZABLE)) {
         
         nk_layout_row_dynamic(ctx, UI_ROW_HEIGHT_STANDARD, 1);
         std::string activeCameraName = "None";
@@ -184,13 +320,6 @@ void CameraSystemUI::RenderCameraControls(CameraSystemEditor& editor) {
                             editor.m_isPlaying ? "(Playing)" : "(Paused)");
             nk_label(ctx, frameInfo, NK_TEXT_LEFT);
             
-            nk_layout_row_dynamic(ctx, UI_ROW_HEIGHT_STANDARD, 1);
-            bool loopEnabled = editor.m_loopEnabled;
-            nk_bool loopCheckboxState = loopEnabled ? nk_false : nk_true; // Inverted logic
-            if (nk_checkbox_label(ctx, "Loop", &loopCheckboxState)) {
-                editor.m_loopEnabled = (loopCheckboxState == nk_false);
-                editor.SaveSafeParameters();
-            }
         } else {
             nk_layout_row_dynamic(ctx, UI_SPACING_SMALL, 1);
             nk_spacing(ctx, 1);
@@ -203,141 +332,110 @@ void CameraSystemUI::RenderCameraControls(CameraSystemEditor& editor) {
             }
         }
         
-        nk_layout_row_dynamic(ctx, UI_SPACING_MEDIUM, 1);
+        nk_layout_row_dynamic(ctx, UI_SPACING_SMALL, 1);
         nk_spacing(ctx, 1);
         
-        nk_layout_row_dynamic(ctx, UI_ROW_HEIGHT_BUTTON, 1);
-        const char* tofText = editor.m_tofDataEnabled ? "Disable TOF Data" : "Enable TOF Data";
-        if (nk_button_label(ctx, tofText)) {
-            editor.m_tofDataEnabled = !editor.m_tofDataEnabled;
-            if (editor.m_tofDataEnabled) {
-                editor.UpdatePointCloud();
-            }
+        // Stacked toggles: Loop, Show Object, Show Grid
+        nk_layout_row_dynamic(ctx, 20, 1);
+        bool loopEnabled = editor.m_loopEnabled;
+        nk_bool loopCheckboxState = loopEnabled ? nk_true : nk_false;
+        if (nk_checkbox_label(ctx, "Loop", &loopCheckboxState)) {
+            editor.m_loopEnabled = (loopCheckboxState == nk_true);
             editor.SaveSafeParameters();
         }
         
-        nk_layout_row_dynamic(ctx, UI_ROW_HEIGHT_BUTTON, 1);
-        const char* vipresText = editor.m_vipresEnabled ? "Disable VIPRES" : "Enable VIPRES";
-        if (nk_button_label(ctx, vipresText)) {
-            editor.m_vipresEnabled = !editor.m_vipresEnabled;
-            if (editor.m_vipresEnabled) {
-                // VIPRES only handles remesh computation, not depth data calculation
-                // If remesh is enabled, generate it from existing point cloud
-                if (editor.m_vipresRemeshEnabled) {
-                    editor.m_remeshNeedsUpdate = true;
-                    editor.GenerateRemesh();
-                }
-            }
-            editor.SaveSafeParameters();
-        }
-        
-        nk_layout_row_dynamic(ctx, UI_SPACING_MEDIUM, 1);
-        nk_spacing(ctx, 1);
-        
-        nk_layout_row_dynamic(ctx, UI_ROW_HEIGHT_STANDARD, 2);
+        nk_layout_row_dynamic(ctx, 20, 1);
         bool freeCamObjEnabled = editor.m_vipresFreeCameraObjectEnabled;
-        nk_bool freeCamObjCheckboxState = freeCamObjEnabled ? nk_false : nk_true; // Inverted logic
+        nk_bool freeCamObjCheckboxState = freeCamObjEnabled ? nk_true : nk_false;
         if (nk_checkbox_label(ctx, "Show Object", &freeCamObjCheckboxState)) {
-            editor.m_vipresFreeCameraObjectEnabled = (freeCamObjCheckboxState == nk_false);
+            editor.m_vipresFreeCameraObjectEnabled = (freeCamObjCheckboxState == nk_true);
             editor.SaveSafeParameters();
         }
         
+        nk_layout_row_dynamic(ctx, 20, 1);
         bool gridVisible = editor.m_world.IsGridVisible();
-        nk_bool gridCheckboxState = gridVisible ? nk_true : nk_false; // Normal logic: checked = visible
+        nk_bool gridCheckboxState = gridVisible ? nk_true : nk_false;
         if (nk_checkbox_label(ctx, "Show Grid", &gridCheckboxState)) {
             editor.m_world.SetGridVisible(gridCheckboxState == nk_true);
             editor.SaveSafeParameters();
         }
         
-        nk_layout_row_dynamic(ctx, UI_SPACING_LARGE, 1);
-        nk_spacing(ctx, 1);
+        // Separator line before cameras
+        nk_layout_row_dynamic(ctx, 2, 1);
+        nk_rule_horizontal(ctx, nk_rgb(60, 60, 60), nk_true);
         
         if (!editor.m_cameras.empty()) {
-            nk_layout_row_dynamic(ctx, UI_ROW_HEIGHT_MEDIUM, 1);
-            nk_label(ctx, "All Cameras:", NK_TEXT_LEFT);
-            
-            for (size_t i = 0; i < editor.m_cameras.size(); i++) {
-                const Camera& cam = editor.m_cameras[i];
-                if (cam.canMove) continue;
-                
-                nk_layout_row_dynamic(ctx, UI_ROW_HEIGHT_STANDARD, 1);
-                std::string cameraLabel;
-                size_t activeIdx2 = editor.m_cameraSystem.GetActiveCameraIndex();
-                if (i == activeIdx2) {
-                    cameraLabel = "> " + cam.name + " <";
-                } else {
-                    cameraLabel = cam.name;
-                }
-                
-                // Make camera name clickable
-                if (nk_button_label(ctx, cameraLabel.c_str())) {
-                    if (i != activeIdx2) {
-                        editor.m_pendingCameraSwitch = i;
-                    }
-                }
-                
-                // Position vector
-                nk_layout_row_dynamic(ctx, 18, 1);
-                char posStr[128];
-                std::snprintf(posStr, sizeof(posStr), "  Pos: (%.2f, %.2f, %.2f)", 
-                        cam.position.x, cam.position.y, cam.position.z);
-                nk_label(ctx, posStr, NK_TEXT_LEFT);
-                
-                // Direction vector (from position to target)
-                glm::vec3 direction = cam.target - cam.position;
-                float dirLength = glm::length(direction);
-                if (dirLength > 0.0001f) {
-                    direction = direction / dirLength; // Normalize
-                }
-                nk_layout_row_dynamic(ctx, 18, 1);
-                char dirStr[128];
-                std::snprintf(dirStr, sizeof(dirStr), "  Dir: (%.2f, %.2f, %.2f)", 
-                        direction.x, direction.y, direction.z);
-                nk_label(ctx, dirStr, NK_TEXT_LEFT);
-                
-                nk_layout_row_dynamic(ctx, UI_SPACING_MEDIUM, 1);
-                nk_spacing(ctx, 1);
+            // Count cameras by type
+            int anchorCount = 0, freeCount = 0;
+            for (const auto& cam : editor.m_cameras) {
+                if (cam.canMove) freeCount++;
+                else anchorCount++;
             }
             
-            for (size_t i = 0; i < editor.m_cameras.size(); i++) {
-                const Camera& cam = editor.m_cameras[i];
-                if (!cam.canMove) continue;
+            // Build header with count
+            char camerasHeader[64];
+            std::snprintf(camerasHeader, sizeof(camerasHeader), "Cameras (%zu)", editor.m_cameras.size());
+            
+            nk_layout_row_dynamic(ctx, 18, 1);
+            if (nk_tree_push(ctx, NK_TREE_NODE, camerasHeader, NK_MINIMIZED)) {
                 
-                nk_layout_row_dynamic(ctx, UI_ROW_HEIGHT_STANDARD, 1);
-                std::string cameraLabel;
-                size_t activeIdx2 = editor.m_cameraSystem.GetActiveCameraIndex();
-                if (i == activeIdx2) {
-                    cameraLabel = "> " + cam.name + " <";
-                } else {
-                    cameraLabel = cam.name;
-                }
-                
-                // Make camera name clickable
-                if (nk_button_label(ctx, cameraLabel.c_str())) {
-                    if (i != activeIdx2) {
-                        editor.m_pendingCameraSwitch = i;
+                // Anchor cameras section (fixed cameras)
+                if (anchorCount > 0) {
+                    char anchorHeader[32];
+                    std::snprintf(anchorHeader, sizeof(anchorHeader), "Anchor Cameras (%d)", anchorCount);
+                    
+                    nk_layout_row_dynamic(ctx, 18, 1);
+                    if (nk_tree_push(ctx, NK_TREE_NODE, anchorHeader, NK_MAXIMIZED)) {
+                        size_t activeIdx2 = editor.m_cameraSystem.GetActiveCameraIndex();
+                        
+                        for (size_t i = 0; i < editor.m_cameras.size(); i++) {
+                            const Camera& cam = editor.m_cameras[i];
+                            if (cam.canMove) continue;
+                            
+                            nk_layout_row_dynamic(ctx, 18, 1);
+                            
+                            // Show active indicator and make clickable
+                            std::string cameraLabel = (i == activeIdx2) ? ("* " + cam.name) : ("  " + cam.name);
+                            
+                            if (nk_button_label(ctx, cameraLabel.c_str())) {
+                                if (i != activeIdx2) {
+                                    editor.m_pendingCameraSwitch = i;
+                                }
+                            }
+                        }
+                        nk_tree_pop(ctx);
                     }
                 }
                 
-                nk_layout_row_dynamic(ctx, UI_ROW_HEIGHT_SMALL, 1);
-                char posStr[128];
-                std::snprintf(posStr, sizeof(posStr), "  Pos: (%.2f, %.2f, %.2f)", 
-                        cam.position.x, cam.position.y, cam.position.z);
-                nk_label(ctx, posStr, NK_TEXT_LEFT);
-                
-                glm::vec3 direction = cam.target - cam.position;
-                float dirLength = glm::length(direction);
-                if (dirLength > 0.0001f) {
-                    direction = direction / dirLength;
+                // Free cameras section - immediately after anchor cameras
+                if (freeCount > 0) {
+                    char freeHeader[32];
+                    std::snprintf(freeHeader, sizeof(freeHeader), "Free Cameras (%d)", freeCount);
+                    
+                    nk_layout_row_dynamic(ctx, 18, 1);
+                    if (nk_tree_push(ctx, NK_TREE_NODE, freeHeader, NK_MAXIMIZED)) {
+                        size_t activeIdx2 = editor.m_cameraSystem.GetActiveCameraIndex();
+                        
+                        for (size_t i = 0; i < editor.m_cameras.size(); i++) {
+                            const Camera& cam = editor.m_cameras[i];
+                            if (!cam.canMove) continue;
+                            
+                            nk_layout_row_dynamic(ctx, 18, 1);
+                            
+                            // Show active indicator and make clickable
+                            std::string cameraLabel = (i == activeIdx2) ? ("* " + cam.name) : ("  " + cam.name);
+                            
+                            if (nk_button_label(ctx, cameraLabel.c_str())) {
+                                if (i != activeIdx2) {
+                                    editor.m_pendingCameraSwitch = i;
+                                }
+                            }
+                        }
+                        nk_tree_pop(ctx);
+                    }
                 }
-                nk_layout_row_dynamic(ctx, UI_ROW_HEIGHT_SMALL, 1);
-                char dirStr[128];
-                std::snprintf(dirStr, sizeof(dirStr), "  Dir: (%.2f, %.2f, %.2f)", 
-                        direction.x, direction.y, direction.z);
-                nk_label(ctx, dirStr, NK_TEXT_LEFT);
                 
-                nk_layout_row_dynamic(ctx, UI_SPACING_MEDIUM, 1);
-                nk_spacing(ctx, 1);
+                nk_tree_pop(ctx);
             }
         } else {
             nk_layout_row_dynamic(ctx, UI_ROW_HEIGHT_MEDIUM, 1);
@@ -365,9 +463,9 @@ void CameraSystemUI::RenderTOFControls(CameraSystemEditor& editor) {
     }
     
     bool tofControlsVisible = nk_begin(ctx, "TOF Controls", 
-                                        nk_rect(UI_TOF_CONTROLS_X, UI_STATUS_BAR_HEIGHT + UI_WINDOW_OFFSET_Y, 
+                                        nk_rect(UI_TOF_CONTROLS_X, UI_MENU_BAR_HEIGHT + UI_WINDOW_OFFSET_Y, 
                                                UI_TOF_CONTROLS_WIDTH, tofWindowHeight),
-                                        NK_WINDOW_BORDER | NK_WINDOW_TITLE | NK_WINDOW_SCALABLE | NK_WINDOW_MOVABLE);
+                                        NK_WINDOW_BORDER | NK_WINDOW_TITLE | NK_WINDOW_SCALABLE | NK_WINDOW_MOVABLE | NK_WINDOW_MINIMIZABLE);
     if (tofControlsVisible) {
         
         // Point count display at the top (after problem points are removed)
@@ -375,22 +473,6 @@ void CameraSystemUI::RenderTOFControls(CameraSystemEditor& editor) {
         char pointCountText[128];
         std::snprintf(pointCountText, sizeof(pointCountText), "Points: %zu", editor.m_pointCloud[editor.m_pointCloudReadBuffer].size());
         nk_label(ctx, pointCountText, NK_TEXT_LEFT);
-        
-        nk_layout_row_dynamic(ctx, UI_SPACING_SMALL, 1);
-        nk_spacing(ctx, 1);
-        
-        // Color code TOF toggle
-        nk_layout_row_dynamic(ctx, UI_ROW_HEIGHT_STANDARD, 1);
-        bool colorCodeEnabled = editor.m_tofColorCodeByCamera;
-        nk_bool colorCodeCheckboxState = colorCodeEnabled ? nk_true : nk_false;
-        if (nk_checkbox_label(ctx, "Color Code TOF", &colorCodeCheckboxState)) {
-            editor.m_tofColorCodeByCamera = (colorCodeCheckboxState == nk_true);
-            if (editor.m_tofDataEnabled) {
-                // Update point cloud to reflect color change
-                editor.UpdatePointCloud();
-            }
-            editor.SaveSafeParameters();
-        }
         
         nk_layout_row_dynamic(ctx, UI_SPACING_SMALL, 1);
         nk_spacing(ctx, 1);
@@ -487,6 +569,11 @@ void CameraSystemUI::RenderTOFControls(CameraSystemEditor& editor) {
         
         if (std::abs(newSamplingRate - editor.m_tofSamplingRate) > 0.1f) {
             editor.m_tofSamplingRate = newSamplingRate;
+            // Clamp cutoff to new Nyquist frequency if needed
+            float newNyquist = editor.m_tofSamplingRate * 0.5f;
+            if (editor.m_tofLowPassCutoff > newNyquist * 0.999f) {
+                editor.m_tofLowPassCutoff = newNyquist * 0.999f;
+            }
             // Recompute filter coefficients when sampling rate changes
             editor.ComputeLowPassFilterCoefficients(editor.m_tofLowPassCutoff, editor.m_tofSamplingRate);
             // Reuse existing filter buffers - don't clear state, just update coefficients
@@ -497,14 +584,18 @@ void CameraSystemUI::RenderTOFControls(CameraSystemEditor& editor) {
         nk_layout_row_dynamic(ctx, UI_SPACING_SMALL, 1);
         nk_spacing(ctx, 1);
         
-        // Gridding toggle
+        // Grid Mode dropdown (includes Disabled option)
         nk_layout_row_dynamic(ctx, UI_ROW_HEIGHT_STANDARD, 1);
-        bool griddingEnabled = editor.m_vipresGriddingEnabled;
-        nk_bool checkboxState = griddingEnabled ? nk_false : nk_true; // Inverted logic
-        if (nk_checkbox_label(ctx, "Enable Gridding", &checkboxState)) {
-            editor.m_vipresGriddingEnabled = (checkboxState == nk_false);
+        nk_label(ctx, "Grid Mode:", NK_TEXT_LEFT);
+        
+        nk_layout_row_dynamic(ctx, UI_ROW_HEIGHT_STANDARD, 1);
+        int modeInt = static_cast<int>(editor.m_vipresGridMode);
+        const char* modes[] = { "Disabled", "Average", "First Come", "Grid Value" };
+        int selected = nk_combo(ctx, modes, 4, modeInt, 25, nk_vec2(200, 200));
+        if (selected != modeInt) {
+            editor.m_vipresGridMode = static_cast<TOFGridMode>(selected);
             // Disable low-pass filter and TSDF when gridding is disabled
-            if (!editor.m_vipresGriddingEnabled) {
+            if (editor.m_vipresGridMode == TOFGridMode::Disabled) {
                 editor.m_tofLowPassEnabled = false;
                 editor.m_tofTsdfEnabled = false;
                 editor.ClearTSDF();
@@ -514,20 +605,8 @@ void CameraSystemUI::RenderTOFControls(CameraSystemEditor& editor) {
         }
         
         // Grid controls (only show when gridding is enabled)
-        if (editor.m_vipresGriddingEnabled) {
-            nk_layout_row_dynamic(ctx, UI_ROW_HEIGHT_STANDARD, 1);
-            nk_label(ctx, "Grid Mode:", NK_TEXT_LEFT);
-            
-            nk_layout_row_dynamic(ctx, UI_ROW_HEIGHT_STANDARD, 1);
-            int modeInt = static_cast<int>(editor.m_vipresGridMode);
-            const char* modes[] = { "Average", "First Come", "Grid Value" };
-            int selected = nk_combo(ctx, modes, 3, modeInt, 25, nk_vec2(200, 200));
-            if (selected != modeInt) {
-                editor.m_vipresGridMode = static_cast<TOFGridMode>(selected);
-                editor.UpdatePointCloud();
-                editor.SaveSafeParameters();
-            }
-            
+        bool griddingEnabled = (editor.m_vipresGridMode != TOFGridMode::Disabled);
+        if (griddingEnabled) {
             // Grid Size with value on same line, slider below
             nk_layout_row_template_begin(ctx, UI_ROW_HEIGHT_STANDARD);
             nk_layout_row_template_push_static(ctx, 150);
@@ -563,10 +642,10 @@ void CameraSystemUI::RenderTOFControls(CameraSystemEditor& editor) {
             nk_spacing(ctx, 1);
             
             nk_layout_row_dynamic(ctx, UI_ROW_HEIGHT_STANDARD, 1);
-            bool lowPassEnabled = editor.m_tofLowPassEnabled && editor.m_vipresGriddingEnabled && !editor.m_tofTsdfEnabled;
-            nk_bool lowPassCheckboxState = lowPassEnabled ? nk_false : nk_true; // Inverted logic
+            bool lowPassEnabled = editor.m_tofLowPassEnabled && griddingEnabled && !editor.m_tofTsdfEnabled;
+            nk_bool lowPassCheckboxState = lowPassEnabled ? nk_true : nk_false;
             if (nk_checkbox_label(ctx, "Enable Low-Pass Filter", &lowPassCheckboxState)) {
-                editor.m_tofLowPassEnabled = (lowPassCheckboxState == nk_false);
+                editor.m_tofLowPassEnabled = (lowPassCheckboxState == nk_true);
                 if (editor.m_tofLowPassEnabled) {
                     editor.m_tofTsdfEnabled = false;  // Mutually exclusive
                     editor.ClearTSDF();  // Clear TSDF when switching to low-pass
@@ -576,14 +655,14 @@ void CameraSystemUI::RenderTOFControls(CameraSystemEditor& editor) {
             }
             
             nk_layout_row_dynamic(ctx, UI_ROW_HEIGHT_STANDARD, 1);
-            bool tsdfEnabled = editor.m_tofTsdfEnabled && editor.m_vipresGriddingEnabled && !editor.m_tofLowPassEnabled;
-            nk_bool tsdfCheckboxState = tsdfEnabled ? nk_false : nk_true; // Inverted logic
+            bool tsdfEnabled = editor.m_tofTsdfEnabled && griddingEnabled && !editor.m_tofLowPassEnabled;
+            nk_bool tsdfCheckboxState = tsdfEnabled ? nk_true : nk_false;
             if (nk_checkbox_label(ctx, "Enable TSDF", &tsdfCheckboxState)) {
-                editor.m_tofTsdfEnabled = (tsdfCheckboxState == nk_false);
+                editor.m_tofTsdfEnabled = (tsdfCheckboxState == nk_true);
                 if (editor.m_tofTsdfEnabled) {
                     editor.m_tofLowPassEnabled = false;  // Mutually exclusive
                     // Clear low-pass filter state when switching to TSDF
-                    editor.m_tofProcessing.ClearLowPassFilterState();
+                    Algorithms::ClearLowPassFilterState(editor.m_lowPassFilterState);
                 } else {
                     editor.ClearTSDF();  // Clear TSDF when disabling
                 }
@@ -592,12 +671,12 @@ void CameraSystemUI::RenderTOFControls(CameraSystemEditor& editor) {
             }
             
             // TSDF Store Color toggle (only show when TSDF is enabled)
-            if (editor.m_tofTsdfEnabled && editor.m_vipresGriddingEnabled) {
+            if (editor.m_tofTsdfEnabled && griddingEnabled) {
                 nk_layout_row_dynamic(ctx, UI_ROW_HEIGHT_STANDARD, 1);
                 bool tsdfStoreColorEnabled = editor.m_tofTsdfStoreColor;
-                nk_bool tsdfStoreColorCheckboxState = tsdfStoreColorEnabled ? nk_false : nk_true; // Inverted logic
+                nk_bool tsdfStoreColorCheckboxState = tsdfStoreColorEnabled ? nk_true : nk_false;
                 if (nk_checkbox_label(ctx, "TSDF Store Color", &tsdfStoreColorCheckboxState)) {
-                    editor.m_tofTsdfStoreColor = (tsdfStoreColorCheckboxState == nk_false);
+                    editor.m_tofTsdfStoreColor = (tsdfStoreColorCheckboxState == nk_true);
                     // Clear TSDF to rebuild with new color setting
                     editor.ClearTSDF();
                     editor.UpdatePointCloud();
@@ -606,7 +685,7 @@ void CameraSystemUI::RenderTOFControls(CameraSystemEditor& editor) {
             }
             
             // TSDF controls (only show when enabled and gridding is enabled)
-            if (editor.m_tofTsdfEnabled && editor.m_vipresGriddingEnabled) {
+            if (editor.m_tofTsdfEnabled && griddingEnabled) {
                 // TSDF Truncation Distance with value on same line, slider below
                 nk_layout_row_template_begin(ctx, UI_ROW_HEIGHT_STANDARD);
                 nk_layout_row_template_push_static(ctx, 200);
@@ -645,27 +724,41 @@ void CameraSystemUI::RenderTOFControls(CameraSystemEditor& editor) {
             }
             
             // Low-pass filter controls (only show when enabled and gridding is enabled)
-            if (editor.m_tofLowPassEnabled && editor.m_vipresGriddingEnabled) {
+            if (editor.m_tofLowPassEnabled && griddingEnabled) {
+                // Calculate Nyquist frequency (max valid cutoff = sampling rate / 2)
+                float nyquistFreq = editor.m_tofSamplingRate * 0.5f;
+                // Actual effective cutoff (clamped to just below Nyquist)
+                float effectiveCutoff = std::min(editor.m_tofLowPassCutoff, nyquistFreq * 0.999f);
+                
                 // Low-pass filter cutoff frequency with value on same line, slider below
                 nk_layout_row_template_begin(ctx, UI_ROW_HEIGHT_STANDARD);
-                nk_layout_row_template_push_static(ctx, 200);
+                nk_layout_row_template_push_static(ctx, 250);
                 nk_layout_row_template_push_dynamic(ctx);
                 nk_layout_row_template_end(ctx);
                 char cutoffLabelText[128];
-                std::snprintf(cutoffLabelText, sizeof(cutoffLabelText), "Low-Pass Cutoff (Hz): %.1f", editor.m_tofLowPassCutoff);
+                // Show effective cutoff and Nyquist limit
+                std::snprintf(cutoffLabelText, sizeof(cutoffLabelText), "Low-Pass Cutoff: %.1f Hz (Nyquist: %.1f Hz)", 
+                             effectiveCutoff, nyquistFreq);
                 nk_label(ctx, cutoffLabelText, NK_TEXT_LEFT);
                 
                 nk_layout_row_dynamic(ctx, UI_ROW_HEIGHT_STANDARD, 1);
                 float cutoff = editor.m_tofLowPassCutoff;
-                nk_slider_float(ctx, LOW_PASS_CUTOFF_MIN, &cutoff, LOW_PASS_CUTOFF_MAX, 0.1f);
-            if (std::abs(cutoff - editor.m_tofLowPassCutoff) > 0.01f) {
-                editor.m_tofLowPassCutoff = cutoff;
-                // Recompute filter coefficients when cutoff changes
-                editor.ComputeLowPassFilterCoefficients(editor.m_tofLowPassCutoff, editor.m_tofSamplingRate);
-                // Reuse existing filter buffers - don't clear state, just update coefficients
-                editor.UpdatePointCloud();
-                editor.SaveSafeParameters();
-            }
+                // Limit slider max to Nyquist frequency
+                float sliderMax = std::min(LOW_PASS_CUTOFF_MAX, nyquistFreq);
+                nk_slider_float(ctx, LOW_PASS_CUTOFF_MIN, &cutoff, sliderMax, 0.1f);
+                if (std::abs(cutoff - editor.m_tofLowPassCutoff) > 0.01f) {
+                    // Clamp to Nyquist before storing
+                    editor.m_tofLowPassCutoff = std::min(cutoff, nyquistFreq * 0.999f);
+                    // Recompute filter coefficients when cutoff changes
+                    editor.ComputeLowPassFilterCoefficients(editor.m_tofLowPassCutoff, editor.m_tofSamplingRate);
+                    // Reuse existing filter buffers - don't clear state, just update coefficients
+                    editor.UpdatePointCloud();
+                    editor.SaveSafeParameters();
+                }
+                
+                // Helpful note about filter behavior
+                nk_layout_row_dynamic(ctx, UI_ROW_HEIGHT_SMALL, 1);
+                nk_label(ctx, "(Lower cutoff = more smoothing)", NK_TEXT_LEFT);
             }
             
             // Smart Occupancy toggle (4th step in TOF pipeline)
@@ -674,9 +767,9 @@ void CameraSystemUI::RenderTOFControls(CameraSystemEditor& editor) {
             
             nk_layout_row_dynamic(ctx, UI_ROW_HEIGHT_STANDARD, 1);
             bool smartOccupancyEnabled = editor.m_smartOccupancyEnabled;
-            nk_bool smartOccupancyCheckboxState = smartOccupancyEnabled ? nk_false : nk_true;
+            nk_bool smartOccupancyCheckboxState = smartOccupancyEnabled ? nk_true : nk_false;
             if (nk_checkbox_label(ctx, "Enable Smart Occupancy", &smartOccupancyCheckboxState)) {
-                editor.m_smartOccupancyEnabled = (smartOccupancyCheckboxState == nk_false);
+                editor.m_smartOccupancyEnabled = (smartOccupancyCheckboxState == nk_true);
                 editor.UpdatePointCloud();
                 editor.SaveSafeParameters();
             }
@@ -691,9 +784,9 @@ void CameraSystemUI::RenderTOFControls(CameraSystemEditor& editor) {
                 // Neighbor Consistency algorithm
                 nk_layout_row_dynamic(ctx, UI_ROW_HEIGHT_STANDARD, 1);
                 bool neighborConsistencyEnabled = editor.m_smartOccupancyNeighborConsistency;
-                nk_bool neighborConsistencyCheckboxState = neighborConsistencyEnabled ? nk_false : nk_true;
+                nk_bool neighborConsistencyCheckboxState = neighborConsistencyEnabled ? nk_true : nk_false;
                 if (nk_checkbox_label(ctx, "Neighbor Consistency", &neighborConsistencyCheckboxState)) {
-                    editor.m_smartOccupancyNeighborConsistency = (neighborConsistencyCheckboxState == nk_false);
+                    editor.m_smartOccupancyNeighborConsistency = (neighborConsistencyCheckboxState == nk_true);
                     editor.UpdatePointCloud();
                     editor.SaveSafeParameters();
                 }
@@ -741,9 +834,9 @@ void CameraSystemUI::RenderTOFControls(CameraSystemEditor& editor) {
                 // Persistence algorithm
                 nk_layout_row_dynamic(ctx, UI_ROW_HEIGHT_STANDARD, 1);
                 bool persistenceEnabled = editor.m_smartOccupancyPersistence;
-                nk_bool persistenceCheckboxState = persistenceEnabled ? nk_false : nk_true;
+                nk_bool persistenceCheckboxState = persistenceEnabled ? nk_true : nk_false;
                 if (nk_checkbox_label(ctx, "Persistence", &persistenceCheckboxState)) {
-                    editor.m_smartOccupancyPersistence = (persistenceCheckboxState == nk_false);
+                    editor.m_smartOccupancyPersistence = (persistenceCheckboxState == nk_true);
                     editor.UpdatePointCloud();
                     editor.SaveSafeParameters();
                 }
@@ -772,9 +865,9 @@ void CameraSystemUI::RenderTOFControls(CameraSystemEditor& editor) {
                 // Variance-based algorithm
                 nk_layout_row_dynamic(ctx, UI_ROW_HEIGHT_STANDARD, 1);
                 bool varianceEnabled = editor.m_smartOccupancyVariance;
-                nk_bool varianceCheckboxState = varianceEnabled ? nk_false : nk_true;
+                nk_bool varianceCheckboxState = varianceEnabled ? nk_true : nk_false;
                 if (nk_checkbox_label(ctx, "Variance-based", &varianceCheckboxState)) {
-                    editor.m_smartOccupancyVariance = (varianceCheckboxState == nk_false);
+                    editor.m_smartOccupancyVariance = (varianceCheckboxState == nk_true);
                     editor.UpdatePointCloud();
                     editor.SaveSafeParameters();
                 }
@@ -803,9 +896,9 @@ void CameraSystemUI::RenderTOFControls(CameraSystemEditor& editor) {
                 // Eviction-based algorithm
                 nk_layout_row_dynamic(ctx, UI_ROW_HEIGHT_STANDARD, 1);
                 bool evictionEnabled = editor.m_smartOccupancyEviction;
-                nk_bool evictionCheckboxState = evictionEnabled ? nk_false : nk_true;
+                nk_bool evictionCheckboxState = evictionEnabled ? nk_true : nk_false;
                 if (nk_checkbox_label(ctx, "Eviction-based", &evictionCheckboxState)) {
-                    editor.m_smartOccupancyEviction = (evictionCheckboxState == nk_false);
+                    editor.m_smartOccupancyEviction = (evictionCheckboxState == nk_true);
                     editor.UpdatePointCloud();
                     editor.SaveSafeParameters();
                 }
@@ -869,50 +962,48 @@ void CameraSystemUI::RenderTOFControls(CameraSystemEditor& editor) {
                 // Eviction-based-2 algorithm
                 nk_layout_row_dynamic(ctx, UI_ROW_HEIGHT_STANDARD, 1);
                 bool eviction2Enabled = editor.m_smartOccupancyEviction2;
-                nk_bool eviction2CheckboxState = eviction2Enabled ? nk_false : nk_true;
+                nk_bool eviction2CheckboxState = eviction2Enabled ? nk_true : nk_false;
                 if (nk_checkbox_label(ctx, "Eviction-based-2", &eviction2CheckboxState)) {
-                    editor.m_smartOccupancyEviction2 = (eviction2CheckboxState == nk_false);
+                    editor.m_smartOccupancyEviction2 = (eviction2CheckboxState == nk_true);
                     editor.UpdatePointCloud();
                     editor.SaveSafeParameters();
                 }
                 
                 if (editor.m_smartOccupancyEviction2) {
-                    // Radius (r) slider
+                    // Appearance Threshold (N) slider - consecutive frames to confirm a point
                     nk_layout_row_template_begin(ctx, UI_ROW_HEIGHT_STANDARD);
                     nk_layout_row_template_push_static(ctx, 200);
                     nk_layout_row_template_push_dynamic(ctx);
                     nk_layout_row_template_end(ctx);
-                    char eviction2RadiusLabelText[128];
-                    std::snprintf(eviction2RadiusLabelText, sizeof(eviction2RadiusLabelText), "r (Radius): %.2f", editor.m_smartOccupancyEviction2Radius);
-                    nk_label(ctx, eviction2RadiusLabelText, NK_TEXT_LEFT);
+                    char eviction2AppearanceLabelText[128];
+                    std::snprintf(eviction2AppearanceLabelText, sizeof(eviction2AppearanceLabelText), "Appear Threshold (N): %d frames", editor.m_smartOccupancyEviction2AppearanceThreshold);
+                    nk_label(ctx, eviction2AppearanceLabelText, NK_TEXT_LEFT);
                     
                     nk_layout_row_dynamic(ctx, UI_ROW_HEIGHT_STANDARD, 1);
-                    float eviction2Radius = editor.m_smartOccupancyEviction2Radius;
-                    nk_slider_float(ctx, OCCUPANCY_EVICTION2_RADIUS_MIN, &eviction2Radius, 
-                                   OCCUPANCY_EVICTION2_RADIUS_MAX, OCCUPANCY_EVICTION2_RADIUS_STEP);
-                    if (std::abs(eviction2Radius - editor.m_smartOccupancyEviction2Radius) > 0.01f) {
-                        editor.m_smartOccupancyEviction2Radius = eviction2Radius;
-                        // Force recomputation of neighbor offsets
-                        editor.m_occupancyState.eviction2CachedRadius = -1.0f;
+                    int eviction2Appearance = editor.m_smartOccupancyEviction2AppearanceThreshold;
+                    nk_slider_int(ctx, OCCUPANCY_EVICTION2_APPEARANCE_THRESHOLD_MIN, &eviction2Appearance, 
+                                  OCCUPANCY_EVICTION2_APPEARANCE_THRESHOLD_MAX, 1);
+                    if (eviction2Appearance != editor.m_smartOccupancyEviction2AppearanceThreshold) {
+                        editor.m_smartOccupancyEviction2AppearanceThreshold = eviction2Appearance;
                         editor.UpdatePointCloud();
                         editor.SaveSafeParameters();
                     }
                     
-                    // Min neighbors slider
+                    // Removal Threshold (M) slider - consecutive frames unseen to remove a point
                     nk_layout_row_template_begin(ctx, UI_ROW_HEIGHT_STANDARD);
                     nk_layout_row_template_push_static(ctx, 200);
                     nk_layout_row_template_push_dynamic(ctx);
                     nk_layout_row_template_end(ctx);
-                    char eviction2MinNeighborsLabelText[128];
-                    std::snprintf(eviction2MinNeighborsLabelText, sizeof(eviction2MinNeighborsLabelText), "Min Neighbors: %d", editor.m_smartOccupancyEviction2MinNeighbors);
-                    nk_label(ctx, eviction2MinNeighborsLabelText, NK_TEXT_LEFT);
+                    char eviction2RemovalLabelText[128];
+                    std::snprintf(eviction2RemovalLabelText, sizeof(eviction2RemovalLabelText), "Remove Threshold (M): %d frames", editor.m_smartOccupancyEviction2RemovalThreshold);
+                    nk_label(ctx, eviction2RemovalLabelText, NK_TEXT_LEFT);
                     
                     nk_layout_row_dynamic(ctx, UI_ROW_HEIGHT_STANDARD, 1);
-                    int eviction2MinNeighbors = editor.m_smartOccupancyEviction2MinNeighbors;
-                    nk_slider_int(ctx, OCCUPANCY_EVICTION2_MIN_NEIGHBORS_MIN, &eviction2MinNeighbors, 
-                                  OCCUPANCY_EVICTION2_MIN_NEIGHBORS_MAX, 1);
-                    if (eviction2MinNeighbors != editor.m_smartOccupancyEviction2MinNeighbors) {
-                        editor.m_smartOccupancyEviction2MinNeighbors = eviction2MinNeighbors;
+                    int eviction2Removal = editor.m_smartOccupancyEviction2RemovalThreshold;
+                    nk_slider_int(ctx, OCCUPANCY_EVICTION2_REMOVAL_THRESHOLD_MIN, &eviction2Removal, 
+                                  OCCUPANCY_EVICTION2_REMOVAL_THRESHOLD_MAX, 1);
+                    if (eviction2Removal != editor.m_smartOccupancyEviction2RemovalThreshold) {
+                        editor.m_smartOccupancyEviction2RemovalThreshold = eviction2Removal;
                         editor.UpdatePointCloud();
                         editor.SaveSafeParameters();
                     }
@@ -951,9 +1042,9 @@ void CameraSystemUI::RenderTOFControls(CameraSystemEditor& editor) {
         nk_layout_row_template_push_dynamic(ctx);      // Value width
         nk_layout_row_template_end(ctx);
         bool noisyTofEnabled = editor.m_vipresNoisyTofEnabled;
-        nk_bool noisyTofCheckboxState = noisyTofEnabled ? nk_false : nk_true; // Inverted logic
+        nk_bool noisyTofCheckboxState = noisyTofEnabled ? nk_true : nk_false;
         if (nk_checkbox_label(ctx, "Enable Noisy TOF", &noisyTofCheckboxState)) {
-            editor.m_vipresNoisyTofEnabled = (noisyTofCheckboxState == nk_false);
+            editor.m_vipresNoisyTofEnabled = (noisyTofCheckboxState == nk_true);
             editor.SaveSafeParameters();
         }
         char noisyTofValueText[64];
@@ -998,6 +1089,138 @@ void CameraSystemUI::RenderTOFControls(CameraSystemEditor& editor) {
             }
         }
         
+        // ------------------------------------------------------------------------
+        // Segmentation ID toggle (5th step in TOF pipeline - assigns IDs based on object proximity)
+        // ------------------------------------------------------------------------
+        nk_layout_row_dynamic(ctx, 3, 1);
+        nk_spacing(ctx, 1);
+        
+        nk_layout_row_dynamic(ctx, UI_ROW_HEIGHT_STANDARD, 1);
+        bool segIdEnabled = editor.m_segmentationIdEnabled;
+        nk_bool segIdCheckboxState = segIdEnabled ? nk_true : nk_false;
+        if (nk_checkbox_label(ctx, "Segmentation IDs", &segIdCheckboxState)) {
+            editor.m_segmentationIdEnabled = (segIdCheckboxState == nk_true);
+            // Clear tracking state when toggling
+            editor.m_activeSegmentIds.clear();
+            editor.m_segmentLabelPos.clear();
+            if (editor.m_tofDataEnabled) {
+                editor.UpdatePointCloud();
+            }
+        }
+        
+        // Show active segment IDs when enabled with toggles to include/exclude from VIPRES output
+        if (editor.m_segmentationIdEnabled && !editor.m_activeSegmentIds.empty()) {
+            nk_layout_row_dynamic(ctx, UI_ROW_HEIGHT_STANDARD, 1);
+            char segCountText[64];
+            std::snprintf(segCountText, sizeof(segCountText), "Include Objects in VIPRES (%zu detected):", editor.m_activeSegmentIds.size());
+            nk_label(ctx, segCountText, NK_TEXT_LEFT);
+            
+            // Show toggles for each segment ID (objects)
+            // Each toggle controls whether this object's points are included in VIPRES output
+            for (int32_t id : editor.m_activeSegmentIds) {
+                // Default to included if not in the map
+                if (editor.m_segmentIdIncluded.find(id) == editor.m_segmentIdIncluded.end()) {
+                    editor.m_segmentIdIncluded[id] = true;  // Default: include all objects
+                }
+                
+                nk_layout_row_dynamic(ctx, UI_ROW_HEIGHT_STANDARD, 1);
+                
+                // Get object name if available, otherwise use "Object X"
+                char objectLabel[64];
+                if (id >= 0 && static_cast<size_t>(id) < editor.m_objects.size() && editor.m_objects[id]) {
+                    std::snprintf(objectLabel, sizeof(objectLabel), "Object %d: %s", id, 
+                                 editor.m_objects[id]->name.empty() ? "unnamed" : editor.m_objects[id]->name.c_str());
+                } else {
+                    std::snprintf(objectLabel, sizeof(objectLabel), "Object %d", id);
+                }
+                
+                bool isIncluded = editor.m_segmentIdIncluded[id];
+                nk_bool checkboxState = isIncluded ? nk_true : nk_false;
+                if (nk_checkbox_label(ctx, objectLabel, &checkboxState)) {
+                    editor.m_segmentIdIncluded[id] = (checkboxState == nk_true);
+                    // Regenerate remesh if enabled
+                    if (editor.m_vipresRemeshEnabled) {
+                        editor.m_remeshNeedsUpdate = true;
+                    }
+                }
+            }
+            
+            // Clean up old segment IDs that are no longer active
+            for (auto it = editor.m_segmentIdIncluded.begin(); it != editor.m_segmentIdIncluded.end();) {
+                if (editor.m_activeSegmentIds.find(it->first) == editor.m_activeSegmentIds.end()) {
+                    it = editor.m_segmentIdIncluded.erase(it);
+                } else {
+                    ++it;
+                }
+            }
+        }
+        
+        // TOF Render Color Mode dropdown (under Segmentation IDs)
+        nk_layout_row_dynamic(ctx, UI_ROW_HEIGHT_STANDARD, 1);
+        nk_label(ctx, "TOF Render Color Mode:", NK_TEXT_LEFT);
+        
+        nk_layout_row_dynamic(ctx, UI_ROW_HEIGHT_STANDARD, 1);
+        const char* colorModes[] = { "Base Color (White)", "Color by Camera", "Color by Object" };
+        int currentMode = static_cast<int>(editor.m_tofRenderColorMode);
+        int selectedMode = nk_combo(ctx, colorModes, 3, currentMode, 25, nk_vec2(200, 100));
+        if (selectedMode != currentMode) {
+            editor.m_tofRenderColorMode = static_cast<TOFRenderColorMode>(selectedMode);
+            editor.SaveSafeParameters();
+        }
+        
+        nk_layout_row_dynamic(ctx, UI_SPACING_SMALL, 1);
+        nk_spacing(ctx, 1);
+        
+        // Surface Flow filtering (temporal smoothing using 3-frame history)
+        // This is applied at the very end of the TOF pipeline after segmentation
+        nk_layout_row_dynamic(ctx, UI_ROW_HEIGHT_STANDARD, 1);
+        bool surfaceFlowEnabled = editor.m_surfaceFlowEnabled;
+        nk_bool surfaceFlowCheckboxState = surfaceFlowEnabled ? nk_true : nk_false;
+        if (nk_checkbox_label(ctx, "Surface Flow Filter", &surfaceFlowCheckboxState)) {
+            editor.m_surfaceFlowEnabled = (surfaceFlowCheckboxState == nk_true);
+            // Clear surface flow history when toggling off
+            if (!editor.m_surfaceFlowEnabled) {
+                editor.m_tofProcessing.ClearSurfaceFlowHistory();
+            }
+        }
+        
+        // Surface flow parameters (only show when enabled)
+        if (editor.m_surfaceFlowEnabled) {
+            // Show frame count in history
+            nk_layout_row_dynamic(ctx, UI_ROW_HEIGHT_STANDARD, 1);
+            char historyText[64];
+            int historyFrames = editor.m_tofProcessing.GetSurfaceFlowFrameCount();
+            std::snprintf(historyText, sizeof(historyText), "History Frames: %d/3", historyFrames);
+            nk_label(ctx, historyText, NK_TEXT_LEFT);
+            
+            // Neighborhood radius slider
+            nk_layout_row_dynamic(ctx, UI_ROW_HEIGHT_STANDARD, 1);
+            char radiusLabel[64];
+            std::snprintf(radiusLabel, sizeof(radiusLabel), "Flow Radius: %.1f", editor.m_surfaceFlowRadius);
+            nk_label(ctx, radiusLabel, NK_TEXT_LEFT);
+            
+            nk_layout_row_dynamic(ctx, UI_ROW_HEIGHT_STANDARD, 1);
+            float newRadius = nk_slide_float(ctx, 10.0f, editor.m_surfaceFlowRadius, 200.0f, 5.0f);
+            if (newRadius != editor.m_surfaceFlowRadius) {
+                editor.m_surfaceFlowRadius = newRadius;
+            }
+            
+            // Threshold slider
+            nk_layout_row_dynamic(ctx, UI_ROW_HEIGHT_STANDARD, 1);
+            char threshLabel[64];
+            std::snprintf(threshLabel, sizeof(threshLabel), "Flow Threshold: %.1f", editor.m_surfaceFlowThreshold);
+            nk_label(ctx, threshLabel, NK_TEXT_LEFT);
+            
+            nk_layout_row_dynamic(ctx, UI_ROW_HEIGHT_STANDARD, 1);
+            float newThreshold = nk_slide_float(ctx, 1.0f, editor.m_surfaceFlowThreshold, 50.0f, 1.0f);
+            if (newThreshold != editor.m_surfaceFlowThreshold) {
+                editor.m_surfaceFlowThreshold = newThreshold;
+            }
+        }
+        
+        nk_layout_row_dynamic(ctx, UI_SPACING_SMALL, 1);
+        nk_spacing(ctx, 1);
+        
         // Camera enable/disable list
         nk_layout_row_dynamic(ctx, 20, 1);
         nk_label(ctx, "Cameras:", NK_TEXT_LEFT);
@@ -1024,17 +1247,15 @@ void CameraSystemUI::RenderTOFControls(CameraSystemEditor& editor) {
             // editor.m_vipresCameraEnabled[i] = true means camera IS enabled (depth data IS used)
             bool currentEnabled = (i < editor.m_vipresCameraEnabled.size()) ? editor.m_vipresCameraEnabled[i] : true;
             
-            // INVERTED LOGIC: Checkbox checked (ON) = camera DISABLED, unchecked (OFF) = camera ENABLED
-            // So if camera is enabled, show checkbox as unchecked (nk_false)
-            // If camera is disabled, show checkbox as checked (nk_true)
-            nk_bool cameraCheckboxState = currentEnabled ? nk_false : nk_true;
+            // Normal logic: Checkbox checked (ON) = camera ENABLED, unchecked (OFF) = camera DISABLED
+            nk_bool cameraCheckboxState = currentEnabled ? nk_true : nk_false;
             
-            // Display checkbox - checked means DISABLED, unchecked means ENABLED (inverted)
+            // Display checkbox - checked means ENABLED, unchecked means DISABLED
             if (nk_checkbox_label(ctx, cam.name.c_str(), &cameraCheckboxState)) {
-                // Checkbox was clicked - update the state with INVERTED logic
-                // nk_true (checked/ON) = camera DISABLED (depth data NOT used)
-                // nk_false (unchecked/OFF) = camera ENABLED (depth data IS used)
-                bool shouldBeEnabled = (cameraCheckboxState == nk_false); // Inverted: unchecked = enabled
+                // Checkbox was clicked - update the state with normal logic
+                // nk_true (checked/ON) = camera ENABLED (depth data IS used)
+                // nk_false (unchecked/OFF) = camera DISABLED (depth data NOT used)
+                bool shouldBeEnabled = (cameraCheckboxState == nk_true);
                 
                 // Ensure vector is properly sized
                 if (i >= editor.m_vipresCameraEnabled.size()) {
@@ -1062,27 +1283,17 @@ void CameraSystemUI::RenderVIPRESControls(CameraSystemEditor& editor) {
     float vipresWindowHeight = editor.m_vipresRemeshEnabled ? UI_VIPRES_CONTROLS_HEIGHT_REMESH : UI_VIPRES_CONTROLS_HEIGHT_MIN;
     
     if (nk_begin(ctx, "VIPRES Controls", 
-                 nk_rect(UI_VIPRES_CONTROLS_X, UI_STATUS_BAR_HEIGHT + UI_WINDOW_OFFSET_Y, 
+                 nk_rect(UI_VIPRES_CONTROLS_X, UI_MENU_BAR_HEIGHT + UI_WINDOW_OFFSET_Y, 
                         UI_VIPRES_CONTROLS_WIDTH, vipresWindowHeight),
-                 NK_WINDOW_BORDER | NK_WINDOW_TITLE | NK_WINDOW_SCALABLE | NK_WINDOW_MOVABLE)) {
+                 NK_WINDOW_BORDER | NK_WINDOW_TITLE | NK_WINDOW_SCALABLE | NK_WINDOW_MOVABLE | NK_WINDOW_MINIMIZABLE)) {
         
-        // Compute Color toggle
-        nk_layout_row_dynamic(ctx, UI_ROW_HEIGHT_STANDARD, 1);
-        bool computeColorEnabled = editor.m_vipresComputeColor;
-        nk_bool computeColorCheckboxState = computeColorEnabled ? nk_false : nk_true; // Inverted logic
-        if (nk_checkbox_label(ctx, "Compute Color", &computeColorCheckboxState)) {
-            editor.m_vipresComputeColor = (computeColorCheckboxState == nk_false);
-            // Regenerate point cloud with new color setting (TOF controls point cloud generation)
-            if (editor.m_tofDataEnabled) {
-                editor.UpdatePointCloud();
-            }
-            // Regenerate remesh to map the new colors to the mesh
-            if (editor.m_vipresRemeshEnabled) {
-                editor.m_remeshNeedsUpdate = true;
-                editor.GenerateRemesh();
-            }
-            editor.SaveSafeParameters();
-        }
+        // ========================================================================
+        // VIPRES CONTROLS: Remeshing and Color Application
+        // ========================================================================
+        // This section controls the VIPRES pipeline:
+        //   - Compute Color: Extract colors from rendered image for TOF points
+        //   - Remesh: Generate mesh from TOF point cloud with applied colors
+        // ========================================================================
         
         nk_layout_row_dynamic(ctx, UI_SPACING_SMALL, 1);
         nk_spacing(ctx, 1);
@@ -1090,9 +1301,9 @@ void CameraSystemUI::RenderVIPRESControls(CameraSystemEditor& editor) {
         // Remesh toggle
         nk_layout_row_dynamic(ctx, UI_ROW_HEIGHT_STANDARD, 1);
         bool remeshEnabled = editor.m_vipresRemeshEnabled;
-        nk_bool remeshCheckboxState = remeshEnabled ? nk_false : nk_true; // Inverted logic
+        nk_bool remeshCheckboxState = remeshEnabled ? nk_true : nk_false;
         if (nk_checkbox_label(ctx, "Enable Remesh", &remeshCheckboxState)) {
-            editor.m_vipresRemeshEnabled = (remeshCheckboxState == nk_false);
+            editor.m_vipresRemeshEnabled = (remeshCheckboxState == nk_true);
             if (editor.m_vipresRemeshEnabled) {
                 editor.m_remeshNeedsUpdate = true;
                 editor.GenerateRemesh();
@@ -1104,9 +1315,9 @@ void CameraSystemUI::RenderVIPRESControls(CameraSystemEditor& editor) {
         if (editor.m_vipresRemeshEnabled) {
             nk_layout_row_dynamic(ctx, UI_ROW_HEIGHT_STANDARD, 1);
             bool autoRecompute = editor.m_vipresAutoRecomputeMesh;
-            nk_bool autoRecomputeCheckboxState = autoRecompute ? nk_false : nk_true; // Inverted logic
+            nk_bool autoRecomputeCheckboxState = autoRecompute ? nk_true : nk_false;
             if (nk_checkbox_label(ctx, "Auto-recompute Mesh (Every Frame)", &autoRecomputeCheckboxState)) {
-                editor.m_vipresAutoRecomputeMesh = (autoRecomputeCheckboxState == nk_false);
+                editor.m_vipresAutoRecomputeMesh = (autoRecomputeCheckboxState == nk_true);
                 editor.SaveSafeParameters();
             }
             
@@ -1115,11 +1326,11 @@ void CameraSystemUI::RenderVIPRESControls(CameraSystemEditor& editor) {
             nk_label(ctx, "Remeshing Algorithm:", NK_TEXT_LEFT);
             
             nk_layout_row_dynamic(ctx, UI_ROW_HEIGHT_STANDARD, 1);
-            const char* algorithms[] = {"Gridded Quads", "Nearest Neighbor", "Delaunay 2D", "Poisson-like", "FCTM", "GeodesicTree", "GTree"};
+            const char* algorithms[] = {"Gridded Quads", "Nearest Neighbor", "Delaunay 2D", "Poisson-like", "FCTM", "GeodesicTree", "GTree", "DensitySDF"};
             int currentSelection = editor.m_vipresRemeshAlgorithm;
-            int newSelection = nk_combo(ctx, algorithms, 7, currentSelection, 25, nk_vec2(200, 200));
+            int newSelection = nk_combo(ctx, algorithms, 8, currentSelection, 25, nk_vec2(200, 200));
             bool algorithmChanged = false;
-            if (newSelection != currentSelection && newSelection >= 0 && newSelection < 7) {
+            if (newSelection != currentSelection && newSelection >= 0 && newSelection < 8) {
                 // Save current algorithm's parameters before switching
                 editor.SaveAlgorithmParams(currentSelection);
                 
@@ -1296,9 +1507,9 @@ void CameraSystemUI::RenderVIPRESControls(CameraSystemEditor& editor) {
                 
                 nk_layout_row_dynamic(ctx, UI_ROW_HEIGHT_STANDARD, 1);
                 bool smoothNormals = editor.m_vipresRemeshPoissonSmoothNormals;
-                nk_bool smoothNormalsCheckboxState = smoothNormals ? nk_false : nk_true; // Inverted logic
+                nk_bool smoothNormalsCheckboxState = smoothNormals ? nk_true : nk_false;
                 if (nk_checkbox_label(ctx, "Smooth Normals", &smoothNormalsCheckboxState)) {
-                    editor.m_vipresRemeshPoissonSmoothNormals = (smoothNormalsCheckboxState == nk_false);
+                    editor.m_vipresRemeshPoissonSmoothNormals = (smoothNormalsCheckboxState == nk_true);
                     editor.SaveAlgorithmParams(activeAlgorithm);  // Save when checkbox changes
                     editor.m_remeshNeedsUpdate = true;
                     if (!editor.m_vipresAutoRecomputeMesh) {
@@ -1378,6 +1589,45 @@ void CameraSystemUI::RenderVIPRESControls(CameraSystemEditor& editor) {
                 }
             }
             
+            // DensitySDF specific parameters (algorithm index 7)
+            // This algorithm uses Gaussian density splatting to create a smooth density field,
+            // then extracts the mesh at a density iso-level using marching cubes.
+            // Use "Reapply Remesh" button to apply changes
+            if (activeAlgorithm == 7) {
+                // Voxel Size (smaller = finer detail but slower)
+                nk_layout_row_dynamic(ctx, UI_ROW_HEIGHT_STANDARD, 2);
+                char densityVoxelSizeLabelText[128];
+                std::snprintf(densityVoxelSizeLabelText, sizeof(densityVoxelSizeLabelText), "Resolution: %.1f", editor.m_vipresRemeshDensityVoxelSize);
+                nk_label(ctx, densityVoxelSizeLabelText, NK_TEXT_LEFT);
+                float densityVoxelSize = editor.m_vipresRemeshDensityVoxelSize;
+                if (nk_slider_float(ctx, 0.5f, &densityVoxelSize, 10.0f, 0.5f)) {
+                    editor.m_vipresRemeshDensityVoxelSize = densityVoxelSize;
+                    editor.m_remeshNeedsUpdate = true;
+                }
+                
+                // Splat Radius (larger = smoother density field, fills more gaps)
+                nk_layout_row_dynamic(ctx, UI_ROW_HEIGHT_STANDARD, 2);
+                char densitySmoothRadiusLabelText[128];
+                std::snprintf(densitySmoothRadiusLabelText, sizeof(densitySmoothRadiusLabelText), "Splat Size: %.1f", editor.m_vipresRemeshDensitySmoothRadius);
+                nk_label(ctx, densitySmoothRadiusLabelText, NK_TEXT_LEFT);
+                float densitySmoothRadius = editor.m_vipresRemeshDensitySmoothRadius;
+                if (nk_slider_float(ctx, 0.0f, &densitySmoothRadius, 10.0f, 0.5f)) {
+                    editor.m_vipresRemeshDensitySmoothRadius = densitySmoothRadius;
+                    editor.m_remeshNeedsUpdate = true;
+                }
+                
+                // Iso Level (0 = tight fit to points, 1 = looser/fills gaps)
+                nk_layout_row_dynamic(ctx, UI_ROW_HEIGHT_STANDARD, 2);
+                char densityIsoValueLabelText[128];
+                std::snprintf(densityIsoValueLabelText, sizeof(densityIsoValueLabelText), "Iso Level: %.2f", editor.m_vipresRemeshDensityIsoValue);
+                nk_label(ctx, densityIsoValueLabelText, NK_TEXT_LEFT);
+                float densityIsoValue = editor.m_vipresRemeshDensityIsoValue;
+                if (nk_slider_float(ctx, 0.0f, &densityIsoValue, 1.0f, 0.05f)) {
+                    editor.m_vipresRemeshDensityIsoValue = densityIsoValue;
+                    editor.m_remeshNeedsUpdate = true;
+                }
+            }
+            
             // Apply button to regenerate mesh with current parameters
             nk_layout_row_dynamic(ctx, UI_ROW_HEIGHT_STANDARD, 1);
             if (nk_button_label(ctx, "Reapply Remesh")) {
@@ -1394,10 +1644,12 @@ void CameraSystemUI::RenderObjectsPanel(CameraSystemEditor& editor) {
     struct nk_context* ctx = m_nuklearUI->GetContext();
     if (!ctx) return;
     
+    if (!editor.m_showObjectsPanel) return;
+    
     if (nk_begin(ctx, "Objects", 
-                 nk_rect(UI_OBJECTS_PANEL_X, UI_STATUS_BAR_HEIGHT + UI_WINDOW_OFFSET_Y, 
+                 nk_rect(UI_OBJECTS_PANEL_X, UI_MENU_BAR_HEIGHT + UI_WINDOW_OFFSET_Y, 
                         UI_OBJECTS_PANEL_WIDTH, UI_OBJECTS_PANEL_HEIGHT),
-                 NK_WINDOW_BORDER | NK_WINDOW_TITLE | NK_WINDOW_SCALABLE | NK_WINDOW_MOVABLE)) {
+                 NK_WINDOW_BORDER | NK_WINDOW_TITLE | NK_WINDOW_SCALABLE | NK_WINDOW_MOVABLE | NK_WINDOW_MINIMIZABLE)) {
 
     nk_layout_row_dynamic(ctx, 25, 1);
    nk_label(ctx, "Loaded Objects:", NK_TEXT_LEFT);
@@ -1428,9 +1680,9 @@ void CameraSystemUI::RenderObjectsPanel(CameraSystemEditor& editor) {
            
            // Enable/disable toggle
            bool visible = editor.m_objects[i]->visible;
-           nk_bool checkboxState = visible ? nk_false : nk_true; // Inverted logic
+           nk_bool checkboxState = visible ? nk_true : nk_false;
            if (nk_checkbox_label(ctx, "", &checkboxState)) {
-               editor.m_objects[i]->visible = (checkboxState == nk_false);
+               editor.m_objects[i]->visible = (checkboxState == nk_true);
            }
            
            // Object name
@@ -1506,12 +1758,12 @@ void CameraSystemUI::RenderStatisticsPanel(CameraSystemEditor& editor) {
     
     if (nk_begin(ctx, "Statistics", 
                  nk_rect(UI_STATISTICS_PANEL_X, 
-                        UI_STATUS_BAR_HEIGHT + UI_WINDOW_OFFSET_Y, 
+                        UI_MENU_BAR_HEIGHT + UI_WINDOW_OFFSET_Y, 
                         UI_STATISTICS_PANEL_WIDTH, UI_STATISTICS_PANEL_HEIGHT),
-                 NK_WINDOW_BORDER | NK_WINDOW_TITLE | NK_WINDOW_SCALABLE | NK_WINDOW_MOVABLE)) {
+                 NK_WINDOW_BORDER | NK_WINDOW_TITLE | NK_WINDOW_SCALABLE | NK_WINDOW_MOVABLE | NK_WINDOW_MINIMIZABLE)) {
         
         // Check if gridding is enabled (required for occupancy weights computation)
-        if (!editor.m_vipresGriddingEnabled) {
+        if (editor.m_vipresGridMode == TOFGridMode::Disabled) {
             nk_layout_row_dynamic(ctx, UI_ROW_HEIGHT_STANDARD, 1);
             nk_label(ctx, "Gridding must be enabled for occupancy weights", NK_TEXT_LEFT);
             nk_layout_row_dynamic(ctx, UI_ROW_HEIGHT_SMALL, 1);

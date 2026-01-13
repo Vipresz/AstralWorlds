@@ -45,10 +45,11 @@ struct OccupancyParams {
     float evictionMinStartValue;  // Minimum start value added to increment/decrement deltas
     int evictionRemovalThreshold;  // For Strategy 2: remove cell when count reaches this (default: 5)
     
-    // Eviction-based-2
+    // Eviction-based-2 (Consecutive Frame Persistence)
+    // Points must be seen N consecutive frames to be kept, removed after M consecutive frames unseen
     bool eviction2Enabled;
-    float eviction2Radius;
-    int eviction2MinNeighbors;
+    int eviction2AppearanceThreshold;  // N: min consecutive frames a point must be seen to be kept
+    int eviction2RemovalThreshold;     // M: max consecutive frames unseen before removal
     
     OccupancyParams()
         : neighborConsistencyEnabled(false)
@@ -65,8 +66,8 @@ struct OccupancyParams {
         , evictionMinStartValue(0.1f)
         , evictionRemovalThreshold(5)  // Remove when count reaches this (hardcoded)
         , eviction2Enabled(false)
-        , eviction2Radius(2.0f)
-        , eviction2MinNeighbors(3)
+        , eviction2AppearanceThreshold(3)  // Must be seen 3 consecutive frames to be kept
+        , eviction2RemovalThreshold(5)     // Removed after 5 consecutive frames unseen
     {}
 };
 
@@ -87,15 +88,13 @@ struct OccupancyState {
     // Strategy 2 state: removal count tracking
     std::map<GridKey, int> evictionRemovalCounts;  // Track removal count for each grid cell
     
-    // Eviction Neighbor based states state
-    std::map<GridKey, PointCloudPoint> eviction2Map1;
-    std::map<GridKey, PointCloudPoint> eviction2Map2;
-    std::vector<std::tuple<int, int, int>> eviction2NeighborOffsets;
-    float eviction2CachedRadius;
+    // Eviction-based-2 state (Consecutive Frame Persistence)
+    std::map<GridKey, int> eviction2ConsecutiveSeenCount;    // How many consecutive frames this cell has been seen
+    std::map<GridKey, int> eviction2ConsecutiveUnseenCount;  // How many consecutive frames this cell has been unseen
+    std::map<GridKey, PointCloudPoint> eviction2ConfirmedPoints;  // Points that have passed the appearance threshold
     
     OccupancyState()
         : totalFrames(0)
-        , eviction2CachedRadius(-1.0f)
     {}
 };
 
@@ -127,10 +126,11 @@ void ApplyEviction(std::map<GridKey, PointCloudPoint>& pointCloudGrid,
                    const OccupancyParams& params,
                    OccupancyState& state);
 
-// Algorithm 5: Eviction-based-2 (density-based weighting)
-void ApplyEviction2(std::map<GridKey, PointCloudPoint>& pointCloudGrid,
-                    const OccupancyParams& params,
-                    OccupancyState& state);
+// Algorithm 5: Eviction-based-2 (Consecutive Frame Persistence)
+// Points must be seen N consecutive frames to be confirmed, removed after M frames unseen
+void ApplyConsecutiveFramePersistence(std::map<GridKey, PointCloudPoint>& pointCloudGrid,
+                                       const OccupancyParams& params,
+                                       OccupancyState& state);
 
 // Apply all enabled occupancy algorithms to gridded point cloud
 // NOTE: All occupancy algorithms ONLY operate on gridded data

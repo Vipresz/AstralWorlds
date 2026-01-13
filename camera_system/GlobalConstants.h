@@ -140,6 +140,14 @@ constexpr float REMESH_GEODESIC_INTERIOR_BIAS_DEFAULT = 0.5f;
 constexpr float REMESH_GEODESIC_INTERIOR_BIAS_MIN = 0.0f;
 constexpr float REMESH_GEODESIC_INTERIOR_BIAS_MAX = 1.0f;
 
+/// Remesh Density Voxel Size (units)
+constexpr float REMESH_DENSITY_VOXEL_SIZE_DEFAULT = .5f;
+
+/// Remesh Density Smooth Radius (units)
+constexpr float REMESH_DENSITY_SMOOTH_RADIUS_DEFAULT = .5f;
+
+/// Remesh Density Iso Value (0.0-1.0)
+constexpr float REMESH_DENSITY_ISO_VALUE_DEFAULT = 0.3f;
 
 // ============================================================================
 // Object Slider Defaults and Limits
@@ -241,14 +249,13 @@ constexpr float OCCUPANCY_EVICTION_MIN_START_MIN = 0.0f;
 constexpr float OCCUPANCY_EVICTION_MIN_START_MAX = 1.0f;
 constexpr float OCCUPANCY_EVICTION_MIN_START_STEP = 0.01f;
 
-/// Eviction-based-2 - Radius (r)
-constexpr float OCCUPANCY_EVICTION2_RADIUS_MIN = 0.5f;
-constexpr float OCCUPANCY_EVICTION2_RADIUS_MAX = 10.0f;
-constexpr float OCCUPANCY_EVICTION2_RADIUS_STEP = 0.1f;
+/// Eviction-based-2 - Appearance Threshold (N consecutive frames to confirm a point)
+constexpr int OCCUPANCY_EVICTION2_APPEARANCE_THRESHOLD_MIN = 1;
+constexpr int OCCUPANCY_EVICTION2_APPEARANCE_THRESHOLD_MAX = 30;
 
-/// Eviction-based-2 - Min Neighbors
-constexpr int OCCUPANCY_EVICTION2_MIN_NEIGHBORS_MIN = 1;
-constexpr int OCCUPANCY_EVICTION2_MIN_NEIGHBORS_MAX = 20;
+/// Eviction-based-2 - Removal Threshold (M consecutive frames unseen to remove a point)
+constexpr int OCCUPANCY_EVICTION2_REMOVAL_THRESHOLD_MIN = 1;
+constexpr int OCCUPANCY_EVICTION2_REMOVAL_THRESHOLD_MAX = 60;
 
 /// Weight Threshold
 constexpr float OCCUPANCY_WEIGHT_THRESHOLD_MIN = 0.0f;

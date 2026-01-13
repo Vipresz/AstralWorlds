@@ -377,45 +377,99 @@ void ApplyEviction(std::map<GridKey, PointCloudPoint>& pointCloudGrid,
 }
 
 /**
- * Algorithm 5: Eviction-based-2 (density-based weighting)
+ * Algorithm 5: Eviction-based-2 (Consecutive Frame Persistence)
  * 
- * Rewards points in dense regions by checking 3D neighbor occupancy. Points with
- * sufficient neighbors (>= minNeighbors) keep full weight. Isolated points are
- * penalized proportionally to their neighbor count.
+ * Implements temporal filtering based on consecutive frame observation:
+ * - A point must be seen for N consecutive frames before it's considered valid (appearance threshold)
+ * - A point is removed after M consecutive frames of not being seen (removal threshold)
+ * 
+ * This provides stable point cloud data by filtering out transient noise while
+ * preserving consistently observed surfaces.
  */
-void ApplyNeighborEvictionPolicy(std::map<GridKey, PointCloudPoint>& pointCloudGrid,
-                    const OccupancyParams& params,
-                    OccupancyState& state) {
-    ComputeNeighborOffsetsSide(params.eviction2Radius, 
-                                    state.eviction2NeighborOffsets,
-                                    state.eviction2CachedRadius);
+void ApplyConsecutiveFramePersistence(std::map<GridKey, PointCloudPoint>& pointCloudGrid,
+                                       const OccupancyParams& params,
+                                       OccupancyState& state) {
+    const int N = params.eviction2AppearanceThreshold;  // Min consecutive frames to be kept
+    const int M = params.eviction2RemovalThreshold;     // Max consecutive frames unseen before removal
     
-    std::vector<GridKey> keysToRemove;
-
-    for (auto& pair : pointCloudGrid) {
+    // Track which cells are currently observed in this frame
+    std::set<GridKey> currentlyObserved;
+    for (const auto& pair : pointCloudGrid) {
+        currentlyObserved.insert(pair.first);
+    }
+    
+    // Process all cells currently in the confirmed points map (previously valid points)
+    std::vector<GridKey> confirmedToRemove;
+    for (auto& pair : state.eviction2ConfirmedPoints) {
         const GridKey& key = pair.first;
         
-        // Count occupied neighbors in 3D space
-        int neighborCount = 0;
-        for (const auto& offset : state.eviction2NeighborOffsets) {
-            GridKey neighborKey(
-                key.x + std::get<0>(offset),
-                key.y + std::get<1>(offset),
-                key.z + std::get<2>(offset)
-            );
-            // if (pointCloudGrid.find(neighborKey) != pointCloudGrid.end()) {
-            //     neighborCount++;
-            // }
-        }
-        
-        // Penalize isolated points, reward dense regions
-        if (neighborCount < params.eviction2MinNeighbors) {
-            keysToRemove.push_back(key);
+        if (currentlyObserved.find(key) != currentlyObserved.end()) {
+            // Cell is still observed - reset unseen counter
+            state.eviction2ConsecutiveUnseenCount[key] = 0;
+            // Update the point data with current observation
+            pair.second = pointCloudGrid[key];
+        } else {
+            // Cell is not observed this frame - increment unseen counter
+            state.eviction2ConsecutiveUnseenCount[key]++;
+            
+            if (state.eviction2ConsecutiveUnseenCount[key] >= M) {
+                // Remove from confirmed points after M consecutive frames unseen
+                confirmedToRemove.push_back(key);
+            }
         }
     }
-
-    for (auto& key: keysToRemove){
-        pointCloudGrid.erase(key);
+    
+    // Remove cells that exceeded the unseen threshold
+    for (const GridKey& key : confirmedToRemove) {
+        state.eviction2ConfirmedPoints.erase(key);
+        state.eviction2ConsecutiveSeenCount.erase(key);
+        state.eviction2ConsecutiveUnseenCount.erase(key);
+    }
+    
+    // Process newly observed cells (not yet confirmed)
+    for (const auto& pair : pointCloudGrid) {
+        const GridKey& key = pair.first;
+        
+        // Skip if already confirmed
+        if (state.eviction2ConfirmedPoints.find(key) != state.eviction2ConfirmedPoints.end()) {
+            continue;
+        }
+        
+        // Check if this cell was seen in previous frame
+        auto seenIt = state.eviction2ConsecutiveSeenCount.find(key);
+        if (seenIt != state.eviction2ConsecutiveSeenCount.end()) {
+            // Increment consecutive seen count
+            seenIt->second++;
+            
+            if (seenIt->second >= N) {
+                // Promoted to confirmed - seen N consecutive frames
+                state.eviction2ConfirmedPoints[key] = pair.second;
+                state.eviction2ConsecutiveUnseenCount[key] = 0;
+            }
+        } else {
+            // First time seeing this cell - start counting
+            state.eviction2ConsecutiveSeenCount[key] = 1;
+        }
+    }
+    
+    // Reset seen count for cells not observed this frame (breaks consecutive streak)
+    std::vector<GridKey> seenCountToReset;
+    for (const auto& pair : state.eviction2ConsecutiveSeenCount) {
+        const GridKey& key = pair.first;
+        // If not in confirmed points AND not observed this frame, reset counter
+        if (state.eviction2ConfirmedPoints.find(key) == state.eviction2ConfirmedPoints.end() &&
+            currentlyObserved.find(key) == currentlyObserved.end()) {
+            seenCountToReset.push_back(key);
+        }
+    }
+    for (const GridKey& key : seenCountToReset) {
+        state.eviction2ConsecutiveSeenCount.erase(key);
+    }
+    
+    // Replace input point cloud with confirmed points only
+    pointCloudGrid.clear();
+    for (const auto& pair : state.eviction2ConfirmedPoints) {
+        pointCloudGrid[pair.first] = pair.second;
     }
 }
 
@@ -451,7 +505,7 @@ void ApplyOccupancyAlgorithms(std::map<GridKey, PointCloudPoint>& pointCloudGrid
         ApplyEviction(pointCloudGrid, params, state);
     }
     if (params.eviction2Enabled) {
-        ApplyNeighborEvictionPolicy(pointCloudGrid, params, state);
+        ApplyConsecutiveFramePersistence(pointCloudGrid, params, state);
     }
     
     // Clamp final weights to [0, 1] range

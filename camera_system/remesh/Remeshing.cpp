@@ -1,4 +1,5 @@
 #include "Remeshing.h"
+#include "../DensitySDFModel.h"  // Trained Random Forest model for SDF prediction
 #include <algorithm>
 #include <cmath>
 #include <limits>
@@ -83,6 +84,9 @@ RemeshResult Remeshing::GenerateMesh(
             break;
         case Algorithm::GTree:
             result = GenerateGTree(workingPointCloud, adjustedParams);
+            break;
+        case Algorithm::DensitySDF:
+            result = GenerateDensitySDF(workingPointCloud, adjustedParams);
             break;
         default:
             result = GenerateNearestNeighbor(workingPointCloud, adjustedParams.maxDistance);
@@ -1172,11 +1176,14 @@ RemeshResult Remeshing::GenerateFCTM(
         return result;
     }
     
-    // Collect points
+    // Collect points and colors
     std::vector<glm::vec3> allPoints;
+    std::vector<glm::vec3> allColors;
     allPoints.reserve(pointCloud.size());
+    allColors.reserve(pointCloud.size());
     for (const auto& p : pointCloud) {
         allPoints.push_back(p.position);
+        allColors.push_back(p.color);
     }
     
     // Auto-determine initial number of clusters based on point count
@@ -1196,6 +1203,7 @@ RemeshResult Remeshing::GenerateFCTM(
 
     // Group points by their assigned initial cluster (be defensive: assignment may be -1/out of range)
     std::vector<std::vector<glm::vec3>> clusterPoints(numInitialClusters);
+    std::vector<std::vector<glm::vec3>> clusterColors(numInitialClusters);
     for (size_t i = 0; i < allPoints.size(); ++i) {
         int a = pointAssignments[i];
         if (a < 0 || static_cast<size_t>(a) >= numInitialClusters) {
@@ -1209,15 +1217,19 @@ RemeshResult Remeshing::GenerateFCTM(
             a = bestIdx;
         }
         clusterPoints[static_cast<size_t>(a)].push_back(allPoints[i]);
+        clusterColors[static_cast<size_t>(a)].push_back(allColors[i]);
     }
 
     const float sliceThickness = params.fctmSliceThickness;
     std::vector<glm::vec3> allClusterCenters;
+    std::vector<glm::vec3> allClusterCenterColors;
     allClusterCenters.reserve(allPoints.size() / 10); // heuristic
+    allClusterCenterColors.reserve(allPoints.size() / 10);
     
     // Process each initial cluster separately
     for (size_t clusterIdx = 0; clusterIdx < clusterPoints.size(); ++clusterIdx) {
         const auto& clusterPointSet = clusterPoints[clusterIdx];
+        const auto& clusterColorSet = clusterColors[clusterIdx];
         if (clusterPointSet.empty()) continue;
         
         // Compute bounding sphere radius for this cluster (centered at cluster center)
@@ -1237,13 +1249,16 @@ RemeshResult Remeshing::GenerateFCTM(
             const float outerR = maxRadius * shrinkFactor;
             const float innerR = std::max(0.0f, outerR - sliceThickness);
             
-            // Collect points in this shell
+            // Collect points and colors in this shell
             std::vector<glm::vec3> pointsInSlice;
+            std::vector<glm::vec3> colorsInSlice;
             pointsInSlice.reserve(clusterPointSet.size() / N + 8);
-            for (const auto& pt : clusterPointSet) {
-                float d = glm::length(pt - clusterCenter);
+            colorsInSlice.reserve(clusterPointSet.size() / N + 8);
+            for (size_t i = 0; i < clusterPointSet.size(); ++i) {
+                float d = glm::length(clusterPointSet[i] - clusterCenter);
                 if (d > innerR && d <= outerR) {
-                    pointsInSlice.push_back(pt);
+                    pointsInSlice.push_back(clusterPointSet[i]);
+                    colorsInSlice.push_back(clusterColorSet[i]);
                 }
             }
             if (pointsInSlice.size() < 3) continue;
@@ -1255,18 +1270,38 @@ RemeshResult Remeshing::GenerateFCTM(
             k = std::max(1, std::min(k, static_cast<int>(pointsInSlice.size())));
             
             std::vector<glm::vec3> sliceCenters;
-            PerformKMeans3D(pointsInSlice, k, sliceCenters);
+            std::vector<int> sliceAssignments(pointsInSlice.size(), -1);
+            PerformKMeans3DWithAssignments(pointsInSlice, k, sliceCenters, sliceAssignments);
+            
+            // Compute average color for each cluster center
+            std::vector<glm::vec3> sliceCenterColors(sliceCenters.size(), glm::vec3(0.0f));
+            std::vector<int> sliceCenterCounts(sliceCenters.size(), 0);
+            for (size_t i = 0; i < pointsInSlice.size(); ++i) {
+                int a = sliceAssignments[i];
+                if (a >= 0 && a < static_cast<int>(sliceCenters.size())) {
+                    sliceCenterColors[a] += colorsInSlice[i];
+                    sliceCenterCounts[a]++;
+                }
+            }
+            for (size_t i = 0; i < sliceCenters.size(); ++i) {
+                if (sliceCenterCounts[i] > 0) {
+                    sliceCenterColors[i] /= static_cast<float>(sliceCenterCounts[i]);
+                } else {
+                    sliceCenterColors[i] = glm::vec3(1.0f, 0.0f, 0.0f); // Fallback to red
+                }
+            }
 
             allClusterCenters.insert(allClusterCenters.end(), sliceCenters.begin(), sliceCenters.end());
+            allClusterCenterColors.insert(allClusterCenterColors.end(), sliceCenterColors.begin(), sliceCenterColors.end());
         }
     }
 
-    // Emit vertices (red)
+    // Emit vertices with computed colors
     result.vertices.reserve(allClusterCenters.size());
-    for (const auto& pos : allClusterCenters) {
+    for (size_t i = 0; i < allClusterCenters.size(); ++i) {
         MeshVertex vtx;
-        vtx.position = pos;
-        vtx.color    = glm::vec3(1.0f, 0.0f, 0.0f);
+        vtx.position = allClusterCenters[i];
+        vtx.color    = allClusterCenterColors[i];
         vtx.normal   = glm::vec3(0.0f, 0.0f, 1.0f);
         result.vertices.push_back(vtx);
     }
@@ -1303,10 +1338,15 @@ RemeshResult Remeshing::GenerateGeodesicTree(
     RemeshResult result;
     if (pointCloud.size() < 3) return result;
 
-    // Collect points
+    // Collect points and colors
     std::vector<glm::vec3> pts;
+    std::vector<glm::vec3> ptColors;
     pts.reserve(pointCloud.size());
-    for (const auto& p : pointCloud) pts.push_back(p.position);
+    ptColors.reserve(pointCloud.size());
+    for (const auto& p : pointCloud) {
+        pts.push_back(p.position);
+        ptColors.push_back(p.color);
+    }
 
     // (Optional but strongly recommended) Split into connected-ish components via coarse voxel hashing.
     // This prevents "two objects" from ruining PCA. If you don't want it, set maxComponents=1.
@@ -1604,11 +1644,28 @@ RemeshResult Remeshing::GenerateGeodesicTree(
         }
 
         // Emit vertices + edges
+        // For each centerline point, average colors of nearby original points
         const unsigned int base = (unsigned int)result.vertices.size();
+        float colorRadius = glm::length(maxPt - minPt) * 0.05f; // 5% of bounding box
         for (auto& p : cl) {
             MeshVertex vtx;
             vtx.position = p;
-            vtx.color    = glm::vec3(1.0f, 0.0f, 0.0f);
+            
+            // Average colors of nearby points
+            glm::vec3 avgColor(0.0f);
+            int colorCount = 0;
+            for (size_t idx : comp) {
+                if (glm::length(pts[idx] - p) < colorRadius) {
+                    avgColor += ptColors[idx];
+                    colorCount++;
+                }
+            }
+            if (colorCount > 0) {
+                vtx.color = avgColor / static_cast<float>(colorCount);
+            } else {
+                vtx.color = glm::vec3(1.0f, 0.0f, 0.0f); // Fallback to red
+            }
+            
             vtx.normal   = glm::vec3(0.0f, 0.0f, 1.0f);
             result.vertices.push_back(vtx);
         }
@@ -1635,11 +1692,14 @@ RemeshResult Remeshing::GenerateGTree(
     RemeshResult result;
     if (pointCloud.size() < 3) return result;
     
-    // Extract points
+    // Extract points and colors
     std::vector<glm::vec3> allPoints;
+    std::vector<glm::vec3> allColors;
     allPoints.reserve(pointCloud.size());
+    allColors.reserve(pointCloud.size());
     for (const auto& p : pointCloud) {
         allPoints.push_back(p.position);
+        allColors.push_back(p.color);
     }
     
     const size_t numPoints = allPoints.size();
@@ -1723,11 +1783,14 @@ RemeshResult Remeshing::GenerateGTree(
     for (const auto& cluster : clusters) {
         if (cluster.size() < 20) continue; // Skip tiny clusters
         
-        // Get cluster points
+        // Get cluster points and colors
         std::vector<glm::vec3> clusterPoints;
+        std::vector<glm::vec3> clusterPointColors;
         clusterPoints.reserve(cluster.size());
+        clusterPointColors.reserve(cluster.size());
         for (size_t idx : cluster) {
             clusterPoints.push_back(allPoints[idx]);
+            clusterPointColors.push_back(allColors[idx]);
         }
         
         // Compute cluster origin (centroid)
@@ -1744,10 +1807,28 @@ RemeshResult Remeshing::GenerateGTree(
         const unsigned int baseIdx = static_cast<unsigned int>(result.vertices.size());
         std::map<size_t, unsigned int> nodeToVertexIndex; // Map from treeNodes index to result vertex index
         
+        // Calculate color averaging radius based on step size
+        float colorRadius = STEP_SIZE * 2.0f;
+        
         for (size_t i = 0; i < treeNodes.size(); ++i) {
             MeshVertex vtx;
             vtx.position = treeNodes[i];
-            vtx.color = glm::vec3(0.0f, 1.0f, 0.0f); // Green for GTree
+            
+            // Average colors of nearby cluster points
+            glm::vec3 avgColor(0.0f);
+            int colorCount = 0;
+            for (size_t j = 0; j < clusterPoints.size(); ++j) {
+                if (glm::length(clusterPoints[j] - treeNodes[i]) < colorRadius) {
+                    avgColor += clusterPointColors[j];
+                    colorCount++;
+                }
+            }
+            if (colorCount > 0) {
+                vtx.color = avgColor / static_cast<float>(colorCount);
+            } else {
+                vtx.color = glm::vec3(0.0f, 1.0f, 0.0f); // Fallback to green
+            }
+            
             vtx.normal = glm::vec3(0.0f, 0.0f, 1.0f);
             nodeToVertexIndex[i] = static_cast<unsigned int>(result.vertices.size());
             result.vertices.push_back(vtx);
@@ -1931,6 +2012,902 @@ std::vector<glm::vec3> Remeshing::FollowTube(
     // This function is kept for future use but not currently called
     // The tube-following algorithm code can be moved here if needed
     return std::vector<glm::vec3>();
+}
+
+// ============================================================================
+// DensitySDF: Density-based SDF reconstruction with Marching Cubes
+// ============================================================================
+// Based on the "learned regularizing surface predictor" concept, but using
+// analytical density gradient estimation instead of a trained regression forest.
+//
+// Pipeline:
+// 1. Rasterize point cloud to 3D density field
+// 2. Compute 3D integral volume for fast box queries
+// 3. For each voxel, estimate projection-difference vector Δ from density gradient
+// 4. Convert to signed distance using normal estimation
+// 5. Extract iso-surface with Marching Cubes
+// ============================================================================
+
+// Helper: 3D density field with integral volume for fast box queries
+struct DensityField {
+    std::vector<float> density;      // 3D density values (flat array)
+    std::vector<float> integralVol;  // 3D integral volume for box sums
+    std::vector<glm::vec3> colorSum; // Color accumulator per voxel
+    int dimX, dimY, dimZ;
+    glm::vec3 minBounds;
+    float voxelSize;
+    
+    DensityField() : dimX(0), dimY(0), dimZ(0), voxelSize(1.0f) {}
+    
+    int index(int x, int y, int z) const {
+        return x + y * dimX + z * dimX * dimY;
+    }
+    
+    float sample(int x, int y, int z) const {
+        if (x < 0 || x >= dimX || y < 0 || y >= dimY || z < 0 || z >= dimZ) return 0.0f;
+        return density[index(x, y, z)];
+    }
+    
+    // Box sum using integral volume (fast O(1) query)
+    float boxSum(int x0, int y0, int z0, int x1, int y1, int z1) const {
+        x0 = std::max(0, std::min(x0, dimX));
+        y0 = std::max(0, std::min(y0, dimY));
+        z0 = std::max(0, std::min(z0, dimZ));
+        x1 = std::max(0, std::min(x1, dimX));
+        y1 = std::max(0, std::min(y1, dimY));
+        z1 = std::max(0, std::min(z1, dimZ));
+        
+        if (x1 <= x0 || y1 <= y0 || z1 <= z0) return 0.0f;
+        
+        // 3D inclusion-exclusion formula
+        auto I = [this](int x, int y, int z) -> float {
+            if (x < 0 || y < 0 || z < 0) return 0.0f;
+            x = std::min(x, dimX - 1);
+            y = std::min(y, dimY - 1);
+            z = std::min(z, dimZ - 1);
+            return integralVol[index(x, y, z)];
+        };
+        
+        return I(x1-1, y1-1, z1-1) 
+             - I(x0-1, y1-1, z1-1) - I(x1-1, y0-1, z1-1) - I(x1-1, y1-1, z0-1)
+             + I(x0-1, y0-1, z1-1) + I(x0-1, y1-1, z0-1) + I(x1-1, y0-1, z0-1)
+             - I(x0-1, y0-1, z0-1);
+    }
+    
+    // Build integral volume for fast box queries
+    void buildIntegralVolume() {
+        integralVol.resize(density.size());
+        
+        for (int z = 0; z < dimZ; z++) {
+            for (int y = 0; y < dimY; y++) {
+                for (int x = 0; x < dimX; x++) {
+                    float val = density[index(x, y, z)];
+                    
+                    // Add contributions from previous cells
+                    if (x > 0) val += integralVol[index(x-1, y, z)];
+                    if (y > 0) val += integralVol[index(x, y-1, z)];
+                    if (z > 0) val += integralVol[index(x, y, z-1)];
+                    if (x > 0 && y > 0) val -= integralVol[index(x-1, y-1, z)];
+                    if (x > 0 && z > 0) val -= integralVol[index(x-1, y, z-1)];
+                    if (y > 0 && z > 0) val -= integralVol[index(x, y-1, z-1)];
+                    if (x > 0 && y > 0 && z > 0) val += integralVol[index(x-1, y-1, z-1)];
+                    
+                    integralVol[index(x, y, z)] = val;
+                }
+            }
+        }
+    }
+    
+    // World position to voxel coordinates
+    void worldToVoxel(const glm::vec3& pos, int& vx, int& vy, int& vz) const {
+        glm::vec3 local = (pos - minBounds) / voxelSize;
+        vx = static_cast<int>(std::floor(local.x));
+        vy = static_cast<int>(std::floor(local.y));
+        vz = static_cast<int>(std::floor(local.z));
+    }
+    
+    // Voxel coordinates to world position (center of voxel)
+    glm::vec3 voxelToWorld(int vx, int vy, int vz) const {
+        return minBounds + glm::vec3(vx + 0.5f, vy + 0.5f, vz + 0.5f) * voxelSize;
+    }
+};
+
+// Complete Marching Cubes lookup tables
+static const int MC_EDGE_TABLE[256] = {
+    0x0  , 0x109, 0x203, 0x30a, 0x406, 0x50f, 0x605, 0x70c,
+    0x80c, 0x905, 0xa0f, 0xb06, 0xc0a, 0xd03, 0xe09, 0xf00,
+    0x190, 0x99 , 0x393, 0x29a, 0x596, 0x49f, 0x795, 0x69c,
+    0x99c, 0x895, 0xb9f, 0xa96, 0xd9a, 0xc93, 0xf99, 0xe90,
+    0x230, 0x339, 0x33 , 0x13a, 0x636, 0x73f, 0x435, 0x53c,
+    0xa3c, 0xb35, 0x83f, 0x936, 0xe3a, 0xf33, 0xc39, 0xd30,
+    0x3a0, 0x2a9, 0x1a3, 0xaa , 0x7a6, 0x6af, 0x5a5, 0x4ac,
+    0xbac, 0xaa5, 0x9af, 0x8a6, 0xfaa, 0xea3, 0xda9, 0xca0,
+    0x460, 0x569, 0x663, 0x76a, 0x66 , 0x16f, 0x265, 0x36c,
+    0xc6c, 0xd65, 0xe6f, 0xf66, 0x86a, 0x963, 0xa69, 0xb60,
+    0x5f0, 0x4f9, 0x7f3, 0x6fa, 0x1f6, 0xff , 0x3f5, 0x2fc,
+    0xdfc, 0xcf5, 0xfff, 0xef6, 0x9fa, 0x8f3, 0xbf9, 0xaf0,
+    0x650, 0x759, 0x453, 0x55a, 0x256, 0x35f, 0x55 , 0x15c,
+    0xe5c, 0xf55, 0xc5f, 0xd56, 0xa5a, 0xb53, 0x859, 0x950,
+    0x7c0, 0x6c9, 0x5c3, 0x4ca, 0x3c6, 0x2cf, 0x1c5, 0xcc ,
+    0xfcc, 0xec5, 0xdcf, 0xcc6, 0xbca, 0xac3, 0x9c9, 0x8c0,
+    0x8c0, 0x9c9, 0xac3, 0xbca, 0xcc6, 0xdcf, 0xec5, 0xfcc,
+    0xcc , 0x1c5, 0x2cf, 0x3c6, 0x4ca, 0x5c3, 0x6c9, 0x7c0,
+    0x950, 0x859, 0xb53, 0xa5a, 0xd56, 0xc5f, 0xf55, 0xe5c,
+    0x15c, 0x55 , 0x35f, 0x256, 0x55a, 0x453, 0x759, 0x650,
+    0xaf0, 0xbf9, 0x8f3, 0x9fa, 0xef6, 0xfff, 0xcf5, 0xdfc,
+    0x2fc, 0x3f5, 0xff , 0x1f6, 0x6fa, 0x7f3, 0x4f9, 0x5f0,
+    0xb60, 0xa69, 0x963, 0x86a, 0xf66, 0xe6f, 0xd65, 0xc6c,
+    0x36c, 0x265, 0x16f, 0x66 , 0x76a, 0x663, 0x569, 0x460,
+    0xca0, 0xda9, 0xea3, 0xfaa, 0x8a6, 0x9af, 0xaa5, 0xbac,
+    0x4ac, 0x5a5, 0x6af, 0x7a6, 0xaa , 0x1a3, 0x2a9, 0x3a0,
+    0xd30, 0xc39, 0xf33, 0xe3a, 0x936, 0x83f, 0xb35, 0xa3c,
+    0x53c, 0x435, 0x73f, 0x636, 0x13a, 0x33 , 0x339, 0x230,
+    0xe90, 0xf99, 0xc93, 0xd9a, 0xa96, 0xb9f, 0x895, 0x99c,
+    0x69c, 0x795, 0x49f, 0x596, 0x29a, 0x393, 0x99 , 0x190,
+    0xf00, 0xe09, 0xd03, 0xc0a, 0xb06, 0xa0f, 0x905, 0x80c,
+    0x70c, 0x605, 0x50f, 0x406, 0x30a, 0x203, 0x109, 0x0
+};
+
+// Complete Marching Cubes triangle table - all 256 cases
+static const int MC_TRI_TABLE[256][16] = {
+    {-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1},
+    {0,8,3,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1},
+    {0,1,9,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1},
+    {1,8,3,9,8,1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1},
+    {1,2,10,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1},
+    {0,8,3,1,2,10,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1},
+    {9,2,10,0,2,9,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1},
+    {2,8,3,2,10,8,10,9,8,-1,-1,-1,-1,-1,-1,-1},
+    {3,11,2,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1},
+    {0,11,2,8,11,0,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1},
+    {1,9,0,2,3,11,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1},
+    {1,11,2,1,9,11,9,8,11,-1,-1,-1,-1,-1,-1,-1},
+    {3,10,1,11,10,3,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1},
+    {0,10,1,0,8,10,8,11,10,-1,-1,-1,-1,-1,-1,-1},
+    {3,9,0,3,11,9,11,10,9,-1,-1,-1,-1,-1,-1,-1},
+    {9,8,10,10,8,11,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1},
+    {4,7,8,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1},
+    {4,3,0,7,3,4,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1},
+    {0,1,9,8,4,7,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1},
+    {4,1,9,4,7,1,7,3,1,-1,-1,-1,-1,-1,-1,-1},
+    {1,2,10,8,4,7,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1},
+    {3,4,7,3,0,4,1,2,10,-1,-1,-1,-1,-1,-1,-1},
+    {9,2,10,9,0,2,8,4,7,-1,-1,-1,-1,-1,-1,-1},
+    {2,10,9,2,9,7,2,7,3,7,9,4,-1,-1,-1,-1},
+    {8,4,7,3,11,2,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1},
+    {11,4,7,11,2,4,2,0,4,-1,-1,-1,-1,-1,-1,-1},
+    {9,0,1,8,4,7,2,3,11,-1,-1,-1,-1,-1,-1,-1},
+    {4,7,11,9,4,11,9,11,2,9,2,1,-1,-1,-1,-1},
+    {3,10,1,3,11,10,7,8,4,-1,-1,-1,-1,-1,-1,-1},
+    {1,11,10,1,4,11,1,0,4,7,11,4,-1,-1,-1,-1},
+    {4,7,8,9,0,11,9,11,10,11,0,3,-1,-1,-1,-1},
+    {4,7,11,4,11,9,9,11,10,-1,-1,-1,-1,-1,-1,-1},
+    {9,5,4,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1},
+    {9,5,4,0,8,3,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1},
+    {0,5,4,1,5,0,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1},
+    {8,5,4,8,3,5,3,1,5,-1,-1,-1,-1,-1,-1,-1},
+    {1,2,10,9,5,4,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1},
+    {3,0,8,1,2,10,4,9,5,-1,-1,-1,-1,-1,-1,-1},
+    {5,2,10,5,4,2,4,0,2,-1,-1,-1,-1,-1,-1,-1},
+    {2,10,5,3,2,5,3,5,4,3,4,8,-1,-1,-1,-1},
+    {9,5,4,2,3,11,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1},
+    {0,11,2,0,8,11,4,9,5,-1,-1,-1,-1,-1,-1,-1},
+    {0,5,4,0,1,5,2,3,11,-1,-1,-1,-1,-1,-1,-1},
+    {2,1,5,2,5,8,2,8,11,4,8,5,-1,-1,-1,-1},
+    {10,3,11,10,1,3,9,5,4,-1,-1,-1,-1,-1,-1,-1},
+    {4,9,5,0,8,1,8,10,1,8,11,10,-1,-1,-1,-1},
+    {5,4,0,5,0,11,5,11,10,11,0,3,-1,-1,-1,-1},
+    {5,4,8,5,8,10,10,8,11,-1,-1,-1,-1,-1,-1,-1},
+    {9,7,8,5,7,9,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1},
+    {9,3,0,9,5,3,5,7,3,-1,-1,-1,-1,-1,-1,-1},
+    {0,7,8,0,1,7,1,5,7,-1,-1,-1,-1,-1,-1,-1},
+    {1,5,3,3,5,7,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1},
+    {9,7,8,9,5,7,10,1,2,-1,-1,-1,-1,-1,-1,-1},
+    {10,1,2,9,5,0,5,3,0,5,7,3,-1,-1,-1,-1},
+    {8,0,2,8,2,5,8,5,7,10,5,2,-1,-1,-1,-1},
+    {2,10,5,2,5,3,3,5,7,-1,-1,-1,-1,-1,-1,-1},
+    {7,9,5,7,8,9,3,11,2,-1,-1,-1,-1,-1,-1,-1},
+    {9,5,7,9,7,2,9,2,0,2,7,11,-1,-1,-1,-1},
+    {2,3,11,0,1,8,1,7,8,1,5,7,-1,-1,-1,-1},
+    {11,2,1,11,1,7,7,1,5,-1,-1,-1,-1,-1,-1,-1},
+    {9,5,8,8,5,7,10,1,3,10,3,11,-1,-1,-1,-1},
+    {5,7,0,5,0,9,7,11,0,1,0,10,11,10,0,-1},
+    {11,10,0,11,0,3,10,5,0,8,0,7,5,7,0,-1},
+    {11,10,5,7,11,5,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1},
+    {10,6,5,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1},
+    {0,8,3,5,10,6,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1},
+    {9,0,1,5,10,6,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1},
+    {1,8,3,1,9,8,5,10,6,-1,-1,-1,-1,-1,-1,-1},
+    {1,6,5,2,6,1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1},
+    {1,6,5,1,2,6,3,0,8,-1,-1,-1,-1,-1,-1,-1},
+    {9,6,5,9,0,6,0,2,6,-1,-1,-1,-1,-1,-1,-1},
+    {5,9,8,5,8,2,5,2,6,3,2,8,-1,-1,-1,-1},
+    {2,3,11,10,6,5,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1},
+    {11,0,8,11,2,0,10,6,5,-1,-1,-1,-1,-1,-1,-1},
+    {0,1,9,2,3,11,5,10,6,-1,-1,-1,-1,-1,-1,-1},
+    {5,10,6,1,9,2,9,11,2,9,8,11,-1,-1,-1,-1},
+    {6,3,11,6,5,3,5,1,3,-1,-1,-1,-1,-1,-1,-1},
+    {0,8,11,0,11,5,0,5,1,5,11,6,-1,-1,-1,-1},
+    {3,11,6,0,3,6,0,6,5,0,5,9,-1,-1,-1,-1},
+    {6,5,9,6,9,11,11,9,8,-1,-1,-1,-1,-1,-1,-1},
+    {5,10,6,4,7,8,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1},
+    {4,3,0,4,7,3,6,5,10,-1,-1,-1,-1,-1,-1,-1},
+    {1,9,0,5,10,6,8,4,7,-1,-1,-1,-1,-1,-1,-1},
+    {10,6,5,1,9,7,1,7,3,7,9,4,-1,-1,-1,-1},
+    {6,1,2,6,5,1,4,7,8,-1,-1,-1,-1,-1,-1,-1},
+    {1,2,5,5,2,6,3,0,4,3,4,7,-1,-1,-1,-1},
+    {8,4,7,9,0,5,0,6,5,0,2,6,-1,-1,-1,-1},
+    {7,3,9,7,9,4,3,2,9,5,9,6,2,6,9,-1},
+    {3,11,2,7,8,4,10,6,5,-1,-1,-1,-1,-1,-1,-1},
+    {5,10,6,4,7,2,4,2,0,2,7,11,-1,-1,-1,-1},
+    {0,1,9,4,7,8,2,3,11,5,10,6,-1,-1,-1,-1},
+    {9,2,1,9,11,2,9,4,11,7,11,4,5,10,6,-1},
+    {8,4,7,3,11,5,3,5,1,5,11,6,-1,-1,-1,-1},
+    {5,1,11,5,11,6,1,0,11,7,11,4,0,4,11,-1},
+    {0,5,9,0,6,5,0,3,6,11,6,3,8,4,7,-1},
+    {6,5,9,6,9,11,4,7,9,7,11,9,-1,-1,-1,-1},
+    {10,4,9,6,4,10,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1},
+    {4,10,6,4,9,10,0,8,3,-1,-1,-1,-1,-1,-1,-1},
+    {10,0,1,10,6,0,6,4,0,-1,-1,-1,-1,-1,-1,-1},
+    {8,3,1,8,1,6,8,6,4,6,1,10,-1,-1,-1,-1},
+    {1,4,9,1,2,4,2,6,4,-1,-1,-1,-1,-1,-1,-1},
+    {3,0,8,1,2,9,2,4,9,2,6,4,-1,-1,-1,-1},
+    {0,2,4,4,2,6,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1},
+    {8,3,2,8,2,4,4,2,6,-1,-1,-1,-1,-1,-1,-1},
+    {10,4,9,10,6,4,11,2,3,-1,-1,-1,-1,-1,-1,-1},
+    {0,8,2,2,8,11,4,9,10,4,10,6,-1,-1,-1,-1},
+    {3,11,2,0,1,6,0,6,4,6,1,10,-1,-1,-1,-1},
+    {6,4,1,6,1,10,4,8,1,2,1,11,8,11,1,-1},
+    {9,6,4,9,3,6,9,1,3,11,6,3,-1,-1,-1,-1},
+    {8,11,1,8,1,0,11,6,1,9,1,4,6,4,1,-1},
+    {3,11,6,3,6,0,0,6,4,-1,-1,-1,-1,-1,-1,-1},
+    {6,4,8,11,6,8,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1},
+    {7,10,6,7,8,10,8,9,10,-1,-1,-1,-1,-1,-1,-1},
+    {0,7,3,0,10,7,0,9,10,6,7,10,-1,-1,-1,-1},
+    {10,6,7,1,10,7,1,7,8,1,8,0,-1,-1,-1,-1},
+    {10,6,7,10,7,1,1,7,3,-1,-1,-1,-1,-1,-1,-1},
+    {1,2,6,1,6,8,1,8,9,8,6,7,-1,-1,-1,-1},
+    {2,6,9,2,9,1,6,7,9,0,9,3,7,3,9,-1},
+    {7,8,0,7,0,6,6,0,2,-1,-1,-1,-1,-1,-1,-1},
+    {7,3,2,6,7,2,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1},
+    {2,3,11,10,6,8,10,8,9,8,6,7,-1,-1,-1,-1},
+    {2,0,7,2,7,11,0,9,7,6,7,10,9,10,7,-1},
+    {1,8,0,1,7,8,1,10,7,6,7,10,2,3,11,-1},
+    {11,2,1,11,1,7,10,6,1,6,7,1,-1,-1,-1,-1},
+    {8,9,6,8,6,7,9,1,6,11,6,3,1,3,6,-1},
+    {0,9,1,11,6,7,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1},
+    {7,8,0,7,0,6,3,11,0,11,6,0,-1,-1,-1,-1},
+    {7,11,6,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1},
+    {7,6,11,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1},
+    {3,0,8,11,7,6,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1},
+    {0,1,9,11,7,6,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1},
+    {8,1,9,8,3,1,11,7,6,-1,-1,-1,-1,-1,-1,-1},
+    {10,1,2,6,11,7,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1},
+    {1,2,10,3,0,8,6,11,7,-1,-1,-1,-1,-1,-1,-1},
+    {2,9,0,2,10,9,6,11,7,-1,-1,-1,-1,-1,-1,-1},
+    {6,11,7,2,10,3,10,8,3,10,9,8,-1,-1,-1,-1},
+    {7,2,3,6,2,7,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1},
+    {7,0,8,7,6,0,6,2,0,-1,-1,-1,-1,-1,-1,-1},
+    {2,7,6,2,3,7,0,1,9,-1,-1,-1,-1,-1,-1,-1},
+    {1,6,2,1,8,6,1,9,8,8,7,6,-1,-1,-1,-1},
+    {10,7,6,10,1,7,1,3,7,-1,-1,-1,-1,-1,-1,-1},
+    {10,7,6,1,7,10,1,8,7,1,0,8,-1,-1,-1,-1},
+    {0,3,7,0,7,10,0,10,9,6,10,7,-1,-1,-1,-1},
+    {7,6,10,7,10,8,8,10,9,-1,-1,-1,-1,-1,-1,-1},
+    {6,8,4,11,8,6,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1},
+    {3,6,11,3,0,6,0,4,6,-1,-1,-1,-1,-1,-1,-1},
+    {8,6,11,8,4,6,9,0,1,-1,-1,-1,-1,-1,-1,-1},
+    {9,4,6,9,6,3,9,3,1,11,3,6,-1,-1,-1,-1},
+    {6,8,4,6,11,8,2,10,1,-1,-1,-1,-1,-1,-1,-1},
+    {1,2,10,3,0,11,0,6,11,0,4,6,-1,-1,-1,-1},
+    {4,11,8,4,6,11,0,2,9,2,10,9,-1,-1,-1,-1},
+    {10,9,3,10,3,2,9,4,3,11,3,6,4,6,3,-1},
+    {8,2,3,8,4,2,4,6,2,-1,-1,-1,-1,-1,-1,-1},
+    {0,4,2,4,6,2,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1},
+    {1,9,0,2,3,4,2,4,6,4,3,8,-1,-1,-1,-1},
+    {1,9,4,1,4,2,2,4,6,-1,-1,-1,-1,-1,-1,-1},
+    {8,1,3,8,6,1,8,4,6,6,10,1,-1,-1,-1,-1},
+    {10,1,0,10,0,6,6,0,4,-1,-1,-1,-1,-1,-1,-1},
+    {4,6,3,4,3,8,6,10,3,0,3,9,10,9,3,-1},
+    {10,9,4,6,10,4,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1},
+    {4,9,5,7,6,11,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1},
+    {0,8,3,4,9,5,11,7,6,-1,-1,-1,-1,-1,-1,-1},
+    {5,0,1,5,4,0,7,6,11,-1,-1,-1,-1,-1,-1,-1},
+    {11,7,6,8,3,4,3,5,4,3,1,5,-1,-1,-1,-1},
+    {9,5,4,10,1,2,7,6,11,-1,-1,-1,-1,-1,-1,-1},
+    {6,11,7,1,2,10,0,8,3,4,9,5,-1,-1,-1,-1},
+    {7,6,11,5,4,10,4,2,10,4,0,2,-1,-1,-1,-1},
+    {3,4,8,3,5,4,3,2,5,10,5,2,11,7,6,-1},
+    {7,2,3,7,6,2,5,4,9,-1,-1,-1,-1,-1,-1,-1},
+    {9,5,4,0,8,6,0,6,2,6,8,7,-1,-1,-1,-1},
+    {3,6,2,3,7,6,1,5,0,5,4,0,-1,-1,-1,-1},
+    {6,2,8,6,8,7,2,1,8,4,8,5,1,5,8,-1},
+    {9,5,4,10,1,6,1,7,6,1,3,7,-1,-1,-1,-1},
+    {1,6,10,1,7,6,1,0,7,8,7,0,9,5,4,-1},
+    {4,0,10,4,10,5,0,3,10,6,10,7,3,7,10,-1},
+    {7,6,10,7,10,8,5,4,10,4,8,10,-1,-1,-1,-1},
+    {6,9,5,6,11,9,11,8,9,-1,-1,-1,-1,-1,-1,-1},
+    {3,6,11,0,6,3,0,5,6,0,9,5,-1,-1,-1,-1},
+    {0,11,8,0,5,11,0,1,5,5,6,11,-1,-1,-1,-1},
+    {6,11,3,6,3,5,5,3,1,-1,-1,-1,-1,-1,-1,-1},
+    {1,2,10,9,5,11,9,11,8,11,5,6,-1,-1,-1,-1},
+    {0,11,3,0,6,11,0,9,6,5,6,9,1,2,10,-1},
+    {11,8,5,11,5,6,8,0,5,10,5,2,0,2,5,-1},
+    {6,11,3,6,3,5,2,10,3,10,5,3,-1,-1,-1,-1},
+    {5,8,9,5,2,8,5,6,2,3,8,2,-1,-1,-1,-1},
+    {9,5,6,9,6,0,0,6,2,-1,-1,-1,-1,-1,-1,-1},
+    {1,5,8,1,8,0,5,6,8,3,8,2,6,2,8,-1},
+    {1,5,6,2,1,6,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1},
+    {1,3,6,1,6,10,3,8,6,5,6,9,8,9,6,-1},
+    {10,1,0,10,0,6,9,5,0,5,6,0,-1,-1,-1,-1},
+    {0,3,8,5,6,10,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1},
+    {10,5,6,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1},
+    {11,5,10,7,5,11,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1},
+    {11,5,10,11,7,5,8,3,0,-1,-1,-1,-1,-1,-1,-1},
+    {5,11,7,5,10,11,1,9,0,-1,-1,-1,-1,-1,-1,-1},
+    {10,7,5,10,11,7,9,8,1,8,3,1,-1,-1,-1,-1},
+    {11,1,2,11,7,1,7,5,1,-1,-1,-1,-1,-1,-1,-1},
+    {0,8,3,1,2,7,1,7,5,7,2,11,-1,-1,-1,-1},
+    {9,7,5,9,2,7,9,0,2,2,11,7,-1,-1,-1,-1},
+    {7,5,2,7,2,11,5,9,2,3,2,8,9,8,2,-1},
+    {2,5,10,2,3,5,3,7,5,-1,-1,-1,-1,-1,-1,-1},
+    {8,2,0,8,5,2,8,7,5,10,2,5,-1,-1,-1,-1},
+    {9,0,1,5,10,3,5,3,7,3,10,2,-1,-1,-1,-1},
+    {9,8,2,9,2,1,8,7,2,10,2,5,7,5,2,-1},
+    {1,3,5,3,7,5,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1},
+    {0,8,7,0,7,1,1,7,5,-1,-1,-1,-1,-1,-1,-1},
+    {9,0,3,9,3,5,5,3,7,-1,-1,-1,-1,-1,-1,-1},
+    {9,8,7,5,9,7,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1},
+    {5,8,4,5,10,8,10,11,8,-1,-1,-1,-1,-1,-1,-1},
+    {5,0,4,5,11,0,5,10,11,11,3,0,-1,-1,-1,-1},
+    {0,1,9,8,4,10,8,10,11,10,4,5,-1,-1,-1,-1},
+    {10,11,4,10,4,5,11,3,4,9,4,1,3,1,4,-1},
+    {2,5,1,2,8,5,2,11,8,4,5,8,-1,-1,-1,-1},
+    {0,4,11,0,11,3,4,5,11,2,11,1,5,1,11,-1},
+    {0,2,5,0,5,9,2,11,5,4,5,8,11,8,5,-1},
+    {9,4,5,2,11,3,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1},
+    {2,5,10,3,5,2,3,4,5,3,8,4,-1,-1,-1,-1},
+    {5,10,2,5,2,4,4,2,0,-1,-1,-1,-1,-1,-1,-1},
+    {3,10,2,3,5,10,3,8,5,4,5,8,0,1,9,-1},
+    {5,10,2,5,2,4,1,9,2,9,4,2,-1,-1,-1,-1},
+    {8,4,5,8,5,3,3,5,1,-1,-1,-1,-1,-1,-1,-1},
+    {0,4,5,1,0,5,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1},
+    {8,4,5,8,5,3,9,0,5,0,3,5,-1,-1,-1,-1},
+    {9,4,5,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1},
+    {4,11,7,4,9,11,9,10,11,-1,-1,-1,-1,-1,-1,-1},
+    {0,8,3,4,9,7,9,11,7,9,10,11,-1,-1,-1,-1},
+    {1,10,11,1,11,4,1,4,0,7,4,11,-1,-1,-1,-1},
+    {3,1,4,3,4,8,1,10,4,7,4,11,10,11,4,-1},
+    {4,11,7,9,11,4,9,2,11,9,1,2,-1,-1,-1,-1},
+    {9,7,4,9,11,7,9,1,11,2,11,1,0,8,3,-1},
+    {11,7,4,11,4,2,2,4,0,-1,-1,-1,-1,-1,-1,-1},
+    {11,7,4,11,4,2,8,3,4,3,2,4,-1,-1,-1,-1},
+    {2,9,10,2,7,9,2,3,7,7,4,9,-1,-1,-1,-1},
+    {9,10,7,9,7,4,10,2,7,8,7,0,2,0,7,-1},
+    {3,7,10,3,10,2,7,4,10,1,10,0,4,0,10,-1},
+    {1,10,2,8,7,4,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1},
+    {4,9,1,4,1,7,7,1,3,-1,-1,-1,-1,-1,-1,-1},
+    {4,9,1,4,1,7,0,8,1,8,7,1,-1,-1,-1,-1},
+    {4,0,3,7,4,3,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1},
+    {4,8,7,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1},
+    {9,10,8,10,11,8,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1},
+    {3,0,9,3,9,11,11,9,10,-1,-1,-1,-1,-1,-1,-1},
+    {0,1,10,0,10,8,8,10,11,-1,-1,-1,-1,-1,-1,-1},
+    {3,1,10,11,3,10,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1},
+    {1,2,11,1,11,9,9,11,8,-1,-1,-1,-1,-1,-1,-1},
+    {3,0,9,3,9,11,1,2,9,2,11,9,-1,-1,-1,-1},
+    {0,2,11,8,0,11,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1},
+    {3,2,11,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1},
+    {2,3,8,2,8,10,10,8,9,-1,-1,-1,-1,-1,-1,-1},
+    {9,10,2,0,9,2,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1},
+    {2,3,8,2,8,10,0,1,8,1,10,8,-1,-1,-1,-1},
+    {1,10,2,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1},
+    {1,3,8,9,1,8,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1},
+    {0,9,1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1},
+    {0,3,8,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1},
+    {-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1}
+};
+
+RemeshResult Remeshing::GenerateDensitySDF(
+    const std::vector<PointCloudPoint>& pointCloud,
+    const AlgorithmParameters& params
+) {
+    RemeshResult result;
+    
+    if (pointCloud.size() < 4) {
+        fprintf(stderr, "[DensitySDF] Point cloud too small: %zu points\n", pointCloud.size());
+        return result;
+    }
+    
+    fprintf(stderr, "[DensitySDF] Starting with %zu points, voxelSize=%.2f, smoothRadius=%.2f, isoValue=%.2f\n",
+            pointCloud.size(), params.densityVoxelSize, params.densitySmoothRadius, params.densityIsoValue);
+    
+    const float voxelSize = params.densityVoxelSize;
+    const float smoothRadius = params.densitySmoothRadius;
+    const float isoValue = params.densityIsoValue;  // Controls density threshold (0 = tight, 1 = loose)
+    
+    // =========================================================================
+    // STEP 1: Compute bounding box with margin
+    // =========================================================================
+    glm::vec3 minBounds(std::numeric_limits<float>::max());
+    glm::vec3 maxBounds(std::numeric_limits<float>::lowest());
+    
+    for (const auto& p : pointCloud) {
+        minBounds = glm::min(minBounds, p.position);
+        maxBounds = glm::max(maxBounds, p.position);
+    }
+    
+    // Expand bounds by margin for surface extraction
+    float margin = voxelSize * 4.0f;
+    minBounds -= glm::vec3(margin);
+    maxBounds += glm::vec3(margin);
+    
+    // =========================================================================
+    // STEP 2: Create voxel grid
+    // =========================================================================
+    DensityField field;
+    field.minBounds = minBounds;
+    field.voxelSize = voxelSize;
+    field.dimX = static_cast<int>(std::ceil((maxBounds.x - minBounds.x) / voxelSize)) + 1;
+    field.dimY = static_cast<int>(std::ceil((maxBounds.y - minBounds.y) / voxelSize)) + 1;
+    field.dimZ = static_cast<int>(std::ceil((maxBounds.z - minBounds.z) / voxelSize)) + 1;
+    
+    // Limit grid size for performance
+    const int maxDim = 100;
+    if (field.dimX > maxDim || field.dimY > maxDim || field.dimZ > maxDim) {
+        float maxExtent = std::max({maxBounds.x - minBounds.x, maxBounds.y - minBounds.y, maxBounds.z - minBounds.z});
+        field.voxelSize = maxExtent / (maxDim - 4);
+        field.dimX = static_cast<int>(std::ceil((maxBounds.x - minBounds.x) / field.voxelSize)) + 1;
+        field.dimY = static_cast<int>(std::ceil((maxBounds.y - minBounds.y) / field.voxelSize)) + 1;
+        field.dimZ = static_cast<int>(std::ceil((maxBounds.z - minBounds.z) / field.voxelSize)) + 1;
+    }
+    
+    size_t totalVoxels = static_cast<size_t>(field.dimX) * field.dimY * field.dimZ;
+    
+    fprintf(stderr, "[DensitySDF] Grid: %dx%dx%d = %zu voxels, voxelSize=%.3f\n", 
+            field.dimX, field.dimY, field.dimZ, totalVoxels, field.voxelSize);
+    
+    // =========================================================================
+    // STEP 3: Rasterize point cloud into density field using Gaussian splatting
+    // This follows the paper's approach: ρ(x) via trilinear splatting
+    // =========================================================================
+    std::vector<float> density(totalVoxels, 0.0f);
+    field.colorSum.resize(totalVoxels, glm::vec3(0.0f));
+    std::vector<float> colorWeights(totalVoxels, 0.0f);
+    
+    // Gaussian splat radius: larger = smoother density field
+    // The key insight: points contribute to a neighborhood, creating continuous density
+    // Training used splatSigma/voxelSize ratio of 1.5 (0.03/0.02), match that here
+    // smoothRadius=0 → ratio=1.5, smoothRadius=1 → ratio=2.0, etc.
+    const float splatSigma = field.voxelSize * (1.5f + smoothRadius * 0.5f);
+    const float sigmaSq2 = 2.0f * splatSigma * splatSigma;
+    const int splatRadius = static_cast<int>(std::ceil(3.0f * splatSigma / field.voxelSize));
+    
+    fprintf(stderr, "[DensitySDF] Splatting with sigma=%.3f, radius=%d voxels\n", splatSigma, splatRadius);
+    
+    for (const auto& p : pointCloud) {
+        // Convert point to voxel coordinates
+        glm::vec3 voxelCoord = (p.position - minBounds) / field.voxelSize;
+        int cx = static_cast<int>(std::round(voxelCoord.x));
+        int cy = static_cast<int>(std::round(voxelCoord.y));
+        int cz = static_cast<int>(std::round(voxelCoord.z));
+        
+        // Splat Gaussian contribution to nearby voxels
+        for (int dz = -splatRadius; dz <= splatRadius; dz++) {
+            for (int dy = -splatRadius; dy <= splatRadius; dy++) {
+                for (int dx = -splatRadius; dx <= splatRadius; dx++) {
+                    int nx = cx + dx, ny = cy + dy, nz = cz + dz;
+                    if (nx < 0 || nx >= field.dimX || 
+                        ny < 0 || ny >= field.dimY || 
+                        nz < 0 || nz >= field.dimZ) continue;
+                    
+                    glm::vec3 voxelPos = field.voxelToWorld(nx, ny, nz);
+                    float dist2 = glm::dot(p.position - voxelPos, p.position - voxelPos);
+                    float w = std::exp(-dist2 / sigmaSq2) * p.weight;
+                    
+                    int idx = field.index(nx, ny, nz);
+                    density[idx] += w;
+                    field.colorSum[idx] += p.color * w;
+                    colorWeights[idx] += w;
+                }
+            }
+        }
+    }
+    
+    // Normalize colors
+    for (size_t i = 0; i < totalVoxels; i++) {
+        if (colorWeights[i] > 0.001f) {
+            field.colorSum[i] /= colorWeights[i];
+        } else {
+            field.colorSum[i] = glm::vec3(0.7f);  // Default gray
+        }
+    }
+    
+    // Find max density for threshold calculation
+    float maxDensity = 0.0f;
+    for (size_t i = 0; i < totalVoxels; i++) {
+        maxDensity = std::max(maxDensity, density[i]);
+    }
+    
+    if (maxDensity < 0.0001f) {
+        fprintf(stderr, "[DensitySDF] Error: No density accumulated (maxDensity=%.6f)\n", maxDensity);
+        return result;
+    }
+    
+    fprintf(stderr, "[DensitySDF] Max density: %.4f\n", maxDensity);
+    
+    // =========================================================================
+    // STEP 4: Build integral volume (3D prefix sums) for fast box-sum queries
+    // This enables O(1) queries of density sum in any axis-aligned box
+    // =========================================================================
+    std::vector<float> integralVol(totalVoxels, 0.0f);
+    
+    // Compute 3D prefix sums
+    for (int z = 0; z < field.dimZ; z++) {
+        for (int y = 0; y < field.dimY; y++) {
+            for (int x = 0; x < field.dimX; x++) {
+                int idx = field.index(x, y, z);
+                float val = density[idx];
+                
+                // Add contributions from adjacent prefix sums
+                if (x > 0) val += integralVol[field.index(x-1, y, z)];
+                if (y > 0) val += integralVol[field.index(x, y-1, z)];
+                if (z > 0) val += integralVol[field.index(x, y, z-1)];
+                
+                // Subtract double-counted edges
+                if (x > 0 && y > 0) val -= integralVol[field.index(x-1, y-1, z)];
+                if (x > 0 && z > 0) val -= integralVol[field.index(x-1, y, z-1)];
+                if (y > 0 && z > 0) val -= integralVol[field.index(x, y-1, z-1)];
+                
+                // Add back triple-counted corner
+                if (x > 0 && y > 0 && z > 0) val += integralVol[field.index(x-1, y-1, z-1)];
+                
+                integralVol[idx] = val;
+            }
+        }
+    }
+    
+    // Box-sum query helper (inclusive bounds)
+    auto boxSum = [&](int x0, int y0, int z0, int x1, int y1, int z1) -> float {
+        // Clamp bounds
+        x0 = std::max(0, std::min(x0, field.dimX - 1));
+        y0 = std::max(0, std::min(y0, field.dimY - 1));
+        z0 = std::max(0, std::min(z0, field.dimZ - 1));
+        x1 = std::max(0, std::min(x1, field.dimX - 1));
+        y1 = std::max(0, std::min(y1, field.dimY - 1));
+        z1 = std::max(0, std::min(z1, field.dimZ - 1));
+        
+        float sum = integralVol[field.index(x1, y1, z1)];
+        
+        if (x0 > 0) sum -= integralVol[field.index(x0-1, y1, z1)];
+        if (y0 > 0) sum -= integralVol[field.index(x1, y0-1, z1)];
+        if (z0 > 0) sum -= integralVol[field.index(x1, y1, z0-1)];
+        
+        if (x0 > 0 && y0 > 0) sum += integralVol[field.index(x0-1, y0-1, z1)];
+        if (x0 > 0 && z0 > 0) sum += integralVol[field.index(x0-1, y1, z0-1)];
+        if (y0 > 0 && z0 > 0) sum += integralVol[field.index(x1, y0-1, z0-1)];
+        
+        if (x0 > 0 && y0 > 0 && z0 > 0) sum -= integralVol[field.index(x0-1, y0-1, z0-1)];
+        
+        return sum;
+    };
+    
+    // =========================================================================
+    // STEP 5: Compute density gradient for surface normal estimation
+    // The gradient points from low to high density (toward the surface)
+    // =========================================================================
+    std::vector<glm::vec3> densityGradient(totalVoxels, glm::vec3(0.0f));
+    
+    for (int z = 1; z < field.dimZ - 1; z++) {
+        for (int y = 1; y < field.dimY - 1; y++) {
+            for (int x = 1; x < field.dimX - 1; x++) {
+                int idx = field.index(x, y, z);
+                
+                // Central differences for gradient
+                float gx = (density[field.index(x+1, y, z)] - density[field.index(x-1, y, z)]) / (2.0f * field.voxelSize);
+                float gy = (density[field.index(x, y+1, z)] - density[field.index(x, y-1, z)]) / (2.0f * field.voxelSize);
+                float gz = (density[field.index(x, y, z+1)] - density[field.index(x, y, z-1)]) / (2.0f * field.voxelSize);
+                
+                densityGradient[idx] = glm::vec3(gx, gy, gz);
+            }
+        }
+    }
+    
+    // =========================================================================
+    // STEP 6: Convert density to SDF following the paper's approach
+    // 
+    // Key insight: The surface is the iso-level where density = threshold
+    // For the SDF:
+    //   - High density (above threshold) = inside = negative SDF
+    //   - Low density (below threshold) = outside = positive SDF
+    //   - At threshold = surface = SDF ≈ 0
+    // 
+    // The magnitude is estimated by: |density - threshold| / |∇density|
+    // This converts density difference to physical distance
+    // =========================================================================
+    std::vector<float> sdf(totalVoxels);
+    
+    // Density threshold: controls how tight the mesh fits
+    // isoValue = 0 → threshold at max density (very tight, may have holes)
+    // isoValue = 0.5 → threshold at half max (balanced)
+    // isoValue = 1 → threshold near zero (very loose/puffy)
+    float densityThreshold = maxDensity * (1.0f - isoValue * 0.9f);
+    
+    fprintf(stderr, "[DensitySDF] Density threshold: %.4f (%.1f%% of max)\n", 
+            densityThreshold, 100.0f * densityThreshold / maxDensity);
+    
+    // Statistics
+    int insideCount = 0;
+    float minSdf = std::numeric_limits<float>::max();
+    float maxSdf = std::numeric_limits<float>::lowest();
+    
+    // Debug: track prediction statistics
+    float sumPredictedDist = 0.0f;
+    float sumRawDist = 0.0f;
+    float maxPredictedDist = 0.0f;
+    float maxGradientDist = 0.0f;
+    int sampleCount = 0;
+    
+    for (int z = 0; z < field.dimZ; z++) {
+        for (int y = 0; y < field.dimY; y++) {
+            for (int x = 0; x < field.dimX; x++) {
+                int idx = field.index(x, y, z);
+                
+                float d = density[idx];
+                glm::vec3 grad = densityGradient[idx];
+                float gradMag = glm::length(grad);
+                
+                // Density difference from threshold
+                float densityDiff = densityThreshold - d;  // Positive outside, negative inside
+                
+                // Convert to physical distance using trained Random Forest model
+                // The model predicts Δ_S(x) = x - π_S(x), the vector from query to closest surface
+                float distance;
+                
+                // Use trained model to predict projection difference vector
+                // Extract features using the same box definitions used during training
+                float features[DensitySDF::NUM_FEATURES];
+                for (uint32_t fi = 0; fi < DensitySDF::NUM_FEATURES; fi++) {
+                    const auto& bf = DensitySDF::BOX_FEATURES[fi];
+                    int x0 = x + bf.offsetX - bf.halfSizeX;
+                    int y0 = y + bf.offsetY - bf.halfSizeY;
+                    int z0 = z + bf.offsetZ - bf.halfSizeZ;
+                    int x1 = x + bf.offsetX + bf.halfSizeX;
+                    int y1 = y + bf.offsetY + bf.halfSizeY;
+                    int z1 = z + bf.offsetZ + bf.halfSizeZ;
+                    features[fi] = boxSum(x0, y0, z0, x1, y1, z1);
+                }
+                
+                // Get prediction from Random Forest
+                float deltaX, deltaY, deltaZ;
+                DensitySDF::PredictDelta(features, deltaX, deltaY, deltaZ);
+                
+                // The predicted delta vector tells us direction and distance to surface
+                // IMPORTANT: Model was trained with voxelSize=0.02f. The predicted delta is in
+                // training world units. We need to scale to inference world units.
+                const float trainingVoxelSize = 0.02f;
+                float scaleFactor = field.voxelSize / trainingVoxelSize;
+                
+                // Scale the delta vector to inference coordinate space
+                deltaX *= scaleFactor;
+                deltaY *= scaleFactor;
+                deltaZ *= scaleFactor;
+                
+                float predictedDist = std::sqrt(deltaX*deltaX + deltaY*deltaY + deltaZ*deltaZ);
+                
+                // Determine sign: use gradient if available, otherwise use delta direction
+                float sign = 1.0f;
+                if (gradMag > 0.001f * maxDensity / field.voxelSize) {
+                    // Good gradient available - use it for sign
+                    // Gradient points toward high density (toward object center/inside)
+                    // Delta = query - closest_surface, so delta points FROM surface TO query:
+                    //   - If query is OUTSIDE: delta points outward (opposite to gradient) → dot < 0
+                    //   - If query is INSIDE: delta points toward center (same as gradient) → dot > 0
+                    glm::vec3 normalizedGrad = densityGradient[idx] / gradMag;
+                    glm::vec3 deltaDir = glm::vec3(deltaX, deltaY, deltaZ);
+                    float deltaMag = predictedDist;
+                    if (deltaMag > 0.0001f) {
+                        deltaDir /= deltaMag;
+                        // dot < 0 → outside → positive SDF
+                        // dot > 0 → inside → negative SDF
+                        sign = glm::dot(normalizedGrad, deltaDir) < 0.0f ? 1.0f : -1.0f;
+                    } else {
+                        // Very close to surface - use density to determine sign
+                        sign = (d > densityThreshold) ? -1.0f : 1.0f;
+                    }
+                } else {
+                    // Weak gradient - use density threshold for sign
+                    sign = (d > densityThreshold) ? -1.0f : 1.0f;
+                }
+                
+                // Blend model prediction with gradient-based estimate if gradient is strong
+                if (gradMag > 0.01f * maxDensity / field.voxelSize) {
+                    float gradientDist = std::abs(densityDiff) / gradMag;
+                    // Weighted blend - trust gradient more when it's strong
+                    float gradWeight = std::min(1.0f, gradMag / (0.1f * maxDensity / field.voxelSize));
+                    distance = sign * (gradWeight * gradientDist + (1.0f - gradWeight) * predictedDist);
+                    maxGradientDist = std::max(maxGradientDist, gradientDist);
+                } else {
+                    distance = sign * predictedDist;
+                }
+                
+                // Track statistics
+                float rawDist = std::sqrt(deltaX*deltaX + deltaY*deltaY + deltaZ*deltaZ) / scaleFactor;
+                sumRawDist += rawDist;
+                sumPredictedDist += predictedDist;
+                maxPredictedDist = std::max(maxPredictedDist, predictedDist);
+                sampleCount++;
+                
+                // Clamp SDF to reasonable range
+                float maxDist = field.voxelSize * 20.0f;
+                distance = std::clamp(distance, -maxDist, maxDist);
+                
+                sdf[idx] = distance;
+                
+                minSdf = std::min(minSdf, distance);
+                maxSdf = std::max(maxSdf, distance);
+                if (distance < 0.0f) insideCount++;
+            }
+        }
+    }
+    
+    fprintf(stderr, "[DensitySDF] SDF range: [%.3f, %.3f], inside: %d (%.1f%%)\n", 
+            minSdf, maxSdf, insideCount, 100.0f * insideCount / totalVoxels);
+    
+    if (sampleCount > 0) {
+        fprintf(stderr, "[DensitySDF] Model predictions: avgRaw=%.6f, avgScaled=%.4f, maxScaled=%.4f, scaleFactor=%.1f\n",
+                sumRawDist / sampleCount, sumPredictedDist / sampleCount, maxPredictedDist,
+                field.voxelSize / 0.02f);
+        fprintf(stderr, "[DensitySDF] Gradient-based distance: maxGradientDist=%.4f\n", maxGradientDist);
+    }
+    
+    // =========================================================================
+    // STEP 7: Light Gaussian smoothing of SDF (optional, helps regularize)
+    // =========================================================================
+    if (smoothRadius > 0.5f) {
+        std::vector<float> smoothedSdf(totalVoxels);
+        int smoothK = std::min(2, static_cast<int>(std::ceil(smoothRadius * 0.5f)));
+        float smoothSigmaSq2 = 2.0f * (smoothRadius * 0.5f) * (smoothRadius * 0.5f);
+        
+        for (int z = 0; z < field.dimZ; z++) {
+            for (int y = 0; y < field.dimY; y++) {
+                for (int x = 0; x < field.dimX; x++) {
+                    float sum = 0.0f;
+                    float wSum = 0.0f;
+                    
+                    for (int dz = -smoothK; dz <= smoothK; dz++) {
+                        for (int dy = -smoothK; dy <= smoothK; dy++) {
+                            for (int dx = -smoothK; dx <= smoothK; dx++) {
+                                int nx = x + dx, ny = y + dy, nz = z + dz;
+                                if (nx < 0 || nx >= field.dimX || 
+                                    ny < 0 || ny >= field.dimY || 
+                                    nz < 0 || nz >= field.dimZ) continue;
+                                
+                                float d2 = static_cast<float>(dx*dx + dy*dy + dz*dz);
+                                float w = std::exp(-d2 / smoothSigmaSq2);
+                                sum += sdf[field.index(nx, ny, nz)] * w;
+                                wSum += w;
+                            }
+                        }
+                    }
+                    
+                    smoothedSdf[field.index(x, y, z)] = sum / wSum;
+                }
+            }
+        }
+        sdf = std::move(smoothedSdf);
+    }
+    
+    // =========================================================================
+    // STEP 8: Marching Cubes - Extract iso-surface at SDF = 0
+    // =========================================================================
+    std::vector<MeshVertex> vertices;
+    std::vector<unsigned int> indices;
+    std::map<std::tuple<int,int,int,int>, unsigned int> edgeToVertex;
+    
+    static const int edgeVerts[12][2] = {
+        {0,1}, {1,2}, {2,3}, {3,0},
+        {4,5}, {5,6}, {6,7}, {7,4},
+        {0,4}, {1,5}, {2,6}, {3,7}
+    };
+    
+    static const int cubeVerts[8][3] = {
+        {0,0,0}, {1,0,0}, {1,1,0}, {0,1,0},
+        {0,0,1}, {1,0,1}, {1,1,1}, {0,1,1}
+    };
+    
+    auto getOrCreateVertex = [&](int x, int y, int z, int edge) -> unsigned int {
+        auto key = std::make_tuple(x, y, z, edge);
+        auto it = edgeToVertex.find(key);
+        if (it != edgeToVertex.end()) {
+            return it->second;
+        }
+        
+        int v0 = edgeVerts[edge][0];
+        int v1 = edgeVerts[edge][1];
+        
+        int x0 = x + cubeVerts[v0][0], y0 = y + cubeVerts[v0][1], z0 = z + cubeVerts[v0][2];
+        int x1 = x + cubeVerts[v1][0], y1 = y + cubeVerts[v1][1], z1 = z + cubeVerts[v1][2];
+        
+        float d0 = sdf[field.index(x0, y0, z0)];
+        float d1 = sdf[field.index(x1, y1, z1)];
+        
+        float t = (std::abs(d1 - d0) > 0.0001f) ? (-d0 / (d1 - d0)) : 0.5f;
+        t = std::clamp(t, 0.0f, 1.0f);
+        
+        glm::vec3 p0 = field.voxelToWorld(x0, y0, z0);
+        glm::vec3 p1 = field.voxelToWorld(x1, y1, z1);
+        
+        MeshVertex v;
+        v.position = p0 + t * (p1 - p0);
+        
+        glm::vec3 c0 = field.colorSum[field.index(x0, y0, z0)];
+        glm::vec3 c1 = field.colorSum[field.index(x1, y1, z1)];
+        v.color = c0 + t * (c1 - c0);
+        v.normal = glm::vec3(0.0f);
+        
+        unsigned int idx = static_cast<unsigned int>(vertices.size());
+        vertices.push_back(v);
+        edgeToVertex[key] = idx;
+        return idx;
+    };
+    
+    // Process each cube
+    int surfaceCubes = 0;
+    for (int z = 0; z < field.dimZ - 1; z++) {
+        for (int y = 0; y < field.dimY - 1; y++) {
+            for (int x = 0; x < field.dimX - 1; x++) {
+                float vals[8];
+                for (int i = 0; i < 8; i++) {
+                    int cx = x + cubeVerts[i][0];
+                    int cy = y + cubeVerts[i][1];
+                    int cz = z + cubeVerts[i][2];
+                    vals[i] = sdf[field.index(cx, cy, cz)];
+                }
+                
+                int cubeIndex = 0;
+                for (int i = 0; i < 8; i++) {
+                    if (vals[i] < 0.0f) cubeIndex |= (1 << i);
+                }
+                
+                if (MC_EDGE_TABLE[cubeIndex] == 0) continue;
+                surfaceCubes++;
+                
+                int edgeMask = MC_EDGE_TABLE[cubeIndex];
+                unsigned int vertList[12];
+                for (int e = 0; e < 12; e++) {
+                    if (edgeMask & (1 << e)) {
+                        vertList[e] = getOrCreateVertex(x, y, z, e);
+                    }
+                }
+                
+                for (int i = 0; MC_TRI_TABLE[cubeIndex][i] != -1; i += 3) {
+                    indices.push_back(vertList[MC_TRI_TABLE[cubeIndex][i]]);
+                    indices.push_back(vertList[MC_TRI_TABLE[cubeIndex][i+1]]);
+                    indices.push_back(vertList[MC_TRI_TABLE[cubeIndex][i+2]]);
+                }
+            }
+        }
+    }
+    
+    fprintf(stderr, "[DensitySDF] Marching Cubes: %d surface cubes processed\n", surfaceCubes);
+    
+    // =========================================================================
+    // STEP 9: Compute smooth normals
+    // =========================================================================
+    if (!vertices.empty() && !indices.empty()) {
+        CalculateNormals(vertices, indices);
+    }
+    
+    fprintf(stderr, "[DensitySDF] Result: %zu vertices, %zu indices (%zu triangles)\n",
+            vertices.size(), indices.size(), indices.size() / 3);
+    
+    result.vertices = std::move(vertices);
+    result.indices = std::move(indices);
+    result.triangleCount = result.indices.size() / 3;
+    result.vertexCount = result.vertices.size();
+    
+    return result;
 }
 
 } // namespace CameraSystem

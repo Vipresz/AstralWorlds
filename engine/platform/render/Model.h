@@ -65,6 +65,14 @@ public:
     // minZ, maxZ: Z range across all objects (calculated externally)
     void ApplyRainbowColors(float minZ, float maxZ);
     
+    // Check if model has any valid (non-null) textures
+    bool HasTextures() const { 
+        for (const auto* tex : m_textureList) {
+            if (tex) return true;
+        }
+        return false;
+    }
+    
     ~Model();
 
 private:
