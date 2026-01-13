@@ -92,13 +92,20 @@ void ObjectRenderer::RenderObject(SceneObject* obj, Platform::Render::Shader* sh
         glUniform1i(uniformBoneCount, 0);
     }
     
-    // Set up texture (use default white texture if none bound)
-    glActiveTexture(GL_TEXTURE1);
-    GLint boundTexture = 0;
-    glGetIntegerv(GL_TEXTURE_BINDING_2D, &boundTexture);
-    if (boundTexture == 0) {
-        EnsureDefaultTexture();
-        glBindTexture(GL_TEXTURE_2D, m_defaultWhiteTexture);
+    // Set up texture uniforms
+    GLuint shaderID = shader->GetShaderID();
+    GLint uniformUseTexture = glGetUniformLocation(shaderID, "useTexture");
+    GLint uniformTheTexture = glGetUniformLocation(shaderID, "theTexture");
+    
+    // Check if model has textures
+    bool hasTextures = obj->model->HasTextures();
+    if (uniformUseTexture != -1) {
+        glUniform1i(uniformUseTexture, hasTextures ? 1 : 0);
+    }
+    
+    // Set texture sampler to use texture unit 1
+    if (uniformTheTexture != -1) {
+        glUniform1i(uniformTheTexture, 1);
     }
     
     // Set up OpenGL state
@@ -106,7 +113,7 @@ void ObjectRenderer::RenderObject(SceneObject* obj, Platform::Render::Shader* sh
     glDepthFunc(GL_LESS);
     glDisable(GL_CULL_FACE);
     
-    // Render the model
+    // Render the model (which binds textures internally)
     obj->model->RenderModel();
 }
 

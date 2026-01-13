@@ -64,11 +64,11 @@ RemeshResult Remeshing::GenerateMesh(
                 result = GenerateGriddedQuads(pointCloudGrid, gridSize);
             } else {
                 // Fallback to nearest neighbor if no grid available
-                result = GenerateNearestNeighbor(workingPointCloud, adjustedParams.maxDistance);
+                result = GenerateNearestNeighbor(workingPointCloud, adjustedParams);
             }
             break;
         case Algorithm::NearestNeighbor:
-            result = GenerateNearestNeighbor(workingPointCloud, adjustedParams.maxDistance);
+            result = GenerateNearestNeighbor(workingPointCloud, adjustedParams);
             break;
         case Algorithm::Delaunay2D:
             result = GenerateDelaunay2D(workingPointCloud, adjustedParams);
@@ -89,7 +89,7 @@ RemeshResult Remeshing::GenerateMesh(
             result = GenerateDensitySDF(workingPointCloud, adjustedParams);
             break;
         default:
-            result = GenerateNearestNeighbor(workingPointCloud, adjustedParams.maxDistance);
+            result = GenerateNearestNeighbor(workingPointCloud, adjustedParams);
             break;
     }
 
@@ -219,10 +219,15 @@ RemeshResult Remeshing::GenerateGriddedQuads(
 
 RemeshResult Remeshing::GenerateNearestNeighbor(
     const std::vector<PointCloudPoint>& pointCloud,
-    float maxDistance
+    const AlgorithmParameters& params
 ) {
     RemeshResult result;
     std::set<std::tuple<unsigned int, unsigned int, unsigned int>> triangleSet;
+    
+    const float maxDistance = params.maxDistance;
+    const bool surfaceOnly = params.surfaceOnly;
+    const bool cameraConsistent = params.surfaceCameraConsistent;
+    const float normalThreshold = params.surfaceNormalThreshold;
 
     // Create vertices from point cloud
     for (const auto& point : pointCloud) {
@@ -232,8 +237,58 @@ RemeshResult Remeshing::GenerateNearestNeighbor(
         vertex.normal = glm::vec3(0.0f, 0.0f, 1.0f);
         result.vertices.push_back(vertex);
     }
+    
+    // If surface-only filtering is enabled, pre-compute estimated normals for each point
+    // Normal is estimated from local neighborhood using PCA/covariance
+    std::vector<glm::vec3> estimatedNormals(pointCloud.size(), glm::vec3(0.0f, 0.0f, 1.0f));
+    
+    if (surfaceOnly && normalThreshold > 0.0f) {
+        // Estimate normals using local neighborhood
+        for (size_t i = 0; i < pointCloud.size(); i++) {
+            std::vector<std::pair<float, size_t>> neighbors;
+            FindNeighbors(i, pointCloud, maxDistance * 2.0f, neighbors);  // Use larger radius for normal estimation
+            
+            if (neighbors.size() < 3) continue;
+            
+            // Compute centroid of neighborhood
+            glm::vec3 centroid(0.0f);
+            for (const auto& n : neighbors) {
+                centroid += pointCloud[n.second].position;
+            }
+            centroid += pointCloud[i].position;
+            centroid /= static_cast<float>(neighbors.size() + 1);
+            
+            // Build covariance matrix
+            float cov[3][3] = {{0.0f}};
+            auto addPoint = [&](const glm::vec3& p) {
+                glm::vec3 d = p - centroid;
+                for (int r = 0; r < 3; r++) {
+                    for (int c = 0; c < 3; c++) {
+                        cov[r][c] += d[r] * d[c];
+                    }
+                }
+            };
+            
+            addPoint(pointCloud[i].position);
+            for (const auto& n : neighbors) {
+                addPoint(pointCloud[n.second].position);
+            }
+            
+            // Find eigenvector with smallest eigenvalue using power iteration on inverse
+            // Simplified: use cross product of two coplanar vectors as normal approximation
+            if (neighbors.size() >= 2) {
+                glm::vec3 v1 = pointCloud[neighbors[0].second].position - pointCloud[i].position;
+                glm::vec3 v2 = pointCloud[neighbors[1].second].position - pointCloud[i].position;
+                glm::vec3 normal = glm::cross(v1, v2);
+                float len = glm::length(normal);
+                if (len > 0.0001f) {
+                    estimatedNormals[i] = normal / len;
+                }
+            }
+        }
+    }
 
-    // For each point, find neighbors and create triangles more intelligently
+    // For each point, find neighbors and create triangles with surface filtering
     for (size_t i = 0; i < result.vertices.size(); i++) {
         std::vector<std::pair<float, size_t>> neighbors;
         FindNeighbors(i, pointCloud, maxDistance, neighbors);
@@ -251,9 +306,54 @@ RemeshResult Remeshing::GenerateNearestNeighbor(
         for (size_t n = 0; n < maxNeighbors; n++) {
             size_t j = neighbors[n].second;
             
+            // Surface-only filtering: check if edge i-j passes through object
+            if (surfaceOnly) {
+                // Camera consistency check: skip if points are from different cameras
+                if (cameraConsistent && 
+                    pointCloud[i].cameraId >= 0 && 
+                    pointCloud[j].cameraId >= 0 &&
+                    pointCloud[i].cameraId != pointCloud[j].cameraId) {
+                    continue;
+                }
+                
+                // Normal consistency check: skip if normals point in very different directions
+                if (normalThreshold > 0.0f) {
+                    float dotProduct = glm::dot(estimatedNormals[i], estimatedNormals[j]);
+                    if (dotProduct < normalThreshold) {
+                        continue;
+                    }
+                }
+            }
+            
             // Try to form triangles with other close neighbors
             for (size_t k = n + 1; k < maxNeighbors; k++) {
                 size_t k_idx = neighbors[k].second;
+                
+                // Surface-only filtering for edge i-k and j-k
+                if (surfaceOnly) {
+                    // Camera consistency check for all three vertices
+                    if (cameraConsistent) {
+                        int32_t camI = pointCloud[i].cameraId;
+                        int32_t camJ = pointCloud[j].cameraId;
+                        int32_t camK = pointCloud[k_idx].cameraId;
+                        
+                        // All three points should be from the same camera (if camera IDs are valid)
+                        if (camI >= 0 && camJ >= 0 && camK >= 0) {
+                            if (camI != camJ || camI != camK) {
+                                continue;
+                            }
+                        }
+                    }
+                    
+                    // Normal consistency for the third point
+                    if (normalThreshold > 0.0f) {
+                        float dotIK = glm::dot(estimatedNormals[i], estimatedNormals[k_idx]);
+                        float dotJK = glm::dot(estimatedNormals[j], estimatedNormals[k_idx]);
+                        if (dotIK < normalThreshold || dotJK < normalThreshold) {
+                            continue;
+                        }
+                    }
+                }
                 
                 // Check all edge distances
                 float dist_ij = neighbors[n].first;
@@ -298,7 +398,7 @@ RemeshResult Remeshing::GenerateDelaunay2D(
     
     if (points2D.size() < 3) {
         // Not enough points, fall back to nearest neighbor
-        return GenerateNearestNeighbor(pointCloud, params.maxDistance);
+        return GenerateNearestNeighbor(pointCloud, params);
     }
 
     // Create vertices from point cloud

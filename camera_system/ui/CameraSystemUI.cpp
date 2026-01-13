@@ -152,7 +152,7 @@ void CameraSystemUI::RenderStatusBar(CameraSystemEditor& editor) {
         
         // ----- File Menu -----
         nk_layout_row_push(ctx, 45.0f);
-        if (nk_menu_begin_label(ctx, "File", NK_TEXT_LEFT, nk_vec2(180, 200))) {
+        if (nk_menu_begin_label(ctx, "File", NK_TEXT_LEFT, nk_vec2(220, 280))) {
             nk_layout_row_dynamic(ctx, 25, 1);
             
             // Show Objects panel toggle
@@ -165,6 +165,62 @@ void CameraSystemUI::RenderStatusBar(CameraSystemEditor& editor) {
             if (nk_menu_item_label(ctx, "Reset to Config", NK_TEXT_LEFT)) {
                 editor.ResetToConfigDefaults();
             }
+            
+            // Separator
+            nk_layout_row_dynamic(ctx, 5, 1);
+            nk_label(ctx, "---", NK_TEXT_LEFT);
+            
+            // Ouster LiDAR toggle (mutually exclusive with simulated TOF)
+            nk_layout_row_dynamic(ctx, 25, 1);
+            nk_label(ctx, "TOF Data Source:", NK_TEXT_LEFT);
+            
+            nk_layout_row_dynamic(ctx, 25, 1);
+            nk_bool useSimulated = !editor.m_ousterEnabled ? nk_true : nk_false;
+            if (nk_checkbox_label(ctx, "Simulated TOF", &useSimulated)) {
+                if (useSimulated == nk_true && editor.m_ousterEnabled) {
+                    // Switching from Ouster to Simulated
+                    editor.m_ousterEnabled = false;
+                    if (editor.m_ousterStream) {
+                        editor.m_ousterStream->StopStreaming();
+                    }
+                }
+            }
+            
+            nk_layout_row_dynamic(ctx, 25, 1);
+            nk_bool useOuster = editor.m_ousterEnabled ? nk_true : nk_false;
+            nk_bool oldUseOuster = useOuster;
+            nk_checkbox_label(ctx, "Ouster LiDAR", &useOuster);
+            if (useOuster != oldUseOuster) {
+                // Checkbox was toggled
+                if (useOuster == nk_true) {
+                    // Enabling Ouster
+                    std::cout << "Ouster LiDAR ENABLED by user" << std::endl;
+                    editor.m_ousterEnabled = true;
+                    if (editor.m_ousterStream) {
+                        std::cout << "Starting Ouster stream from UI..." << std::endl;
+                        if (!editor.m_ousterStream->IsConnected()) {
+                            editor.m_ousterStream->Connect();
+                        }
+                        editor.m_ousterStream->StartStreaming();
+                    }
+                } else {
+                    // Disabling Ouster
+                    std::cout << "Ouster LiDAR DISABLED by user" << std::endl;
+                    editor.m_ousterEnabled = false;
+                    if (editor.m_ousterStream) {
+                        editor.m_ousterStream->StopStreaming();
+                    }
+                }
+            }
+            
+            // Show Ouster status
+            if (editor.m_ousterStream) {
+                nk_layout_row_dynamic(ctx, 20, 1);
+                std::string status = editor.m_ousterStream->IsStreaming() ? 
+                    "Status: Streaming" : "Status: Stopped";
+                nk_label(ctx, status.c_str(), NK_TEXT_LEFT);
+            }
+            
             nk_menu_end(ctx);
         }
         
@@ -1395,6 +1451,60 @@ void CameraSystemUI::RenderVIPRESControls(CameraSystemEditor& editor) {
                         editor.GenerateRemesh();
                     }
                     editor.SaveSafeParameters();
+                }
+            }
+            
+            // Surface-only filtering options (for NearestNeighbor algorithm)
+            if (activeAlgorithm == 1) {
+                nk_layout_row_dynamic(ctx, UI_ROW_HEIGHT_STANDARD, 1);
+                nk_label(ctx, "Surface Filtering:", NK_TEXT_LEFT);
+                
+                // Surface Only toggle
+                nk_layout_row_dynamic(ctx, UI_ROW_HEIGHT_STANDARD, 1);
+                nk_bool surfaceOnly = editor.m_vipresRemeshSurfaceOnly ? nk_true : nk_false;
+                if (nk_checkbox_label(ctx, "Surface Only", &surfaceOnly)) {
+                    editor.m_vipresRemeshSurfaceOnly = (surfaceOnly == nk_true);
+                    editor.m_remeshNeedsUpdate = true;
+                    if (!editor.m_vipresAutoRecomputeMesh) {
+                        editor.GenerateRemesh();
+                    }
+                    editor.SaveSafeParameters();
+                }
+                
+                // Only show sub-options if surface-only is enabled
+                if (editor.m_vipresRemeshSurfaceOnly) {
+                    // Camera Consistent toggle
+                    nk_layout_row_dynamic(ctx, UI_ROW_HEIGHT_STANDARD, 1);
+                    nk_bool cameraConsistent = editor.m_vipresRemeshSurfaceCameraConsistent ? nk_true : nk_false;
+                    if (nk_checkbox_label(ctx, "Same Camera Only", &cameraConsistent)) {
+                        editor.m_vipresRemeshSurfaceCameraConsistent = (cameraConsistent == nk_true);
+                        editor.m_remeshNeedsUpdate = true;
+                        if (!editor.m_vipresAutoRecomputeMesh) {
+                            editor.GenerateRemesh();
+                        }
+                        editor.SaveSafeParameters();
+                    }
+                    
+                    // Normal Threshold slider
+                    nk_layout_row_template_begin(ctx, UI_ROW_HEIGHT_STANDARD);
+                    nk_layout_row_template_push_static(ctx, 150);
+                    nk_layout_row_template_push_dynamic(ctx);
+                    nk_layout_row_template_end(ctx);
+                    char normalThresholdText[128];
+                    std::snprintf(normalThresholdText, sizeof(normalThresholdText), "Normal Threshold: %.2f", editor.m_vipresRemeshSurfaceNormalThreshold);
+                    nk_label(ctx, normalThresholdText, NK_TEXT_LEFT);
+                    
+                    nk_layout_row_dynamic(ctx, UI_ROW_HEIGHT_STANDARD, 1);
+                    float normalThreshold = editor.m_vipresRemeshSurfaceNormalThreshold;
+                    nk_slider_float(ctx, 0.0f, &normalThreshold, 1.0f, 0.05f);
+                    if (normalThreshold != editor.m_vipresRemeshSurfaceNormalThreshold) {
+                        editor.m_vipresRemeshSurfaceNormalThreshold = normalThreshold;
+                        editor.m_remeshNeedsUpdate = true;
+                        if (!editor.m_vipresAutoRecomputeMesh) {
+                            editor.GenerateRemesh();
+                        }
+                        editor.SaveSafeParameters();
+                    }
                 }
             }
             

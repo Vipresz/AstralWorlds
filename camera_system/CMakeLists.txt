@@ -176,6 +176,8 @@ set(SOURCES
     objects/ObjectManager.h
     objects/ObjectRenderer.cpp
     objects/ObjectRenderer.h
+    ouster/OusterStream.cpp
+    ouster/OusterStream.h
     main.cpp
 )
 

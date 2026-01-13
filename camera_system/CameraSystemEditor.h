@@ -12,6 +12,7 @@
 #include "ui/CameraSystemUI.h"
 #include "objects/ObjectManager.h"
 #include "config/UIConfig.h"
+#include "ouster/OusterStream.h"
 #include <GL/glew.h>
 #include <GLFW/glfw3.h>
 #include <glm/glm.hpp>
@@ -254,6 +255,9 @@ private:
     float m_vipresRemeshDensityVoxelSize;                  // Voxel size for DensitySDF algorithm
     float m_vipresRemeshDensitySmoothRadius;               // Gaussian smooth radius for DensitySDF algorithm
     float m_vipresRemeshDensityIsoValue;                   // Iso-value threshold for DensitySDF surface extraction
+    bool m_vipresRemeshSurfaceOnly;                        // Enable surface-only connections (no through-object edges)
+    bool m_vipresRemeshSurfaceCameraConsistent;            // Only connect points from the same camera
+    float m_vipresRemeshSurfaceNormalThreshold;            // Min normal dot product for connection (0.0-1.0)
     bool m_vipresFreeCameraObjectEnabled;                    // Enable object rendering in free camera view
     bool m_vipresNoisyTofEnabled;                           // Enable noisy TOF data capture
     float m_vipresNoiseAmount;                              // Noise amount for TOF measurements (+- range)
@@ -305,6 +309,12 @@ private:
     
     // TOF Processing - handles TSDF, low-pass filtering, and gridding
     TOFProcessing m_tofProcessing;
+    
+    // Ouster LiDAR stream
+    std::unique_ptr<OusterStream> m_ousterStream;
+    bool m_ousterEnabled;                    // Use Ouster LiDAR instead of simulated TOF
+    std::string m_ousterHostname;            // Ouster sensor IP address
+    double m_lastOusterTimestamp;            // Timestamp of last received Ouster frame
     
     // Object Manager - handles object loading and coloring
     ObjectManager m_objectManager;

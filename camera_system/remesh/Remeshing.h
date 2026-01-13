@@ -95,6 +95,12 @@ struct AlgorithmParameters {
     int densityBoxFeatures;     // Number of random box features for local pattern analysis
     float densitySignRadius;    // Radius for normal estimation (sign determination)
     
+    // Surface-only filtering parameters (for NearestNeighbor and similar algorithms)
+    bool surfaceOnly;               // Enable surface-only connections (no through-object edges)
+    bool surfaceCameraConsistent;   // Only connect points from the same camera
+    float surfaceNormalThreshold;   // Min normal dot product for connection (0.0 = any, 1.0 = identical)
+    float surfaceDepthThreshold;    // Max depth difference ratio before rejecting connection
+    
     AlgorithmParameters()
         : maxDistance(1.0f)
         , maxNeighbors(20)
@@ -114,6 +120,10 @@ struct AlgorithmParameters {
         , densityIsoValue(0.5f)
         , densityBoxFeatures(32)
         , densitySignRadius(4.0f)
+        , surfaceOnly(false)
+        , surfaceCameraConsistent(true)
+        , surfaceNormalThreshold(0.0f)
+        , surfaceDepthThreshold(2.0f)
     {}
 };
 
@@ -151,7 +161,7 @@ private:
     
     RemeshResult GenerateNearestNeighbor(
         const std::vector<PointCloudPoint>& pointCloud,
-        float maxDistance
+        const AlgorithmParameters& params
     );
     
     RemeshResult GenerateDelaunay2D(

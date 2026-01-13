@@ -90,6 +90,9 @@ CameraSystemEditor::CameraSystemEditor()
     , m_vipresRemeshDensityVoxelSize(REMESH_DENSITY_VOXEL_SIZE_DEFAULT)
     , m_vipresRemeshDensitySmoothRadius(REMESH_DENSITY_SMOOTH_RADIUS_DEFAULT)
     , m_vipresRemeshDensityIsoValue(REMESH_DENSITY_ISO_VALUE_DEFAULT)
+    , m_vipresRemeshSurfaceOnly(true)
+    , m_vipresRemeshSurfaceCameraConsistent(true)
+    , m_vipresRemeshSurfaceNormalThreshold(0.0f)
     , m_vipresFreeCameraObjectEnabled(VIPRES_FREE_CAMERA_OBJECT_ENABLED)
     , m_vipresNoisyTofEnabled(VIPRES_NOISY_TOF_ENABLED)
     , m_vipresNoiseAmount(VIPRES_NOISE_AMOUNT)
@@ -102,6 +105,10 @@ CameraSystemEditor::CameraSystemEditor()
     , m_tofTsdfStoreColor(TOF_TSDF_STORE_COLOR)
     , m_tofTsdfTruncationDistance(TOF_TSDF_TRUNCATION_DISTANCE)
     , m_tofTsdfWeightDecay(TOF_TSDF_WEIGHT_DECAY)
+    // === Ouster LiDAR (disabled by default) ===
+    , m_ousterEnabled(false)
+    , m_ousterHostname("172.17.1.56")
+    , m_lastOusterTimestamp(0.0)
     // === Smart Occupancy - Toggles and Sliders (from UIDefaults.h) ===
     , m_smartOccupancyEnabled(SMART_OCCUPANCY_ENABLED)
     , m_smartOccupancyNeighborConsistency(SMART_OCCUPANCY_NEIGHBOR_CONSISTENCY)
@@ -319,6 +326,18 @@ bool CameraSystemEditor::Initialize(int windowWidth, int windowHeight) {
             editor->m_projection = glm::perspective(glm::radians(45.0f), aspect, 0.1f, 100000.0f);
         });
     }
+    
+    // Initialize Ouster LiDAR stream (disabled by default)
+    m_ousterStream = CreateOusterStream(m_ousterHostname);
+    OusterConfig ousterConfig;
+    ousterConfig.hostname = m_ousterHostname;
+    ousterConfig.minRange = 0.3f;
+    ousterConfig.maxRange = 50.0f;
+    ousterConfig.downsampleFactor = 1;
+    ousterConfig.cameraId = 99;  // Use camera ID 99 for Ouster data
+    ousterConfig.useIntensityAsColor = true;
+    m_ousterStream->SetConfig(ousterConfig);
+    LOG_INFO("CameraSystem", "Ouster LiDAR stream initialized (disabled by default)");
     
     LOG_INFO("CameraSystem", "Camera system editor initialized successfully");
     return true;
@@ -595,6 +614,12 @@ bool CameraSystemEditor::LoadConfig(const std::string& configFile) {
         m_totalFrames,
         m_numCameras
     );
+    
+    // Apply rainbow colors to loaded objects (sets vertex colors for Color by Object mode)
+    if (!m_objects.empty()) {
+        ApplyRainbowColorsToObjects();
+        LOG_INFO_FMT("CameraSystem", "Applied rainbow colors to %zu objects", m_objects.size());
+    }
     
     m_configLoaded = true;
     m_globalAnimationPlaying = false;
@@ -1471,7 +1496,7 @@ void CameraSystemEditor::UpdatePointCloud() {
     // TOF PIPELINE START
     // ========================================================================
     // The TOF pipeline is responsible for:
-    //   1. Rendering depth from each anchor camera
+    //   1. Rendering depth from each anchor camera (or receiving from Ouster LiDAR)
     //   2. Extracting 3D point positions from depth buffer
     //   3. Extracting color from rendered image (if Compute Color is enabled)
     //   4. Applying noise (if enabled)
@@ -1493,6 +1518,70 @@ void CameraSystemEditor::UpdatePointCloud() {
     // Clear point cloud write buffer (we'll process into it)
     m_pointCloud[m_pointCloudWriteBuffer].clear();
     
+    // ========================================================================
+    // OUSTER LIDAR MODE - Use real sensor data instead of simulated TOF
+    // ========================================================================
+    if (m_ousterEnabled) {
+        if (!m_ousterStream) {
+            LOG_WARNING("CameraSystem", "Ouster enabled but stream not initialized");
+            return;
+        }
+        
+        // Make sure streaming is started
+        if (!m_ousterStream->IsStreaming()) {
+            LOG_INFO("CameraSystem", "Starting Ouster stream...");
+            if (!m_ousterStream->IsConnected()) {
+                m_ousterStream->Connect();
+            }
+            m_ousterStream->StartStreaming();
+        }
+        
+        std::vector<PointCloudPoint> ousterPoints;
+        double timestamp;
+        
+        // Poll for new Ouster data
+        if (m_ousterStream->PollPointCloud(ousterPoints, timestamp)) {
+            m_lastOusterTimestamp = timestamp;
+            
+            LOG_INFO_FMT("CameraSystem", "Received %zu points from Ouster (timestamp: %.3f)", 
+                        ousterPoints.size(), timestamp);
+            
+            // Copy Ouster points to filtered TOF buffer (bypasses simulated depth capture)
+            m_filteredTofData[m_filteredTofWriteBuffer] = std::move(ousterPoints);
+            
+            // Apply gridding if enabled
+            if (m_vipresGridMode != TOFGridMode::Disabled) {
+                m_tofProcessing.ApplyGridding(m_filteredTofData[m_filteredTofWriteBuffer], 
+                                              m_pointCloudGrid, 
+                                              m_vipresGridMode, 
+                                              m_vipresGridSize);
+                
+                // Extract gridded points to write buffer
+                for (const auto& pair : m_pointCloudGrid) {
+                    m_pointCloud[m_pointCloudWriteBuffer].push_back(pair.second);
+                }
+            } else {
+                // No gridding - use raw Ouster points
+                m_pointCloud[m_pointCloudWriteBuffer] = m_filteredTofData[m_filteredTofWriteBuffer];
+            }
+            
+            // Swap buffers
+            m_filteredTofReadBuffer = m_filteredTofWriteBuffer;
+            m_filteredTofWriteBuffer = 1 - m_filteredTofWriteBuffer;
+            m_pointCloudReadBuffer = m_pointCloudWriteBuffer;
+            m_pointCloudWriteBuffer = 1 - m_pointCloudWriteBuffer;
+        } else {
+            // No new data this frame - keep previous data (don't clear)
+            LOG_DEBUG("CameraSystem", "No new Ouster data this frame");
+        }
+        
+        // Always return when Ouster is enabled - never fall through to simulated TOF
+        return;
+    }
+    
+    // ========================================================================
+    // SIMULATED TOF MODE - Render depth from virtual cameras
+    // ========================================================================
     if (!m_tofDataEnabled || m_cameras.empty()) {
         return;
     }
@@ -1578,10 +1667,27 @@ void CameraSystemEditor::UpdatePointCloud() {
                         if (uniformModel != -1) glUniformMatrix4fv(uniformModel, 1, GL_FALSE, glm::value_ptr(modelMatrix));
                         if (uniformUseBones != -1) glUniform1i(uniformUseBones, 0);
                         
-                        // Render the model - set useTexture based on whether the model has textures
+                        // Set texture sampler to use texture unit 1 (where Texture::UseTexture binds)
+                        GLint uniformTexture = glGetUniformLocation(shaderID, "theTexture");
+                        if (uniformTexture != -1) glUniform1i(uniformTexture, 1);
+                        
+                        // Render the model
+                        // For "Color by Object" mode, always use vertex colors (rainbow)
+                        // to capture the height-based gradient colors we applied
+                        // For other modes, use textures if available
                         if (m_objects[i]->model) {
-                            bool hasTextures = m_objects[i]->model->HasTextures();
-                            if (uniformUseTexture != -1) glUniform1i(uniformUseTexture, hasTextures ? 1 : 0);
+                            bool useTextureForCapture = false;
+                            
+                            // Only use textures if:
+                            // 1. The model actually has textures, AND
+                            // 2. We're NOT in "Color by Object" mode (which uses rainbow vertex colors)
+                            if (m_objects[i]->model->HasTextures() && 
+                                m_tofRenderColorMode != TOFRenderColorMode::ColorByObject) {
+                                useTextureForCapture = true;
+                            }
+                            
+                            if (uniformUseTexture != -1) glUniform1i(uniformUseTexture, useTextureForCapture ? 1 : 0);
+                            
                             m_objects[i]->model->RenderModel();
                         }
                     } else {
@@ -2226,6 +2332,9 @@ void CameraSystemEditor::GenerateRemesh() {
     params.densityVoxelSize = m_vipresRemeshDensityVoxelSize;
     params.densitySmoothRadius = m_vipresRemeshDensitySmoothRadius;
     params.densityIsoValue = m_vipresRemeshDensityIsoValue;
+    params.surfaceOnly = m_vipresRemeshSurfaceOnly;
+    params.surfaceCameraConsistent = m_vipresRemeshSurfaceCameraConsistent;
+    params.surfaceNormalThreshold = m_vipresRemeshSurfaceNormalThreshold;
     params.useWeights = m_smartOccupancyEnabled && (m_vipresGridMode != TOFGridMode::Disabled);  // Use weights if smart occupancy is enabled
     
     // Convert CameraSystemEditor types to Remeshing types
@@ -2301,17 +2410,19 @@ void CameraSystemEditor::GenerateRemesh() {
     glBufferData(GL_ARRAY_BUFFER, m_remeshVertices.size() * sizeof(MeshVertex), 
                 m_remeshVertices.data(), GL_DYNAMIC_DRAW);
     
-    // Position attribute
+    // Position attribute (location 0)
     glEnableVertexAttribArray(0);
     glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(MeshVertex), 
                          reinterpret_cast<void*>(offsetof(MeshVertex, position)));
     
-    glEnableVertexAttribArray(1);
-    glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, sizeof(MeshVertex), 
-                         reinterpret_cast<void*>(offsetof(MeshVertex, normal)));
-    
+    // Normal attribute (location 2 - matches shader.vert)
     glEnableVertexAttribArray(2);
     glVertexAttribPointer(2, 3, GL_FLOAT, GL_FALSE, sizeof(MeshVertex), 
+                         reinterpret_cast<void*>(offsetof(MeshVertex, normal)));
+    
+    // Vertex color attribute (location 5 - matches shader.vert's vertexColor)
+    glEnableVertexAttribArray(5);
+    glVertexAttribPointer(5, 3, GL_FLOAT, GL_FALSE, sizeof(MeshVertex), 
                          reinterpret_cast<void*>(offsetof(MeshVertex, color)));
     
     glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, m_remeshEBO);
@@ -2347,6 +2458,10 @@ void CameraSystemEditor::RenderRemesh() {
     if (projLoc != -1) glUniformMatrix4fv(projLoc, 1, GL_FALSE, glm::value_ptr(m_projection));
     if (viewLoc != -1) glUniformMatrix4fv(viewLoc, 1, GL_FALSE, glm::value_ptr(m_view));
     if (modelLoc != -1) glUniformMatrix4fv(modelLoc, 1, GL_FALSE, glm::value_ptr(model));
+    
+    // Tell shader to use vertex colors instead of textures
+    GLint useTexLoc = glGetUniformLocation(shaderID, "useTexture");
+    if (useTexLoc != -1) glUniform1i(useTexLoc, 0);
     
     glEnable(GL_DEPTH_TEST);
     glBindVertexArray(m_remeshVAO);

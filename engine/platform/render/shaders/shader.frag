@@ -222,6 +222,8 @@ vec4 CalcSpotLights()
 	return totalColour;
 }
 
+uniform bool useTexture;
+
 void main()
 {
 	// Simple default lighting - always visible
@@ -236,11 +238,20 @@ void main()
 	float diff = max(dot(norm, lightDir), 0.0);
 	float light = 0.4 + 0.6 * diff;  // Ambient 0.4 + diffuse 0.6
 	
-	// Use vertex color if it has color, otherwise gray
+	// Determine surface color from texture, vertex color, or default
 	vec3 surfaceColor;
-	if (length(vCol.rgb) > 0.01) {
+	if (useTexture) {
+		// Sample texture (bound to texture unit 1)
+		vec4 texColor = texture(theTexture, TexCoord);
+		if (texColor.a < 0.1) {
+			discard;
+		}
+		surfaceColor = texColor.rgb;
+	} else if (length(vCol.rgb) > 0.01) {
+		// Use vertex color if available
 		surfaceColor = vCol.rgb;
 	} else {
+		// Default to grey
 		surfaceColor = vec3(0.7, 0.7, 0.7);
 	}
 	
