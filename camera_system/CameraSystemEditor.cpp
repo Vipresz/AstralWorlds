@@ -7,6 +7,10 @@
 #include "../../engine/platform/render/Model.h"
 #include "../../engine/platform/Logger.h"
 #include "objects/ObjectRenderer.h"
+#include <atomic>
+
+// External reference to global exit flag (defined in main.cpp)
+extern std::atomic<bool> g_shouldExit;
 #include <algorithm>
 #include <chrono>
 #include <cmath>
@@ -756,6 +760,24 @@ bool CameraSystemEditor::LoadOusterPacket(const std::string& packetFile) {
     // This ensures the data is displayed right away without needing to toggle
     UpdatePointCloud();
     
+    return true;
+}
+
+bool CameraSystemEditor::LoadOusterMetadata(const std::string& metadataFile) {
+    LOG_INFO_FMT("CameraSystem", "Loading Ouster metadata from file: %s", metadataFile.c_str());
+    
+    if (!m_ousterStream) {
+        LOG_ERROR("CameraSystem", "Ouster stream not initialized");
+        return false;
+    }
+    
+    // Load the metadata file
+    if (!m_ousterStream->LoadMetadataFromFile(metadataFile)) {
+        LOG_ERROR_FMT("CameraSystem", "Failed to load metadata from file: %s", metadataFile.c_str());
+        return false;
+    }
+    
+    LOG_INFO("CameraSystem", "Metadata loaded successfully - will be used for parsing live stream data");
     return true;
 }
 
@@ -3367,6 +3389,13 @@ void CameraSystemEditor::SleepForFrameTiming(float maxFrameTime, const std::chro
     }
 }
 
+void CameraSystemEditor::RequestExit() {
+    if (m_window) {
+        m_window->setShouldClose(true);
+        LOG_INFO("CameraSystem", "Exit requested - window will close");
+    }
+}
+
 void CameraSystemEditor::Run() {
     if (!m_window) {
         LOG_ERROR("CameraSystem", "Window is null, cannot run editor");
@@ -3391,6 +3420,14 @@ void CameraSystemEditor::Run() {
         AdvanceFrame(deltaTime, maxFrameTime);
         
         accumulator += deltaTime;
+        
+        // Check for external exit request (from signal handler)
+        if (g_shouldExit.load()) {
+            LOG_INFO("CameraSystem", "Exit requested by signal handler - closing window");
+            if (m_window) {
+                m_window->setShouldClose(true);
+            }
+        }
         
         // Process window events
         try {

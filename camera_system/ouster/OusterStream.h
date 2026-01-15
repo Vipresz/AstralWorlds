@@ -31,6 +31,27 @@ namespace Engine {
 namespace Editors {
 namespace CameraSystem {
 
+// Forward declare OusterStream class
+class OusterStream;
+
+// Forward declare namespace functions for friend declarations
+namespace OusterFileLoader {
+    bool LoadMetadataFromFile(OusterStream* stream, const std::string& metadataFile);
+    bool LoadPcapFromFile(OusterStream* stream, const std::string& pcapFile, const std::string& metadataFile);
+    bool LoadPacketFromFile(OusterStream* stream, const std::string& filename);
+    bool ParseMetadataFileImpl(OusterStream* stream, const std::string& metadataFile);
+    void ProcessLidarPacketFromFileImpl(OusterStream* stream, const uint8_t* data, size_t size);
+}
+
+namespace OusterLiveStreaming {
+    bool Connect(OusterStream* stream);
+    void Disconnect(OusterStream* stream);
+    void StartStreaming(OusterStream* stream);
+    void StopStreaming(OusterStream* stream);
+    void StreamingThreadImpl(OusterStream* stream);
+    void ProcessLidarPacketImpl(OusterStream* stream, const uint8_t* data, size_t size);
+}
+
 // Ouster sensor configuration
 struct OusterConfig {
     std::string hostname = "172.17.1.56";  // Your sensor's IP
@@ -82,6 +103,10 @@ public:
     
     // Load and parse a PCAP file with metadata JSON
     bool LoadPcapFromFile(const std::string& pcapFile, const std::string& metadataFile);
+    
+    // Load metadata from JSON file (for use with live streaming)
+    // This allows faster initialization and offline operation
+    bool LoadMetadataFromFile(const std::string& metadataFile);
     
     // Clear file-loaded state (used when switching from file mode to live mode)
     void ClearFileLoadedState();
@@ -188,6 +213,23 @@ private:
     friend bool LoadPcapFromFileManual(OusterStream* stream, const std::string& pcapFile, const std::string& metadataFile);
     friend void ProcessLidarPacketFromFileManual(OusterStream* stream, const uint8_t* data, size_t size);
     friend void ProcessLidarPacketManual(OusterStream* stream, const uint8_t* data, size_t size);
+    
+    // Make file loader functions friends so they can access private members
+    // Forward declarations are outside the class (before class definition)
+    friend bool OusterFileLoader::LoadMetadataFromFile(OusterStream* stream, const std::string& metadataFile);
+    friend bool OusterFileLoader::LoadPcapFromFile(OusterStream* stream, const std::string& pcapFile, const std::string& metadataFile);
+    friend bool OusterFileLoader::LoadPacketFromFile(OusterStream* stream, const std::string& filename);
+    friend bool OusterFileLoader::ParseMetadataFileImpl(OusterStream* stream, const std::string& metadataFile);
+    friend void OusterFileLoader::ProcessLidarPacketFromFileImpl(OusterStream* stream, const uint8_t* data, size_t size);
+    
+    // Make live streaming functions friends so they can access private members
+    // Forward declarations are outside the class (before class definition)
+    friend bool OusterLiveStreaming::Connect(OusterStream* stream);
+    friend void OusterLiveStreaming::Disconnect(OusterStream* stream);
+    friend void OusterLiveStreaming::StartStreaming(OusterStream* stream);
+    friend void OusterLiveStreaming::StopStreaming(OusterStream* stream);
+    friend void OusterLiveStreaming::StreamingThreadImpl(OusterStream* stream);
+    friend void OusterLiveStreaming::ProcessLidarPacketImpl(OusterStream* stream, const uint8_t* data, size_t size);
     
 #ifdef OUSTER_SDK_AVAILABLE
     // SDK objects for live streaming

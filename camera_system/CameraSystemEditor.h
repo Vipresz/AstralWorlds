@@ -97,6 +97,9 @@ public:
     // Main editor loop
     void Run();
     
+    // Request exit (for signal handlers)
+    void RequestExit();
+    
     // Load configuration from JSON file
     bool LoadConfig(const std::string& configFile);
     
@@ -112,6 +115,9 @@ public:
     
     // Load a PCAP file with metadata JSON (enables Ouster mode and loads PCAP)
     bool LoadOusterPcap(const std::string& pcapFile, const std::string& metadataFile);
+    
+    // Load metadata file for use with live streaming (faster initialization, offline support)
+    bool LoadOusterMetadata(const std::string& metadataFile);
     
     // Set PCAP file paths (called from main.cpp when command-line args are provided)
     void SetOusterPcapFiles(const std::string& pcapFile, const std::string& metadataFile);

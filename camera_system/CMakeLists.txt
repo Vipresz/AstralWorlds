@@ -369,20 +369,17 @@ set(SOURCES
     ouster/OusterStream.cpp
     ouster/OusterStream.h
     ouster/OusterStreamManual.cpp
-    gear360/Gear360Stream.cpp
-    gear360/Gear360Stream.h
+    ouster/OusterStreamUtilities.cpp
+    ouster/OusterStreamUtilities.h
+    ouster/OusterStreamFileLoader.cpp
+    ouster/OusterStreamFileLoader.h
+    ouster/OusterStreamLiveStreaming.cpp
+    ouster/OusterStreamLiveStreaming.h
     main.cpp
 )
 
 # Create executable
 add_executable(camera_system_editor ${SOURCES})
-
-# Set Objective-C++ compilation for Gear360Stream on macOS
-if(APPLE)
-    set_source_files_properties(gear360/Gear360Stream.cpp PROPERTIES
-        LANGUAGE OBJCXX
-    )
-endif()
 
 # Set output directory
 set_target_properties(camera_system_editor PROPERTIES
@@ -543,6 +540,8 @@ else()
     message(WARNING "Ouster SDK libraries not available - PCAP loading will use manual parsing")
 endif()
 
+# Note: FFmpeg support removed - Gear360 functionality moved to standalone gear360/CMakeLists.txt
+
 # macOS-specific frameworks and libraries
 if(APPLE)
     find_package(OpenGL REQUIRED)
@@ -584,82 +583,5 @@ set_target_properties(camera_system_editor PROPERTIES
 )
 
 message(STATUS "Camera System Editor configured")
-
-# ============================================================================
-# Gear 360 Test Application
-# ============================================================================
-
-set(GEAR360_TEST_SOURCES
-    gear360/Gear360Stream.cpp
-    gear360/Gear360Stream.h
-    gear360/gear360_test.cpp
-)
-
-add_executable(gear360_test ${GEAR360_TEST_SOURCES})
-
-# Set output directory
-set_target_properties(gear360_test PROPERTIES
-    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin
-)
-
-# Link libraries (same as camera_system_editor)
-if(GLEW_LIB)
-    target_link_libraries(gear360_test ${GLEW_LIB})
-endif()
-
-if(GLFW_LIB)
-    target_link_libraries(gear360_test ${GLFW_LIB})
-endif()
-
-# Link platform library if it exists
-if(TARGET Platform)
-    target_link_libraries(gear360_test Platform)
-endif()
-
-# macOS-specific frameworks and libraries
-if(APPLE)
-    find_package(OpenGL REQUIRED)
-    target_link_libraries(gear360_test OpenGL::GL)
-    
-    find_library(COCOA_FRAMEWORK Cocoa)
-    find_library(IOKIT_FRAMEWORK IOKit)
-    find_library(COREVIDEO_FRAMEWORK CoreVideo)
-    find_library(COREBLUETOOTH_FRAMEWORK CoreBluetooth)
-    find_library(FOUNDATION_FRAMEWORK Foundation)
-    if(COCOA_FRAMEWORK AND IOKIT_FRAMEWORK AND COREVIDEO_FRAMEWORK)
-        target_link_libraries(gear360_test 
-            ${COCOA_FRAMEWORK} 
-            ${IOKIT_FRAMEWORK} 
-            ${COREVIDEO_FRAMEWORK}
-        )
-    endif()
-    if(COREBLUETOOTH_FRAMEWORK AND FOUNDATION_FRAMEWORK)
-        target_link_libraries(gear360_test 
-            ${COREBLUETOOTH_FRAMEWORK}
-            ${FOUNDATION_FRAMEWORK}
-        )
-    endif()
-    
-    # Set Objective-C++ compilation for Gear360Stream
-    set_source_files_properties(gear360/Gear360Stream.cpp PROPERTIES
-        LANGUAGE OBJCXX
-    )
-endif()
-
-# Compiler options
-if(MSVC)
-    target_compile_options(gear360_test PRIVATE /W4 /permissive- /Zc:__cplusplus /EHsc)
-    target_compile_definitions(gear360_test PRIVATE _CRT_SECURE_NO_WARNINGS)
-else()
-    target_compile_options(gear360_test PRIVATE -Wall -Wextra -Wpedantic -Wno-unused-parameter)
-endif()
-
-# C++ standard
-set_target_properties(gear360_test PROPERTIES
-    CXX_STANDARD 17
-    CXX_STANDARD_REQUIRED ON
-    CXX_EXTENSIONS OFF
-)
-
-message(STATUS "Gear 360 Test application configured")
+message(STATUS "Note: Gear360 applications moved to standalone build in gear360/CMakeLists.txt")
 

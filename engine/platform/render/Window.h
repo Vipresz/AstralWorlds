@@ -17,6 +17,7 @@ public:
     GLint getBufferHeight() { return bufferHeight; }
     
     bool getShouldClose() { return glfwWindowShouldClose(mainWindow); }
+    void setShouldClose(bool shouldClose) { glfwSetWindowShouldClose(mainWindow, shouldClose ? GL_TRUE : GL_FALSE); }
     
     bool* getsKeys() { return keys; }
     GLfloat getXChange();

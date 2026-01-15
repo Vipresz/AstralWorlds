@@ -225,6 +225,16 @@ void CameraSystemUI::RenderStatusBar(CameraSystemEditor& editor) {
                         // This ensures that if initialization fails, we won't display old file data
                         editor.m_ousterStream->ClearFileLoadedState();
                         
+                        // Load metadata file if available (for faster initialization and offline support)
+                        if (!editor.m_ousterMetadataFile.empty()) {
+                            LOG_INFO_FMT("CameraSystemUI", "Loading metadata from file for live streaming: %s", editor.m_ousterMetadataFile.c_str());
+                            if (editor.m_ousterStream->LoadMetadataFromFile(editor.m_ousterMetadataFile)) {
+                                LOG_INFO("CameraSystemUI", "Metadata loaded - will be used for parsing live stream data");
+                            } else {
+                                LOG_WARNING("CameraSystemUI", "Failed to load metadata file - will fetch from sensor (may be slower)");
+                            }
+                        }
+                        
                         // Note: With SDK (firmware 2.5.3+), we don't need to call Connect() first
                         // The SDK handles connection and configuration internally
                         // However, we still call it for manual UDP fallback compatibility

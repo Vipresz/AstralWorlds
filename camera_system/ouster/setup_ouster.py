@@ -1,3 +1,4 @@
+
 #!/usr/bin/env python3
 """
 Ouster LiDAR PCAP Capture and Visualization
@@ -15,19 +16,88 @@ import argparse
 from typing import Optional
 
 _script_dir = os.path.dirname(os.path.abspath(__file__))
-_sdk_python_path = os.path.join(_script_dir, "ouster-sdk", "python", "src")
-if os.path.exists(_sdk_python_path) and _sdk_python_path not in sys.path:
-    sys.path.insert(0, _sdk_python_path)
+
+# Try multiple SDK paths (check built versions first, then source)
+_sdk_paths = [
+    # Built/installed versions (preferred)
+    os.path.join(_script_dir, "ouster-sdk", "build", "py3.14.2", "ouster-sdk"),
+    os.path.join(_script_dir, "ouster-sdk", "build", "py3.13.2", "ouster-sdk"),
+    os.path.join(_script_dir, "ouster-sdk", "build", "py3.12.2", "ouster-sdk"),
+    os.path.join(_script_dir, "ouster-sdk", "build", "py3.11.2", "ouster-sdk"),
+    # Source versions
+    os.path.join(_script_dir, "ouster-sdk", "python", "src"),
+    os.path.join(_script_dir, "ouster-sdk", "python"),
+    os.path.join(_script_dir, "ouster-sdk"),
+    # Absolute paths (fallback)
+    "/Users/rgrigorii/Desktop/projects/thegame/camera_system/ouster/ouster-sdk/build/py3.14.2/ouster-sdk",
+    "/Users/rgrigorii/Desktop/projects/thegame/camera_system/ouster/ouster-sdk/python/src",
+    "/Users/rgrigorii/Desktop/projects/thegame/camera_system/ouster/ouster-sdk/python",
+    "/Users/rgrigorii/Desktop/projects/thegame/camera_system/ouster/ouster-sdk",
+]
+
+_sdk_python_path = None
+for path in _sdk_paths:
+    if os.path.exists(path):
+        # Check if it's a valid Python package path
+        # For built versions, the structure is: build/py3.x.x/ouster-sdk/ouster/sdk/...
+        # For source versions, the structure is: python/src/ouster/sdk/...
+        ouster_sdk_path = os.path.join(path, "ouster", "sdk")
+        ouster_path = os.path.join(path, "ouster")
+        if os.path.exists(ouster_sdk_path) or os.path.exists(ouster_path):
+            if path not in sys.path:
+                sys.path.insert(0, path)
+            _sdk_python_path = path
+            print(f"✓ Found Ouster SDK at: {path}")
+            break
 
 HAS_OUSTER_SDK = False
 SDK_IMPORT_ERROR = None
-try:
-    from ouster.sdk import pcap, core, sensor
-    from ouster.sdk.core import LidarScan, ChanField, SensorInfo, Scans
-    HAS_OUSTER_SDK = True
-except ImportError as e:
-    HAS_OUSTER_SDK = False
-    SDK_IMPORT_ERROR = str(e)
+if _sdk_python_path:
+    try:
+        # Check for required dependencies first - must have numpy before importing SDK
+        try:
+            import numpy
+            print(f"✓ numpy is available")
+        except ImportError:
+            print(f"⚠ numpy is required for Ouster SDK but not installed")
+            print(f"  Install with: pip3 install numpy")
+            HAS_OUSTER_SDK = False
+            SDK_IMPORT_ERROR = "numpy not installed"
+        else:
+            # Only try to import SDK if numpy is available
+            try:
+                from ouster.sdk import pcap, core, sensor
+                from ouster.sdk.core import LidarScan, ChanField, SensorInfo, Scans
+                HAS_OUSTER_SDK = True
+                print(f"✓ Successfully imported Ouster SDK from: {_sdk_python_path}")
+            except ImportError as e:
+                HAS_OUSTER_SDK = False
+                SDK_IMPORT_ERROR = str(e)
+                error_msg = str(e)
+                print(f"⚠ Failed to import Ouster SDK: {error_msg}")
+                print(f"  SDK path: {_sdk_python_path}")
+                
+                # Provide helpful error messages based on error type
+                if "_bindings" in error_msg.lower() or "initialization failed" in error_msg.lower():
+                    print(f"  C++ bindings not built or incompatible")
+                    print(f"  The SDK Python package requires compiled C++ extensions")
+                    print(f"  Try building the SDK: cd ouster-sdk && mkdir -p build && cd build && cmake .. && make")
+                elif "No module named" in error_msg:
+                    print(f"  Missing Python module - check SDK installation")
+                
+                # Only print full traceback if it's not a known dependency issue
+                if "_bindings" not in error_msg.lower() and "initialization failed" not in error_msg.lower():
+                    import traceback
+                    traceback.print_exc()
+    except Exception as e:
+        HAS_OUSTER_SDK = False
+        SDK_IMPORT_ERROR = str(e)
+        print(f"⚠ Unexpected error checking Ouster SDK: {e}")
+else:
+    print(f"⚠ Ouster SDK not found in any of these locations:")
+    for path in _sdk_paths[:6]:  # Show first 6 paths
+        exists = "✓" if os.path.exists(path) else "✗"
+        print(f"  {exists} {path}")
 
 OUSTER_CLI_AVAILABLE = False
 try:
@@ -72,8 +142,13 @@ def capture_pcap(hostname: str, lidar_port: int, timeout: float = 15.0) -> Optio
         
         try:
             print(f"  Recording to {pcap_file}...")
-            capture_time = 5.0
+            capture_time = 10.0  # Increased timeout for recording
+            # Try different command syntaxes - ouster-cli uses "save" command, not "record"
             cmd_variations = [
+                ["ouster-cli", "source", hostname, "save", pcap_file],
+                ["ouster-cli", "source", hostname, "save", "-o", pcap_file],
+                ["ouster-cli", "source", hostname, "save", "--output", pcap_file],
+                # Also try record command (older syntax or different versions)
                 ["ouster-cli", "source", hostname, "record", "-o", pcap_file],
                 ["ouster-cli", "source", hostname, "record", "--output", pcap_file],
                 ["ouster-cli", "source", hostname, "record", pcap_file],
@@ -90,27 +165,64 @@ def capture_pcap(hostname: str, lidar_port: int, timeout: float = 15.0) -> Optio
                     text=True
                 )
                 
+                # Check if PCAP file was created (ouster-cli may create it with a different name)
+                # Check both the specified name and auto-generated names
+                possible_files = [
+                    pcap_file,
+                    os.path.join(os.path.dirname(pcap_file), f"OS-*.pcap"),  # Auto-generated name pattern
+                ]
+                
+                # Also check current directory for auto-generated files
+                script_dir = os.path.dirname(os.path.abspath(__file__))
+                for file_pattern in [pcap_file, os.path.join(script_dir, "*.pcap")]:
+                    import glob
+                    matching_files = glob.glob(file_pattern)
+                    for f in matching_files:
+                        if os.path.exists(f) and os.path.getsize(f) > 0:
+                            # If it's not the expected name, rename it
+                            if f != pcap_file:
+                                if os.path.exists(pcap_file):
+                                    os.remove(pcap_file)
+                                os.rename(f, pcap_file)
+                            print(f"  ✓ PCAP file created: {pcap_file}")
+                            break
+                    if os.path.exists(pcap_file) and os.path.getsize(pcap_file) > 0:
+                        break
+                
                 if os.path.exists(pcap_file) and os.path.getsize(pcap_file) > 0:
                     print(f"  ✓ PCAP file created")
                     break
                 
+                # Print error for debugging (only on last attempt)
+                if result.returncode != 0 and i == len(cmd_variations) - 1:
+                    print(f"    All command variations failed")
+                    print(f"    Last attempt: {' '.join(cmd)} (exit {result.returncode})")
+                    if result.stderr:
+                        print(f"    stderr: {result.stderr[:300]}")
+                    if result.stdout:
+                        print(f"    stdout: {result.stdout[:300]}")
+                
                 if "unexpected" in result.stderr.lower() or "unexpected" in result.stdout.lower():
                     continue
                 
-                if result.returncode == 0 and i == len(cmd_variations) - 1:
-                    with open(pcap_file, 'wb') as f:
-                        redirect_cmd = ["ouster-cli", "source", hostname, "record"]
-                        redirect_result = subprocess.run(
-                            redirect_cmd,
-                            timeout=capture_time,
-                            stdout=f,
-                            stderr=subprocess.PIPE,
-                            text=False
-                        )
-                        if os.path.exists(pcap_file) and os.path.getsize(pcap_file) > 0:
-                            result = redirect_result
-                            break
-                    break
+                # If command succeeded but no file created, ouster-cli might output to stdout
+                if result.returncode == 0 and not os.path.exists(pcap_file):
+                    # Try redirecting stdout to file (for commands that output PCAP to stdout)
+                    try:
+                        with open(pcap_file, 'wb') as f:
+                            redirect_cmd = ["ouster-cli", "source", hostname, "save", "-"]  # Output to stdout
+                            redirect_result = subprocess.run(
+                                redirect_cmd,
+                                timeout=capture_time,
+                                stdout=f,
+                                stderr=subprocess.PIPE,
+                                text=False
+                            )
+                            if os.path.exists(pcap_file) and os.path.getsize(pcap_file) > 0:
+                                print(f"  ✓ PCAP file created from stdout redirect")
+                                break
+                    except Exception as e:
+                        pass  # Ignore redirect errors, continue to next variation
             
             if os.path.exists(pcap_file) and os.path.getsize(pcap_file) > 0:
                 file_size = os.path.getsize(pcap_file)
@@ -168,17 +280,41 @@ def capture_pcap(hostname: str, lidar_port: int, timeout: float = 15.0) -> Optio
         print("  Using Ouster SDK to capture PCAP...")
         try:
             print(f"  Connecting to sensor {hostname}...")
-            info = SensorInfo.from_hostname(hostname, lidar_port=lidar_port)
-            print(f"  ✓ Connected: {info.prod_line} (SN: {info.sn})")
+            # Try to get sensor info - this may fail if sensor is unreachable
+            try:
+                info = SensorInfo.from_hostname(hostname, lidar_port=lidar_port)
+                print(f"  ✓ Connected: {info.prod_line} (SN: {info.sn})")
+            except Exception as e:
+                print(f"  ⚠ Could not get sensor info: {e}")
+                print(f"  Attempting to capture packets anyway...")
+                info = None
             
             script_dir = os.path.dirname(os.path.abspath(__file__))
             metadata_file = os.path.join(script_dir, "metadata.json")
-            with open(metadata_file, 'w') as f:
-                f.write(info.json())
-            print(f"  ✓ Saved metadata to {metadata_file}")
+            if info:
+                with open(metadata_file, 'w') as f:
+                    f.write(info.json())
+                print(f"  ✓ Saved metadata to {metadata_file}")
             
             print(f"  Starting packet capture on port {lidar_port}...")
-            packet_source = sensor.SensorPacketSource(hostname, lidar_port=lidar_port)
+            # Try to create packet source - may need to use different API
+            packet_source = None
+            try:
+                # Try SensorPacketSource first (newer API)
+                if hasattr(sensor, 'SensorPacketSource'):
+                    packet_source = sensor.SensorPacketSource(hostname, lidar_port=lidar_port)
+                else:
+                    raise AttributeError("SensorPacketSource not available")
+            except (AttributeError, TypeError) as e:
+                # Fallback to older API or different method
+                print(f"  ⚠ SensorPacketSource not available ({e}), trying alternative method...")
+                try:
+                    # Try using client.Sensor instead
+                    from ouster.sdk import client
+                    packet_source = client.Sensor(hostname, lidar_port, 7503)
+                except Exception as e2:
+                    print(f"  ✗ Could not create packet source: {e2}")
+                    return None
             
             packets = []
             start_time = time.time()
@@ -186,19 +322,39 @@ def capture_pcap(hostname: str, lidar_port: int, timeout: float = 15.0) -> Optio
             max_packets = 2000
             
             try:
-                for packet in packet_source:
-                    packets.append(packet)
-                    packet_count += 1
-                    
-                    if time.time() - start_time > 10.0 or packet_count >= max_packets:
-                        break
-                    
-                    if packet_count % 100 == 0:
-                        print(f"    Captured {packet_count} packets...")
+                # Handle different packet source types
+                if hasattr(packet_source, '__iter__'):
+                    # It's iterable directly
+                    for packet in packet_source:
+                        packets.append(packet)
+                        packet_count += 1
+                        
+                        if time.time() - start_time > 10.0 or packet_count >= max_packets:
+                            break
+                        
+                        if packet_count % 100 == 0:
+                            print(f"    Captured {packet_count} packets...")
+                elif hasattr(packet_source, 'read'):
+                    # It has a read method
+                    while time.time() - start_time < 10.0 and packet_count < max_packets:
+                        try:
+                            packet = packet_source.read()
+                            if packet:
+                                packets.append(packet)
+                                packet_count += 1
+                                if packet_count % 100 == 0:
+                                    print(f"    Captured {packet_count} packets...")
+                            else:
+                                time.sleep(0.01)
+                        except Exception:
+                            break
             except Exception as e:
                 print(f"  ⚠ Packet capture ended: {e}")
+                import traceback
+                traceback.print_exc()
             finally:
-                packet_source.close()
+                if hasattr(packet_source, 'close'):
+                    packet_source.close()
             
             if len(packets) == 0:
                 print("  ✗ No packets captured")
@@ -225,6 +381,13 @@ def capture_pcap(hostname: str, lidar_port: int, timeout: float = 15.0) -> Optio
             return None
     
     print("  ✗ SDK and ouster-cli not available")
+    if SDK_IMPORT_ERROR:
+        print(f"  SDK import error: {SDK_IMPORT_ERROR}")
+    if not _sdk_python_path:
+        print(f"  Could not find ouster-sdk directory")
+        print(f"  Expected locations:")
+        for path in _sdk_paths[:3]:  # Show first 3
+            print(f"    - {path}")
     return None
 
 
@@ -288,22 +451,138 @@ def load_and_plot_pcap(pcap_file: str, metadata_file: Optional[str] = None, grid
         else:
             print(f"  ✓ Found range_unit: {range_unit} m/count")
         
+        # Check if PCAP file is valid before trying to open it
+        pcap_size = os.path.getsize(pcap_file)
+        if pcap_size < 100:
+            print(f"  ✗ PCAP file is too small ({pcap_size} bytes) - likely invalid or empty")
+            print(f"  This usually means the capture failed or the file is corrupted")
+            sys.exit(1)
+        
+        # Check if it's a valid binary file (PCAP files should be binary)
+        try:
+            with open(pcap_file, 'rb') as f:
+                header = f.read(4)
+                # PCAP magic numbers: 0xa1b2c3d4 (little-endian) or 0xd4c3b2a1 (big-endian)
+                magic = int.from_bytes(header, byteorder='little')
+                magic_be = int.from_bytes(header, byteorder='big')
+                if magic != 0xa1b2c3d4 and magic_be != 0xd4c3b2a1:
+                    print(f"  ✗ Invalid PCAP file format (magic number: {hex(magic)} or {hex(magic_be)})")
+                    print(f"  Expected PCAP magic number: 0xa1b2c3d4 or 0xd4c3b2a1")
+                    print(f"  File might be corrupted or not a PCAP file")
+                    sys.exit(1)
+        except Exception as e:
+            print(f"  ✗ Error reading PCAP file: {e}")
+            sys.exit(1)
+        
+        print(f"  ✓ PCAP file appears valid ({pcap_size} bytes)")
+        
         with open(metadata_file, 'r') as f:
             metadata_json = f.read()
         info = SensorInfo(metadata_json)
         print(f"  ✓ Loaded metadata: {info.prod_line} (SN: {info.sn})")
         
-        src = pcap.PcapScanSource(pcap_file, sensor_info=[info])
-        print(f"  ✓ Opened PCAP file")
+        try:
+            # Note: complete parameter is no longer supported in newer SDK versions
+            src = pcap.PcapScanSource(pcap_file, sensor_info=[info])
+            print(f"  ✓ Opened PCAP file")
+        except RuntimeError as e:
+            if "unknown file format" in str(e).lower():
+                print(f"  ✗ PCAP file format error: {e}")
+                print(f"  This could mean:")
+                print(f"    - The PCAP file is corrupted")
+                print(f"    - The PCAP file is not in a supported format")
+                print(f"    - The metadata file doesn't match the PCAP file")
+                print(f"  Try using a different PCAP file or re-capturing")
+            else:
+                print(f"  ✗ Error opening PCAP file: {e}")
+            sys.exit(1)
+        except ValueError as e:
+            print(f"  ✗ Error opening PCAP file: {e}")
+            sys.exit(1)
         
         print("  Extracting point cloud from first scan...")
+        print("  Note: This may take a moment if the PCAP file is large...")
+        
         scans = iter(src)
-        scan_data = next(scans, None)
+        scan_data = None
+        scan_count = 0
+        max_attempts = 100  # Try up to 100 scans before giving up
+        
+        # Try to get at least one valid scan (complete or incomplete)
+        for _ in range(max_attempts):
+            try:
+                scan_data = next(scans, None)
+                if scan_data is not None and len(scan_data) > 0:
+                    # Check if scan is complete (but accept incomplete scans too)
+                    scan = scan_data[0]
+                    if scan is not None:
+                        is_complete = scan.complete() if hasattr(scan, 'complete') else True
+                        if not is_complete:
+                            print(f"  ⚠ Found incomplete scan (scan {scan_count + 1}), but processing anyway...")
+                        break
+                scan_count += 1
+            except StopIteration:
+                break
+            except Exception as e:
+                print(f"  ⚠ Error iterating scans: {e}")
+                break
         
         if scan_data is None or len(scan_data) == 0:
-            print("  ✗ No scans found in PCAP file")
-            src.close()
-            sys.exit(1)
+            print(f"  ✗ No scans found in PCAP file after checking {scan_count} iterations")
+            print(f"  This could mean:")
+            print(f"    - The PCAP file doesn't contain complete lidar scans")
+            print(f"    - The metadata file doesn't match the PCAP file format")
+            print(f"    - The PCAP file contains only partial/incomplete scans")
+            print(f"  ")
+            print(f"  Attempting packet-level processing as fallback...")
+            
+            # Try packet-level processing as fallback
+            try:
+                from ouster.sdk.pcap import Pcap
+                from ouster.sdk.client import ScanBatcher
+                
+                pcap_reader = Pcap(pcap_file, info)
+                batcher = ScanBatcher(info)
+                scan = None
+                packet_count = 0
+                
+                print(f"  Reading packets from PCAP...")
+                for packet in pcap_reader:
+                    if hasattr(packet, 'packet_type') and 'lidar' in str(packet.packet_type).lower():
+                        packet_count += 1
+                        if scan is None:
+                            scan = LidarScan(info.format.columns_per_frame, info.format.pixels_per_column, info.format.udp_profile_lidar)
+                        
+                        if batcher(packet, scan):
+                            # Got a complete scan
+                            print(f"  ✓ Found scan from packet-level processing (packet {packet_count})")
+                            scan_data = [scan]
+                            break
+                        
+                        if packet_count % 100 == 0:
+                            print(f"  Processed {packet_count} packets...")
+                        
+                        if packet_count > 10000:  # Limit to avoid infinite loops
+                            print(f"  ⚠ Processed {packet_count} packets but no complete scan found")
+                            break
+                
+                if scan_data is None or len(scan_data) == 0:
+                    print(f"  ✗ Packet-level processing also found no complete scans")
+                    print(f"  Total packets processed: {packet_count}")
+                    print(f"  ")
+                    print(f"  Possible solutions:")
+                    print(f"    1. Verify the metadata file matches the PCAP file")
+                    print(f"    2. Re-capture the PCAP file with complete scans")
+                    print(f"    3. Check if the PCAP file format is supported")
+                    pcap_reader.close()
+                    src.close()
+                    sys.exit(1)
+            except Exception as e:
+                print(f"  ✗ Packet-level processing failed: {e}")
+                import traceback
+                traceback.print_exc()
+                src.close()
+                sys.exit(1)
         
         scan = scan_data[0]
         if scan is None:

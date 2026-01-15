@@ -4,9 +4,36 @@
 #include <iostream>
 #include <string>
 #include <exception>
+#include <csignal>
+#include <atomic>
 
 using namespace Engine::Editors::CameraSystem;
 using EngineLogging::Logger;
+
+// Global flag for signal handling (non-static so it can be accessed from CameraSystemEditor.cpp)
+std::atomic<bool> g_shouldExit{false};
+static CameraSystemEditor* g_editorInstance = nullptr;
+
+// Signal handler for clean shutdown
+// Note: SIGKILL (kill -9) cannot be caught and will always terminate immediately
+// Signal handlers must be minimal - only set flags, no complex operations
+static void SignalHandler(int sig) {
+    // Set the flag - the main loop will check it
+    g_shouldExit = true;
+    
+    // For SIGINT (Ctrl+C) and SIGTERM, also try to close the window immediately
+    // This is safe because we're just setting a boolean flag on an object
+    if ((sig == SIGINT || sig == SIGTERM) && g_editorInstance) {
+        // Directly request exit - this is async-safe (just sets a flag)
+        g_editorInstance->RequestExit();
+    }
+    
+    // For other signals, restore default and re-raise
+    if (sig != SIGTERM && sig != SIGINT) {
+        std::signal(sig, SIG_DFL);
+        std::raise(sig);
+    }
+}
 
 int main(int argc, char* argv[]) {
     // Parse command line arguments
@@ -46,6 +73,11 @@ int main(int argc, char* argv[]) {
         }
     }
     
+    // Set up signal handlers for clean shutdown
+    signal(SIGINT, SignalHandler);   // Ctrl+C
+    signal(SIGTERM, SignalHandler);  // kill command
+    // Note: SIGKILL (kill -9) cannot be caught - it will always terminate immediately
+    
     // Initialize logger with relative path (works on any platform)
     EngineLogging::Logger& logger = EngineLogging::Logger::GetInstance();
     const std::string logFilePath = "camera_system_editor_debug.log";
@@ -77,6 +109,7 @@ int main(int argc, char* argv[]) {
     
     try {
         CameraSystemEditor editor;
+        g_editorInstance = &editor;  // Store for signal handler
         
         LOG_INFO("CameraSystem", "Initializing editor...");
         if (!editor.Initialize(1280, 720)) {
@@ -132,6 +165,15 @@ int main(int argc, char* argv[]) {
         // Set PCAP file paths if provided (for UI access)
         if (!ousterPcapFile.empty() && !ousterMetadataFile.empty()) {
             editor.SetOusterPcapFiles(ousterPcapFile, ousterMetadataFile);
+            
+            // Load metadata file for use with live streaming (faster initialization, offline support)
+            LOG_INFO_FMT("CameraSystem", "Loading metadata from file for live streaming: %s", ousterMetadataFile.c_str());
+            if (editor.LoadOusterMetadata(ousterMetadataFile)) {
+                LOG_INFO("CameraSystem", "Metadata loaded successfully - will be used for parsing live stream data");
+            } else {
+                LOG_WARNING_FMT("CameraSystem", "Failed to load metadata from file: %s (will fetch from sensor)", ousterMetadataFile.c_str());
+            }
+            
             // Optionally auto-load PCAP on startup if provided
             // Uncomment the following lines to auto-load PCAP files on startup:
             /*
@@ -164,7 +206,13 @@ int main(int argc, char* argv[]) {
         
         LOG_INFO("CameraSystem", "Starting editor main loop...");
         // Run editor (will run at 30fps and follow paths if config loaded)
+        // The Run() method will check g_shouldExit and window shouldClose flag
         editor.Run();
+        
+        // Check if we should exit due to signal
+        if (g_shouldExit) {
+            LOG_INFO("CameraSystem", "Exit requested by signal handler");
+        }
         
         LOG_INFO("CameraSystem", "Editor closed");
         
