@@ -35,6 +35,10 @@ public:
     // Access to shader (needed for initialization)
     Platform::Render::Shader* GetGridShader() { return m_gridShader; }
     
+    // Access to grid buffers (for rendering axes, etc.)
+    GLuint GetGridVAO() const { return m_gridVAO; }
+    GLuint GetGridVBO() const { return m_gridVBO; }
+    
 private:
     // Grid rendering
     Platform::Render::Shader* m_gridShader;

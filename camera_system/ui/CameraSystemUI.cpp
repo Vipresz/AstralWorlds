@@ -170,42 +170,103 @@ void CameraSystemUI::RenderStatusBar(CameraSystemEditor& editor) {
             nk_layout_row_dynamic(ctx, 5, 1);
             nk_label(ctx, "---", NK_TEXT_LEFT);
             
-            // Ouster LiDAR toggle (mutually exclusive with simulated TOF)
+            // TOF Data Source options (mutually exclusive)
             nk_layout_row_dynamic(ctx, 25, 1);
             nk_label(ctx, "TOF Data Source:", NK_TEXT_LEFT);
             
+            // Simulated TOF from File
             nk_layout_row_dynamic(ctx, 25, 1);
-            nk_bool useSimulated = !editor.m_ousterEnabled ? nk_true : nk_false;
-            if (nk_checkbox_label(ctx, "Simulated TOF", &useSimulated)) {
-                if (useSimulated == nk_true && editor.m_ousterEnabled) {
-                    // Switching from Ouster to Simulated
-                    editor.m_ousterEnabled = false;
-                    if (editor.m_ousterStream) {
-                        editor.m_ousterStream->StopStreaming();
+            nk_bool useSimulated = (!editor.m_ousterEnabled && !editor.m_ousterPacketLoaded) ? nk_true : nk_false;
+            nk_bool oldUseSimulated = useSimulated;
+            if (nk_checkbox_label(ctx, "Simulated TOF from File", &useSimulated)) {
+                if (useSimulated != oldUseSimulated) {
+                    if (useSimulated == nk_true) {
+                        // Enabling Simulated TOF - disable all Ouster options
+                        LOG_INFO("CameraSystemUI", ">>> Simulated TOF from File ENABLED <<<");
+                        if (editor.m_ousterEnabled) {
+                            editor.m_ousterEnabled = false;
+                            if (editor.m_ousterStream) {
+                                editor.m_ousterStream->StopStreaming();
+                            }
+                        }
+                        editor.m_ousterPacketLoaded = false;
                     }
                 }
             }
             
+            // Lidar Live
             nk_layout_row_dynamic(ctx, 25, 1);
-            nk_bool useOuster = editor.m_ousterEnabled ? nk_true : nk_false;
-            nk_bool oldUseOuster = useOuster;
-            nk_checkbox_label(ctx, "Ouster LiDAR", &useOuster);
-            if (useOuster != oldUseOuster) {
+            nk_bool useLidarLive = (editor.m_ousterEnabled && !editor.m_ousterPacketLoaded) ? nk_true : nk_false;
+            nk_bool oldUseLidarLive = useLidarLive;
+            nk_checkbox_label(ctx, "Lidar Live", &useLidarLive);
+            if (useLidarLive != oldUseLidarLive) {
                 // Checkbox was toggled
-                if (useOuster == nk_true) {
-                    // Enabling Ouster
-                    std::cout << "Ouster LiDAR ENABLED by user" << std::endl;
+                if (useLidarLive == nk_true) {
+                    // Enabling Lidar Live - disable other options and reinitialize
+                    LOG_INFO("CameraSystemUI", ">>> Lidar Live ENABLED by user <<<");
+                    editor.m_ousterPacketLoaded = false;  // Clear any loaded file data
                     editor.m_ousterEnabled = true;
+                    LOG_INFO_FMT("CameraSystemUI", "m_ousterEnabled set to: %d", editor.m_ousterEnabled ? 1 : 0);
+                    
+                    // Clear point cloud buffers when switching to live mode
+                    editor.m_pointCloud[0].clear();
+                    editor.m_pointCloud[1].clear();
+                    
                     if (editor.m_ousterStream) {
-                        std::cout << "Starting Ouster stream from UI..." << std::endl;
-                        if (!editor.m_ousterStream->IsConnected()) {
-                            editor.m_ousterStream->Connect();
+                        LOG_INFO("CameraSystemUI", "Reinitializing and starting Lidar Live stream from UI...");
+                        // Always stop and disconnect first to ensure clean reinitialization
+                        if (editor.m_ousterStream->IsStreaming()) {
+                            editor.m_ousterStream->StopStreaming();
                         }
-                        editor.m_ousterStream->StartStreaming();
+                        if (editor.m_ousterStream->IsConnected()) {
+                            editor.m_ousterStream->Disconnect();
+                        }
+                        // Clear any file-loaded state in the stream to prevent fallback to file data
+                        // This ensures that if initialization fails, we won't display old file data
+                        editor.m_ousterStream->ClearFileLoadedState();
+                        
+                        // Note: With SDK (firmware 2.5.3+), we don't need to call Connect() first
+                        // The SDK handles connection and configuration internally
+                        // However, we still call it for manual UDP fallback compatibility
+                        // The SDK will override any manual configuration
+                        LOG_INFO("CameraSystemUI", "Preparing lidar sensor connection...");
+                        if (!editor.m_ousterStream->Connect()) {
+                            LOG_ERROR("CameraSystemUI", "Failed to configure lidar sensor");
+                            editor.m_ousterEnabled = false;
+                            useLidarLive = nk_false;
+                            // Make sure we don't fall back to file data
+                            editor.m_ousterPacketLoaded = false;
+                            // Clear point cloud buffer
+                            editor.m_pointCloud[0].clear();
+                            editor.m_pointCloud[1].clear();
+                        } else {
+                            LOG_INFO("CameraSystemUI", "Sensor configured successfully (SDK will handle connection)");
+                            // Start streaming - SDK will handle connection if available
+                            LOG_INFO("CameraSystemUI", "Starting lidar stream...");
+                            editor.m_ousterStream->StartStreaming();
+                            // Verify streaming started
+                            std::this_thread::sleep_for(std::chrono::milliseconds(500));
+                            if (!editor.m_ousterStream->IsStreaming()) {
+                                LOG_ERROR("CameraSystemUI", "Failed to start lidar streaming");
+                                editor.m_ousterEnabled = false;
+                                useLidarLive = nk_false;
+                                editor.m_ousterPacketLoaded = false;
+                                // Clear point cloud buffer
+                                editor.m_pointCloud[0].clear();
+                                editor.m_pointCloud[1].clear();
+                            } else {
+                                LOG_INFO_FMT("CameraSystemUI", "Lidar streaming started: %d", 
+                                             editor.m_ousterStream->IsStreaming() ? 1 : 0);
+                            }
+                        }
+                    } else {
+                        LOG_WARNING("CameraSystemUI", "Lidar stream is NULL!");
+                        editor.m_ousterEnabled = false;
+                        useLidarLive = nk_false;
                     }
                 } else {
-                    // Disabling Ouster
-                    std::cout << "Ouster LiDAR DISABLED by user" << std::endl;
+                    // Disabling Lidar Live
+                    LOG_INFO("CameraSystemUI", ">>> Lidar Live DISABLED by user <<<");
                     editor.m_ousterEnabled = false;
                     if (editor.m_ousterStream) {
                         editor.m_ousterStream->StopStreaming();
@@ -213,11 +274,57 @@ void CameraSystemUI::RenderStatusBar(CameraSystemEditor& editor) {
                 }
             }
             
-            // Show Ouster status
+            // Lidar from File (toggle)
+            nk_layout_row_dynamic(ctx, 25, 1);
+            nk_bool useLidarFromFile = editor.m_ousterPacketLoaded ? nk_true : nk_false;
+            nk_bool oldUseLidarFromFile = useLidarFromFile;
+            nk_checkbox_label(ctx, "Lidar from File", &useLidarFromFile);
+            if (useLidarFromFile != oldUseLidarFromFile) {
+                if (useLidarFromFile == nk_true) {
+                    // Enabling Lidar from File - disable live streaming
+                    LOG_INFO("CameraSystemUI", ">>> Lidar from File ENABLED <<<");
+                    if (editor.m_ousterEnabled) {
+                        editor.m_ousterEnabled = false;
+                        if (editor.m_ousterStream) {
+                            editor.m_ousterStream->StopStreaming();
+                        }
+                    }
+                    // Always reload the PCAP file when enabling "Lidar from File"
+                    // This ensures data is loaded even if it was cleared by "Lidar Live"
+                    if (!editor.m_ousterPcapFile.empty() && !editor.m_ousterMetadataFile.empty()) {
+                        LOG_INFO_FMT("CameraSystemUI", "Loading PCAP from: %s", editor.m_ousterPcapFile.c_str());
+                        if (editor.LoadOusterPcap(editor.m_ousterPcapFile, editor.m_ousterMetadataFile)) {
+                            LOG_INFO("CameraSystemUI", "PCAP file loaded successfully - point cloud buffer populated");
+                        } else {
+                            LOG_ERROR("CameraSystemUI", "Failed to load PCAP file");
+                            editor.m_ousterPacketLoaded = false;
+                            useLidarFromFile = nk_false;
+                        }
+                    } else {
+                        LOG_WARNING("CameraSystemUI", "No PCAP file paths set. Use --ouster-pcap and --ouster-metadata command-line arguments.");
+                        editor.m_ousterPacketLoaded = false;
+                        useLidarFromFile = nk_false;
+                    }
+                } else {
+                    // Disabling Lidar from File
+                    LOG_INFO("CameraSystemUI", ">>> Lidar from File DISABLED <<<");
+                    editor.m_ousterPacketLoaded = false;
+                }
+            }
+            
+            // Show Lidar status
             if (editor.m_ousterStream) {
                 nk_layout_row_dynamic(ctx, 20, 1);
-                std::string status = editor.m_ousterStream->IsStreaming() ? 
-                    "Status: Streaming" : "Status: Stopped";
+                std::string status;
+                if (editor.m_ousterPacketLoaded) {
+                    status = "Status: File Loaded";
+                } else if (editor.m_ousterStream->IsStreaming()) {
+                    status = "Status: Streaming";
+                } else if (editor.m_ousterStream->IsConnected()) {
+                    status = "Status: Connected (Not Streaming)";
+                } else {
+                    status = "Status: Disconnected";
+                }
                 nk_label(ctx, status.c_str(), NK_TEXT_LEFT);
             }
             

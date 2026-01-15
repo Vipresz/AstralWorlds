@@ -107,6 +107,18 @@ public:
     bool AddObject(const std::string& meshFilePath, const std::string& animationFilePath = "", 
                    const std::string& name = "");
     
+    // Load a saved Ouster packet file for debugging (enables Ouster mode and loads packet)
+    bool LoadOusterPacket(const std::string& packetFile);
+    
+    // Load a PCAP file with metadata JSON (enables Ouster mode and loads PCAP)
+    bool LoadOusterPcap(const std::string& pcapFile, const std::string& metadataFile);
+    
+    // Set PCAP file paths (called from main.cpp when command-line args are provided)
+    void SetOusterPcapFiles(const std::string& pcapFile, const std::string& metadataFile);
+    
+    // Disable both Ouster and TOF data (for clean startup when no command line args)
+    void DisableAllSensors();
+    
     // Remove an object from the scene
     void RemoveObject(size_t index);
     
@@ -313,8 +325,11 @@ private:
     // Ouster LiDAR stream
     std::unique_ptr<OusterStream> m_ousterStream;
     bool m_ousterEnabled;                    // Use Ouster LiDAR instead of simulated TOF
+    bool m_ousterPacketLoaded;               // True if packet was loaded from file (don't start streaming)
     std::string m_ousterHostname;            // Ouster sensor IP address
     double m_lastOusterTimestamp;            // Timestamp of last received Ouster frame
+    std::string m_ousterPcapFile;            // PCAP file path (from command-line or UI)
+    std::string m_ousterMetadataFile;        // Metadata file path (from command-line or UI)
     
     // Object Manager - handles object loading and coloring
     ObjectManager m_objectManager;

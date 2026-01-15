@@ -1,519 +1,570 @@
 #!/usr/bin/env python3
 """
-Ouster LiDAR Setup and Visualization Script
+Ouster LiDAR PCAP Capture and Visualization
 
-This script:
-1. Configures the Mac network interface for Ouster communication
-2. Configures the Ouster sensor settings (UDP destination, port)
-3. Verifies data flow
-4. Captures a frame and renders it in 3D
-
-Requirements:
-    pip3 install numpy matplotlib requests
-
-Usage:
-    python3 setup_ouster.py
+Captures live lidar data to PCAP file and metadata, or loads and plots existing PCAP files.
 """
 
 import subprocess
 import socket
-import struct
 import time
 import sys
+import os
 import json
-import math
-from typing import List, Tuple, Optional
-import numpy as np
+import argparse
+from typing import Optional
 
-# Try to import visualization libraries
+_script_dir = os.path.dirname(os.path.abspath(__file__))
+_sdk_python_path = os.path.join(_script_dir, "ouster-sdk", "python", "src")
+if os.path.exists(_sdk_python_path) and _sdk_python_path not in sys.path:
+    sys.path.insert(0, _sdk_python_path)
+
+HAS_OUSTER_SDK = False
+SDK_IMPORT_ERROR = None
+try:
+    from ouster.sdk import pcap, core, sensor
+    from ouster.sdk.core import LidarScan, ChanField, SensorInfo, Scans
+    HAS_OUSTER_SDK = True
+except ImportError as e:
+    HAS_OUSTER_SDK = False
+    SDK_IMPORT_ERROR = str(e)
+
+OUSTER_CLI_AVAILABLE = False
+try:
+    result = subprocess.run(["which", "ouster-cli"], capture_output=True, timeout=2)
+    OUSTER_CLI_AVAILABLE = (result.returncode == 0)
+except:
+    pass
+
+HAS_OPEN3D = False
+try:
+    import open3d as o3d
+    HAS_OPEN3D = True
+except ImportError:
+    HAS_OPEN3D = False
+
+HAS_MATPLOTLIB = False
 try:
     import matplotlib.pyplot as plt
     from mpl_toolkits.mplot3d import Axes3D
     HAS_MATPLOTLIB = True
 except ImportError:
     HAS_MATPLOTLIB = False
-    print("Note: matplotlib not available. Install with: pip3 install matplotlib")
 
-try:
-    import requests
-    HAS_REQUESTS = True
-except ImportError:
-    HAS_REQUESTS = False
-    print("Note: requests not available. Install with: pip3 install requests")
-
-# ============================================================================
-# Configuration
-# ============================================================================
 OUSTER_IP = "172.17.1.56"
 MAC_IP = "172.17.1.100"
-LIDAR_PORT = 7504  # Using 7504 to avoid zombie socket on 7502
-ETHERNET_IF = "en8"  # USB Ethernet adapter
-
-# OS0-128 beam configuration (approximate angles)
-NUM_BEAMS = 128
-COLUMNS_PER_FRAME = 1024
-ENCODER_TICKS_PER_REV = 90112
+LIDAR_PORT = 7504
 
 
-# ============================================================================
-# Ouster Packet Parsing (Legacy profile for v2.3.x firmware)
-# ============================================================================
-
-class LidarColumnHeader:
-    """Header for each column in a lidar packet"""
-    SIZE = 16  # bytes
+def capture_pcap(hostname: str, lidar_port: int, timeout: float = 15.0) -> Optional[str]:
+    """Capture packets and save as PCAP file. Returns path to saved PCAP file."""
+    if HAS_OUSTER_SDK:
+        from ouster.sdk import pcap, core, sensor
+        from ouster.sdk.core import LidarScan, ChanField, SensorInfo, Scans
     
-    def __init__(self, data: bytes):
-        self.timestamp = struct.unpack('<Q', data[0:8])[0]
-        self.measurement_id = struct.unpack('<H', data[8:10])[0]
-        self.frame_id = struct.unpack('<H', data[10:12])[0]
-        self.encoder_count = struct.unpack('<I', data[12:16])[0]
-
-
-class LidarPixel:
-    """Single pixel measurement"""
-    SIZE = 12  # bytes for legacy profile
+    print("Capturing packets and saving as PCAP...")
     
-    def __init__(self, data: bytes):
-        self.range_mm = struct.unpack('<I', data[0:4])[0]
-        self.signal = struct.unpack('<H', data[4:6])[0]
-        self.reflectivity = struct.unpack('<H', data[6:8])[0]
-        self.near_ir = struct.unpack('<H', data[8:10])[0]
-
-
-def get_beam_angles() -> Tuple[List[float], List[float]]:
-    """Get beam altitude and azimuth angles for OS0-128"""
-    # These are approximate values - ideally load from sensor metadata
-    altitude_angles = []
-    azimuth_angles = []
-    
-    for i in range(NUM_BEAMS):
-        # OS0-128 has roughly +/- 45 degree vertical FOV
-        alt = math.radians(45.0 - 90.0 * i / (NUM_BEAMS - 1))
-        altitude_angles.append(alt)
-        azimuth_angles.append(0.0)  # Per-beam azimuth offset (usually small)
-    
-    return altitude_angles, azimuth_angles
-
-
-def parse_lidar_packet(data: bytes, beam_altitudes: List[float], beam_azimuths: List[float]) -> List[Tuple[float, float, float, float]]:
-    """
-    Parse an Ouster lidar packet and extract 3D points.
-    
-    Returns list of (x, y, z, intensity) tuples in meters.
-    """
-    points = []
-    
-    column_header_size = LidarColumnHeader.SIZE
-    pixel_size = LidarPixel.SIZE
-    column_size = column_header_size + NUM_BEAMS * pixel_size
-    
-    offset = 0
-    while offset + column_size <= len(data):
-        # Parse column header
-        header = LidarColumnHeader(data[offset:offset + column_header_size])
-        
-        # Calculate azimuth angle for this column
-        azimuth = 2.0 * math.pi * header.encoder_count / ENCODER_TICKS_PER_REV
-        
-        # Parse each pixel in the column
-        pixel_offset = offset + column_header_size
-        for beam in range(NUM_BEAMS):
-            pixel_data = data[pixel_offset:pixel_offset + pixel_size]
-            if len(pixel_data) < pixel_size:
-                break
-                
-            pixel = LidarPixel(pixel_data)
-            
-            # Convert range from mm to meters
-            range_m = pixel.range_mm * 0.001
-            
-            # Skip invalid points (range 0 or too far)
-            if range_m < 0.3 or range_m > 50.0:
-                pixel_offset += pixel_size
-                continue
-            
-            # Calculate 3D position
-            altitude = beam_altitudes[beam]
-            az = azimuth + beam_azimuths[beam]
-            
-            x = range_m * math.cos(altitude) * math.cos(az)
-            y = range_m * math.cos(altitude) * math.sin(az)
-            z = range_m * math.sin(altitude)
-            
-            # Normalize intensity (signal typically 0-65535)
-            intensity = pixel.signal / 65535.0
-            
-            points.append((x, y, z, intensity))
-            pixel_offset += pixel_size
-        
-        offset += column_size
-    
-    return points
-
-
-# ============================================================================
-# Network Setup
-# ============================================================================
-
-def run_command(cmd: str, sudo: bool = False) -> Tuple[int, str, str]:
-    """Run a shell command and return (returncode, stdout, stderr)"""
-    if sudo:
-        cmd = f"sudo {cmd}"
-    result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
-    return result.returncode, result.stdout, result.stderr
-
-
-def check_ethernet_interface() -> Optional[str]:
-    """Find and verify the Ethernet interface"""
-    print("[1/5] Checking Ethernet adapter...")
-    
-    # Check primary interface first
-    for iface in [ETHERNET_IF, "en7", "en9", "en10", "en11", "en12"]:
-        ret, out, _ = run_command(f"ifconfig {iface} 2>/dev/null")
-        if ret == 0 and "status: active" in out:
-            print(f"  ✓ Using interface: {iface}")
-            return iface
-    
-    # Check if en8 exists even if not "active" (might just be connected)
-    ret, out, _ = run_command(f"ifconfig {ETHERNET_IF} 2>/dev/null")
-    if ret == 0:
-        print(f"  ✓ Using interface: {ETHERNET_IF}")
-        return ETHERNET_IF
-    
-    print("  ✗ No Ethernet adapter found!")
-    print("  Make sure the USB-C Ethernet adapter is connected.")
-    return None
-
-
-def configure_ip_address(interface: str) -> bool:
-    """Configure IP alias on the Ethernet interface"""
-    print("\n[2/5] Configuring IP address...")
-    
-    # Always try to add the IP (even if it exists, this ensures it's correct)
-    # First check if it's there
-    ret, out, _ = run_command(f"ifconfig {interface}")
-    
-    if MAC_IP in out:
-        print(f"  ✓ IP {MAC_IP} already configured")
-    else:
-        print(f"  Adding IP alias {MAC_IP}...")
-        # Add the IP alias
-        ret, _, err = run_command(f"ifconfig {interface} inet {MAC_IP} netmask 255.255.255.0 alias", sudo=True)
-        if ret != 0:
-            print(f"  ✗ Failed to add IP: {err}")
-            print("\n  You may need to run this script with sudo, or run:")
-            print(f"    sudo ifconfig {interface} inet {MAC_IP} netmask 255.255.255.0 alias")
-            return False
-        print(f"  ✓ Added {MAC_IP} to {interface}")
-    
-    # Verify the IP is actually there now
-    ret, out, _ = run_command(f"ifconfig {interface}")
-    if MAC_IP not in out:
-        print(f"  ✗ IP {MAC_IP} not found after configuration!")
-        print(f"  Current config:\n{out}")
-        return False
-    
-    return True
-
-
-def test_connectivity(retries: int = 3) -> bool:
-    """Test if the Ouster sensor is reachable"""
-    print("\n[3/5] Testing connectivity to sensor...")
-    
-    for attempt in range(retries):
-        ret, _, _ = run_command(f"ping -c 1 -W 2 {OUSTER_IP}")
-        if ret == 0:
-            print(f"  ✓ Ouster sensor reachable at {OUSTER_IP}")
-            return True
-        if attempt < retries - 1:
-            print(f"  Attempt {attempt + 1}/{retries} failed, retrying...")
-            time.sleep(1)
-    
-    print(f"  ✗ Cannot reach sensor at {OUSTER_IP}")
-    print("\nTroubleshooting:")
-    print("  - Check that the Ouster is powered (solid blue LED)")
-    print("  - Verify Ethernet cable is connected")
-    print("  - Try running: sudo ifconfig en8 inet 172.17.1.100 netmask 255.255.255.0 alias")
-    return False
-
-
-def configure_sensor() -> Tuple[str, int]:
-    """Configure the Ouster sensor UDP settings"""
-    print("\n[4/5] Configuring sensor settings...")
-    
-    if not HAS_REQUESTS:
-        print("  ⚠ requests library not available, skipping sensor config")
-        return MAC_IP, LIDAR_PORT
-    
-    try:
-        # Set UDP destination to auto (uses the IP that made the request)
-        print(f"  Setting UDP destination to {MAC_IP}...")
-        requests.post(f"http://{OUSTER_IP}/api/v1/sensor/cmd/set_udp_dest_auto", timeout=5)
-    except Exception as e:
-        print(f"  ⚠ Could not set UDP dest: {e}")
-    
-    try:
-        # Try to set lidar port using ouster-cli if available
-        print(f"  Setting lidar port to {LIDAR_PORT}...")
-        ouster_cli = None
-        for path in ["/Users/rgrigorii/Library/Python/3.9/bin/ouster-cli", "ouster-cli"]:
-            ret, _, _ = run_command(f"which {path} 2>/dev/null || test -f {path}")
-            if ret == 0:
-                ouster_cli = path
-                break
-        
-        if ouster_cli:
-            run_command(f"{ouster_cli} source {OUSTER_IP} config udp_port_lidar {LIDAR_PORT} 2>/dev/null")
-    except Exception as e:
-        print(f"  ⚠ Could not set lidar port: {e}")
-    
-    try:
-        # Reinitialize sensor
-        print("  Reinitializing sensor (this takes ~8 seconds)...")
-        requests.post(f"http://{OUSTER_IP}/api/v1/sensor/cmd/reinitialize", timeout=5)
-        # Wait for sensor to fully reinitialize and start sending data
-        for i in range(8):
-            time.sleep(1)
-            print(f"    Waiting... {8-i}s")
-    except Exception as e:
-        print(f"  ⚠ Could not reinitialize: {e}")
-    
-    # Verify configuration
-    try:
-        print("  Verifying configuration...")
-        resp = requests.get(f"http://{OUSTER_IP}/api/v1/sensor/metadata", timeout=5)
-        metadata = resp.json()
-        config = metadata.get("config_params", {})
-        
-        udp_dest = config.get("udp_dest", "unknown")
-        lidar_port = config.get("udp_port_lidar", LIDAR_PORT)
-        
-        print(f"  ✓ UDP destination: {udp_dest}")
-        print(f"  ✓ Lidar port: {lidar_port}")
-        
-        return udp_dest, lidar_port
-    except Exception as e:
-        print(f"  ⚠ Could not verify config: {e}")
-        return MAC_IP, LIDAR_PORT
-
-
-def test_data_flow(port: int, timeout: float = 5.0, retries: int = 3) -> Optional[bytes]:
-    """Test if lidar data is flowing and return a packet"""
-    print("\n[5/5] Testing data flow...")
-    
-    for attempt in range(retries):
-        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        sock.settimeout(timeout)
+    if OUSTER_CLI_AVAILABLE:
+        print("  Using ouster-cli to record PCAP...")
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        pcap_file = os.path.join(script_dir, "ouster.pcap")
+        metadata_file = os.path.join(script_dir, "metadata.json")
         
         try:
-            sock.bind(('', port))
-            data, addr = sock.recvfrom(65536)
-            print(f"  ✓ Receiving data from {addr[0]} ({len(data)} bytes)")
-            return data
-        except socket.timeout:
-            if attempt < retries - 1:
-                print(f"  Attempt {attempt + 1}/{retries}: No data yet, waiting...")
-                time.sleep(2)
+            print(f"  Recording to {pcap_file}...")
+            capture_time = 5.0
+            cmd_variations = [
+                ["ouster-cli", "source", hostname, "record", "-o", pcap_file],
+                ["ouster-cli", "source", hostname, "record", "--output", pcap_file],
+                ["ouster-cli", "source", hostname, "record", pcap_file],
+            ]
+            
+            for i, cmd in enumerate(cmd_variations):
+                if i > 0:
+                    print(f"  Trying syntax variation {i+1}...")
+                
+                result = subprocess.run(
+                    cmd,
+                    timeout=capture_time,
+                    capture_output=True,
+                    text=True
+                )
+                
+                if os.path.exists(pcap_file) and os.path.getsize(pcap_file) > 0:
+                    print(f"  ✓ PCAP file created")
+                    break
+                
+                if "unexpected" in result.stderr.lower() or "unexpected" in result.stdout.lower():
+                    continue
+                
+                if result.returncode == 0 and i == len(cmd_variations) - 1:
+                    with open(pcap_file, 'wb') as f:
+                        redirect_cmd = ["ouster-cli", "source", hostname, "record"]
+                        redirect_result = subprocess.run(
+                            redirect_cmd,
+                            timeout=capture_time,
+                            stdout=f,
+                            stderr=subprocess.PIPE,
+                            text=False
+                        )
+                        if os.path.exists(pcap_file) and os.path.getsize(pcap_file) > 0:
+                            result = redirect_result
+                            break
+                    break
+            
+            if os.path.exists(pcap_file) and os.path.getsize(pcap_file) > 0:
+                file_size = os.path.getsize(pcap_file)
+                print(f"  ✓ PCAP recorded: {pcap_file} ({file_size} bytes)")
+                
+                print("  Fetching sensor metadata...")
+                try:
+                    metadata_cmd = ["ouster-cli", "source", hostname, "metadata"]
+                    metadata_result = subprocess.run(
+                        metadata_cmd,
+                        timeout=10,
+                        capture_output=True,
+                        text=True
+                    )
+                    if metadata_result.returncode == 0 and metadata_result.stdout:
+                        with open(metadata_file, 'w') as f:
+                            f.write(metadata_result.stdout)
+                        print(f"  ✓ Metadata saved: {metadata_file}")
+                    else:
+                        print(f"  ⚠ Could not fetch metadata via ouster-cli")
+                except Exception as e:
+                    print(f"  ⚠ Could not fetch metadata: {e}")
+                
+                return pcap_file
             else:
-                print("  ✗ No data received (timeout after all retries)")
-            sock.close()
-        except OSError as e:
-            print(f"  ✗ Port {port} error: {e}")
-            sock.close()
+                print(f"  ⚠ PCAP file not created or empty")
+                print("  Falling back to SDK capture...")
+        except subprocess.TimeoutExpired:
+            if os.path.exists(pcap_file) and os.path.getsize(pcap_file) > 0:
+                file_size = os.path.getsize(pcap_file)
+                print(f"  ✓ PCAP recorded: {pcap_file} ({file_size} bytes)")
+                try:
+                    metadata_cmd = ["ouster-cli", "source", hostname, "metadata"]
+                    metadata_result = subprocess.run(
+                        metadata_cmd,
+                        timeout=10,
+                        capture_output=True,
+                        text=True
+                    )
+                    if metadata_result.returncode == 0 and metadata_result.stdout:
+                        with open(metadata_file, 'w') as f:
+                            f.write(metadata_result.stdout)
+                        print(f"  ✓ Metadata saved: {metadata_file}")
+                except:
+                    pass
+                return pcap_file
+            else:
+                print("  ⚠ Timeout but no PCAP file created")
+                print("  Falling back to SDK capture...")
+        except Exception as e:
+            print(f"  ⚠ Error using ouster-cli: {e}")
+            print("  Falling back to SDK capture...")
+    
+    if HAS_OUSTER_SDK:
+        print("  Using Ouster SDK to capture PCAP...")
+        try:
+            print(f"  Connecting to sensor {hostname}...")
+            info = SensorInfo.from_hostname(hostname, lidar_port=lidar_port)
+            print(f"  ✓ Connected: {info.prod_line} (SN: {info.sn})")
+            
+            script_dir = os.path.dirname(os.path.abspath(__file__))
+            metadata_file = os.path.join(script_dir, "metadata.json")
+            with open(metadata_file, 'w') as f:
+                f.write(info.json())
+            print(f"  ✓ Saved metadata to {metadata_file}")
+            
+            print(f"  Starting packet capture on port {lidar_port}...")
+            packet_source = sensor.SensorPacketSource(hostname, lidar_port=lidar_port)
+            
+            packets = []
+            start_time = time.time()
+            packet_count = 0
+            max_packets = 2000
+            
+            try:
+                for packet in packet_source:
+                    packets.append(packet)
+                    packet_count += 1
+                    
+                    if time.time() - start_time > 10.0 or packet_count >= max_packets:
+                        break
+                    
+                    if packet_count % 100 == 0:
+                        print(f"    Captured {packet_count} packets...")
+            except Exception as e:
+                print(f"  ⚠ Packet capture ended: {e}")
+            finally:
+                packet_source.close()
+            
+            if len(packets) == 0:
+                print("  ✗ No packets captured")
+                return None
+            
+            pcap_file = os.path.join(script_dir, "ouster.pcap")
+            print(f"  Saving {len(packets)} packets to {pcap_file}...")
+            
+            pcap.record(
+                packets,
+                pcap_file,
+                src_ip=hostname,
+                dst_ip=MAC_IP,
+                lidar_port=lidar_port
+            )
+            
+            print(f"  ✓ Saved PCAP file: {pcap_file}")
+            return pcap_file
+            
+        except Exception as e:
+            print(f"  ✗ Error capturing PCAP: {e}")
+            import traceback
+            traceback.print_exc()
             return None
     
+    print("  ✗ SDK and ouster-cli not available")
     return None
 
 
-def capture_frame(port: int, timeout: float = 10.0) -> List[Tuple[float, float, float, float]]:
-    """Capture a complete frame of lidar data"""
-    print("\n[6/6] Capturing lidar frame...")
+def load_and_plot_pcap(pcap_file: str, metadata_file: Optional[str] = None, grid_resolution: Optional[float] = None):
+    """Load a PCAP file and plot the point cloud"""
+    global HAS_OUSTER_SDK, SDK_IMPORT_ERROR
     
-    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 4 * 1024 * 1024)  # 4MB buffer
-    sock.settimeout(timeout)
+    if HAS_OUSTER_SDK:
+        from ouster.sdk import pcap, core, sensor
+        from ouster.sdk.core import LidarScan, ChanField, SensorInfo, Scans
     
-    beam_altitudes, beam_azimuths = get_beam_angles()
+    print("=" * 50)
+    print("   Ouster LiDAR PCAP Visualization")
+    print("=" * 50)
+    print()
     
-    all_points = []
-    current_frame_id = None
-    packets_received = 0
+    if not HAS_OUSTER_SDK:
+        print("✗ Ouster SDK Python package not available - cannot parse PCAP files")
+        print(f"  Import error: {SDK_IMPORT_ERROR}")
+        print()
+        print("  Build the SDK first:")
+        print("    cd ouster-sdk/python")
+        print("    pip install -e .")
+        sys.exit(1)
+    
+    if not HAS_OPEN3D and not HAS_MATPLOTLIB:
+        print("✗ No visualization library available - cannot plot point cloud")
+        print("  Install Open3D (recommended): pip install open3d")
+        print("  Or install matplotlib: pip install matplotlib")
+        sys.exit(1)
+    
+    if not os.path.isabs(pcap_file):
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        pcap_file = os.path.join(script_dir, pcap_file)
+    
+    if not os.path.exists(pcap_file):
+        print(f"✗ PCAP file not found: {pcap_file}")
+        sys.exit(1)
+    
+    if metadata_file is None:
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        metadata_file = os.path.join(script_dir, "metadata.json")
+    
+    if not os.path.exists(metadata_file):
+        print(f"✗ Metadata file not found: {metadata_file}")
+        sys.exit(1)
+    
+    print(f"Loading PCAP file: {pcap_file}")
+    print(f"Using metadata: {metadata_file}")
     
     try:
-        sock.bind(('', port))
-        start_time = time.time()
+        with open(metadata_file, 'r') as f:
+            meta = json.load(f)
         
-        while time.time() - start_time < timeout:
-            try:
-                data, addr = sock.recvfrom(65536)
-                packets_received += 1
-                
-                # Parse the first column header to get frame ID
-                if len(data) >= LidarColumnHeader.SIZE:
-                    header = LidarColumnHeader(data[:LidarColumnHeader.SIZE])
-                    
-                    if current_frame_id is None:
-                        current_frame_id = header.frame_id
-                        print(f"  Starting capture of frame {current_frame_id}...")
-                    elif header.frame_id != current_frame_id:
-                        # New frame started, we have a complete frame
-                        print(f"  ✓ Captured frame {current_frame_id} with {len(all_points)} points")
-                        break
-                    
-                    # Parse points from this packet
-                    points = parse_lidar_packet(data, beam_altitudes, beam_azimuths)
-                    all_points.extend(points)
-                    
-            except socket.timeout:
-                continue
+        range_unit = meta.get("data_format", {}).get("range_unit")
+        if range_unit is None:
+            range_unit = meta.get("lidar_data_format", {}).get("range_unit")
+        if range_unit is None:
+            print("  ⚠ range_unit not found in metadata, using default 0.001 m/count")
+            range_unit = 0.001
+        else:
+            print(f"  ✓ Found range_unit: {range_unit} m/count")
         
-        print(f"  Received {packets_received} packets")
-        return all_points
+        with open(metadata_file, 'r') as f:
+            metadata_json = f.read()
+        info = SensorInfo(metadata_json)
+        print(f"  ✓ Loaded metadata: {info.prod_line} (SN: {info.sn})")
         
-    except OSError as e:
-        print(f"  ✗ Socket error: {e}")
-        return []
-    finally:
-        sock.close()
+        src = pcap.PcapScanSource(pcap_file, sensor_info=[info])
+        print(f"  ✓ Opened PCAP file")
+        
+        print("  Extracting point cloud from first scan...")
+        scans = iter(src)
+        scan_data = next(scans, None)
+        
+        if scan_data is None or len(scan_data) == 0:
+            print("  ✗ No scans found in PCAP file")
+            src.close()
+            sys.exit(1)
+        
+        scan = scan_data[0]
+        if scan is None:
+            print("  ✗ Invalid scan")
+            src.close()
+            sys.exit(1)
+        
+        print(f"  ✓ Scan: {scan.w} columns x {scan.h} pixels")
+        
+        ranges_m = scan.field(ChanField.RANGE).astype(float) * range_unit
+        
+        SPEED_OF_LIGHT = 299792458.0
+        tof_s = 2.0 * ranges_m / SPEED_OF_LIGHT
+        print(f"  ✓ Calculated ToF: min={tof_s.min():.2e}s, max={tof_s.max():.2e}s")
+        
+        from ouster.sdk.core import XYZLut
+        xyzlut = XYZLut(info)
+        xyz = xyzlut(scan.field(ChanField.RANGE))
+        
+        intensity = scan.field(ChanField.SIGNAL)
+        
+        x = xyz[:, :, 0].flatten()
+        y = xyz[:, :, 1].flatten()
+        z = xyz[:, :, 2].flatten()
+        i = intensity.flatten()
+        
+        valid = ranges_m.flatten() > 0
+        x = x[valid]
+        y = y[valid]
+        z = z[valid]
+        i = i[valid]
+        
+        print(f"  ✓ Extracted {len(x)} valid points")
+        
+        src.close()
+        
+        if grid_resolution is not None and grid_resolution > 0:
+            print(f"  Snapping points to grid (resolution: {grid_resolution} m)...")
+            x, y, z, i = snap_to_grid(x, y, z, i, grid_resolution)
+            print(f"  ✓ Grid-snapped to {len(x)} points")
+            title_suffix = f"(grid: {grid_resolution}m)"
+        else:
+            title_suffix = ""
+        
+        print("  Rendering point cloud...")
+        render_point_cloud(x, y, z, i, len(x), title_suffix)
+        
+        print("\nDone!")
+        
+    except Exception as e:
+        print(f"✗ Error loading/plotting PCAP: {e}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
 
 
-def render_point_cloud(points: List[Tuple[float, float, float, float]], max_points: int = 50000):
-    """Render the point cloud in 3D using matplotlib"""
-    if not HAS_MATPLOTLIB:
-        print("\n✗ Cannot render: matplotlib not installed")
-        print("  Install with: pip3 install matplotlib")
-        return
+def snap_to_grid(x, y, z, intensity, grid_resolution):
+    """
+    Snap points to a grid by averaging points within each grid cell.
     
-    if not points:
-        print("\n✗ No points to render")
-        return
+    Args:
+        x, y, z: Point coordinates arrays
+        intensity: Intensity values array
+        grid_resolution: Grid cell size in meters
     
-    print(f"\nRendering {len(points)} points (showing up to {max_points})...")
+    Returns:
+        Tuple of (x_grid, y_grid, z_grid, i_grid) with averaged grid points
+    """
+    import numpy as np
     
-    # Convert to numpy arrays
-    points_array = np.array(points)
+    if len(x) == 0:
+        return x, y, z, intensity
     
-    # Subsample if too many points
-    if len(points_array) > max_points:
-        indices = np.random.choice(len(points_array), max_points, replace=False)
-        points_array = points_array[indices]
+    # Calculate grid cell indices for each point
+    x_cell = np.floor(x / grid_resolution).astype(int)
+    y_cell = np.floor(y / grid_resolution).astype(int)
+    z_cell = np.floor(z / grid_resolution).astype(int)
     
-    x = points_array[:, 0]
-    y = points_array[:, 1]
-    z = points_array[:, 2]
-    intensity = points_array[:, 3]
+    # Create a dictionary to group points by grid cell
+    grid_dict = {}
+    for i in range(len(x)):
+        cell_key = (x_cell[i], y_cell[i], z_cell[i])
+        if cell_key not in grid_dict:
+            grid_dict[cell_key] = {'x': [], 'y': [], 'z': [], 'i': []}
+        grid_dict[cell_key]['x'].append(x[i])
+        grid_dict[cell_key]['y'].append(y[i])
+        grid_dict[cell_key]['z'].append(z[i])
+        grid_dict[cell_key]['i'].append(intensity[i])
     
-    # Create figure
-    fig = plt.figure(figsize=(14, 10))
+    # Average points within each grid cell
+    x_grid = []
+    y_grid = []
+    z_grid = []
+    i_grid = []
     
-    # 3D scatter plot
+    for cell_key, points in grid_dict.items():
+        x_grid.append(np.mean(points['x']))
+        y_grid.append(np.mean(points['y']))
+        z_grid.append(np.mean(points['z']))
+        i_grid.append(np.mean(points['i']))
+    
+    return np.array(x_grid), np.array(y_grid), np.array(z_grid), np.array(i_grid)
+
+
+def render_point_cloud(x, y, z, intensity, num_points, title_suffix=""):
+    """Render point cloud using Open3D (preferred) or matplotlib (fallback)"""
+    import numpy as np
+    
+    if HAS_OPEN3D:
+        render_point_cloud_open3d(x, y, z, intensity, num_points, title_suffix)
+    elif HAS_MATPLOTLIB:
+        render_point_cloud_matplotlib(x, y, z, intensity, num_points, title_suffix)
+    else:
+        print("✗ No visualization library available")
+        sys.exit(1)
+
+
+def render_point_cloud_open3d(x, y, z, intensity, num_points, title_suffix=""):
+    """Render point cloud using Open3D - fast, interactive, best for large point clouds"""
+    import numpy as np
+    
+    points = np.column_stack((x, y, z))
+    
+    pcd = o3d.geometry.PointCloud()
+    pcd.points = o3d.utility.Vector3dVector(points)
+    
+    i_norm = (intensity - intensity.min()) / (intensity.max() - intensity.min() + 1e-6)
+    
+    if HAS_MATPLOTLIB:
+        colors = plt.cm.viridis(i_norm)[:, :3]
+    else:
+        colors = viridis_colormap(i_norm)
+    
+    pcd.colors = o3d.utility.Vector3dVector(colors)
+    
+    title = f'Ouster LiDAR Point Cloud ({num_points:,} points)'
+    if title_suffix:
+        title += f" {title_suffix}"
+    
+    print(f"  Opening interactive 3D viewer...")
+    print(f"  Controls: Mouse drag to rotate, Shift+drag to pan, Scroll to zoom")
+    print(f"  Press 'Q' or close window to exit")
+    
+    o3d.visualization.draw_geometries(
+        [pcd],
+        window_name=title,
+        width=1920,
+        height=1080,
+        point_show_normal=False
+    )
+
+
+def viridis_colormap(values):
+    """Viridis-like colormap: purple -> blue -> green -> yellow"""
+    import numpy as np
+    
+    values = np.clip(values, 0, 1)
+    
+    r = np.interp(values, [0, 0.25, 0.5, 0.75, 1.0], [0.27, 0.16, 0.13, 0.33, 0.99])
+    g = np.interp(values, [0, 0.25, 0.5, 0.75, 1.0], [0.00, 0.11, 0.43, 0.68, 0.99])
+    b = np.interp(values, [0, 0.25, 0.5, 0.75, 1.0], [0.33, 0.54, 0.71, 0.60, 0.70])
+    
+    return np.column_stack([r, g, b])
+
+
+def render_point_cloud_matplotlib(x, y, z, intensity, num_points, title_suffix=""):
+    """Render point cloud using matplotlib - fallback option"""
+    import numpy as np
+    
+    i_norm = (intensity - intensity.min()) / (intensity.max() - intensity.min() + 1e-6)
+    
+    fig = plt.figure(figsize=(12, 8))
     ax = fig.add_subplot(111, projection='3d')
     
-    # Color by intensity (or height)
-    colors = plt.cm.viridis(intensity)
-    
-    scatter = ax.scatter(x, y, z, c=intensity, cmap='viridis', s=0.5, alpha=0.6)
+    scatter = ax.scatter(x, y, z, c=i_norm, cmap='viridis', s=0.5, alpha=0.6)
     
     ax.set_xlabel('X (m)')
     ax.set_ylabel('Y (m)')
     ax.set_zlabel('Z (m)')
-    ax.set_title(f'Ouster OS0-128 Point Cloud\n{len(points_array)} points')
+    title = f'Ouster LiDAR Point Cloud ({num_points:,} points)'
+    if title_suffix:
+        title += f" {title_suffix}"
+    ax.set_title(title)
     
-    # Equal aspect ratio
-    max_range = np.array([x.max() - x.min(), y.max() - y.min(), z.max() - z.min()]).max() / 2.0
-    mid_x = (x.max() + x.min()) * 0.5
-    mid_y = (y.max() + y.min()) * 0.5
-    mid_z = (z.max() + z.min()) * 0.5
-    ax.set_xlim(mid_x - max_range, mid_x + max_range)
-    ax.set_ylim(mid_y - max_range, mid_y + max_range)
-    ax.set_zlim(mid_z - max_range, mid_z + max_range)
-    
-    plt.colorbar(scatter, label='Intensity', shrink=0.5)
-    
-    # Add statistics
-    stats_text = f"""
-Points: {len(points_array):,}
-X range: [{x.min():.2f}, {x.max():.2f}] m
-Y range: [{y.min():.2f}, {y.max():.2f}] m  
-Z range: [{z.min():.2f}, {z.max():.2f}] m
-"""
-    fig.text(0.02, 0.02, stats_text, fontsize=9, family='monospace',
-             bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
-    
+    plt.colorbar(scatter, ax=ax, label='Intensity (normalized)')
     plt.tight_layout()
-    
-    # Save to file
-    output_file = "/Users/rgrigorii/Desktop/projects/thegame/camera_system/ouster/ouster_pointcloud.png"
-    plt.savefig(output_file, dpi=150, bbox_inches='tight')
-    print(f"  ✓ Saved to {output_file}")
-    
-    # Show interactive plot
-    print("  Displaying interactive 3D view (close window to exit)...")
     plt.show()
 
 
-# ============================================================================
-# Main
-# ============================================================================
-
 def main():
+    parser = argparse.ArgumentParser(
+        description="Ouster LiDAR PCAP Capture and Visualization",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  # Capture live lidar data to PCAP
+  python3 setup_ouster.py
+  
+  # Load and plot a saved PCAP file (uses Open3D if available, matplotlib otherwise)
+  python3 setup_ouster.py --load-packet ouster.pcap --metadata metadata.json
+  
+  # Load and plot with grid snapping (10cm resolution)
+  python3 setup_ouster.py --load-packet ouster.pcap --grid-resolution 0.1
+
+Note: For best visualization, install Open3D: pip install open3d
+      Open3D provides interactive 3D viewing with rotation, zoom, and pan controls.
+        """
+    )
+    
+    parser.add_argument(
+        '--load-packet',
+        '--load_packet',
+        nargs='?',
+        const='ouster.pcap',
+        metavar='PCAP_FILE',
+        dest='load_packet',
+        help='Load and plot a saved PCAP file (default: ouster.pcap)'
+    )
+    
+    parser.add_argument(
+        '--metadata',
+        metavar='METADATA_FILE',
+        help='Metadata JSON file (default: metadata.json)'
+    )
+    
+    parser.add_argument(
+        '--grid-resolution',
+        '--grid_resolution',
+        type=float,
+        metavar='RESOLUTION',
+        dest='grid_resolution',
+        help='Snap points to grid with given resolution in meters (e.g., 0.1 for 10cm grid)'
+    )
+    
+    args = parser.parse_args()
+    
+    if args.load_packet is not None:
+        pcap_file = args.load_packet if args.load_packet else 'ouster.pcap'
+        load_and_plot_pcap(pcap_file, args.metadata, args.grid_resolution)
+        return
+    
     print("=" * 50)
-    print("   Ouster LiDAR Setup & Visualization")
+    print("   Ouster LiDAR PCAP Capture")
     print("=" * 50)
     print()
     
-    # Step 1: Check Ethernet interface
-    interface = check_ethernet_interface()
-    if not interface:
-        sys.exit(1)
-    
-    # Step 2: Configure IP address
-    if not configure_ip_address(interface):
-        sys.exit(1)
-    
-    # Step 3: Test connectivity
-    if not test_connectivity():
-        sys.exit(1)
-    
-    # Step 4: Configure sensor
-    udp_dest, lidar_port = configure_sensor()
-    
-    # Step 5: Test data flow
-    test_packet = test_data_flow(lidar_port)
-    if not test_packet:
-        print("\n" + "=" * 50)
-        print("   Setup Incomplete - Data Not Flowing")
-        print("=" * 50)
-        print("\nPossible issues:")
-        print(f"  1. Firewall blocking UDP port {lidar_port}")
-        print("  2. Another application using the port")
-        print("  3. Sensor needs power cycle")
-        print(f"\nTry: sudo lsof -i UDP:{lidar_port}")
+    packet_file = capture_pcap(OUSTER_IP, LIDAR_PORT)
+    if not packet_file:
+        print("\n✗ Failed to capture PCAP file")
         sys.exit(1)
     
     print("\n" + "=" * 50)
-    print("   Setup Complete!")
+    print("   Capture Complete!")
     print("=" * 50)
     print()
-    print(f"Sensor: OS-0-128 (SN: 122212001833)")
-    print(f"IP: {OUSTER_IP}")
-    print(f"UDP Port: {lidar_port}")
-    print(f"UDP Dest: {udp_dest}")
+    print(f"PCAP file: {packet_file}")
+    print(f"Metadata file: metadata.json")
     print()
-    
-    # Step 6: Capture and render frame
-    points = capture_frame(lidar_port)
-    
-    if points:
-        render_point_cloud(points)
-    else:
-        print("\n✗ Failed to capture frame")
-        sys.exit(1)
-    
-    print("\nDone!")
+    print("To visualize, run:")
+    print(f"  python3 setup_ouster.py --load-packet {os.path.basename(packet_file)}")
+    print()
 
 
 if __name__ == "__main__":

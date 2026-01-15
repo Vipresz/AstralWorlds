@@ -1,5 +1,11 @@
 cmake_minimum_required(VERSION 3.22)
-project(GameEngine VERSION 0.1.0 LANGUAGES CXX)
+
+# Enable OBJCXX on macOS for Objective-C++ support (needed for Gear 360 Bluetooth)
+if(APPLE)
+    project(GameEngine VERSION 0.1.0 LANGUAGES CXX OBJCXX)
+else()
+    project(GameEngine VERSION 0.1.0 LANGUAGES CXX)
+endif()
 
 # C++ Standard
 set(CMAKE_CXX_STANDARD 17)

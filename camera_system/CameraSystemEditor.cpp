@@ -107,6 +107,9 @@ CameraSystemEditor::CameraSystemEditor()
     , m_tofTsdfWeightDecay(TOF_TSDF_WEIGHT_DECAY)
     // === Ouster LiDAR (disabled by default) ===
     , m_ousterEnabled(false)
+    , m_ousterPacketLoaded(false)
+    , m_ousterPcapFile("")
+    , m_ousterMetadataFile("")
     , m_ousterHostname("172.17.1.56")
     , m_lastOusterTimestamp(0.0)
     // === Smart Occupancy - Toggles and Sliders (from UIDefaults.h) ===
@@ -714,6 +717,110 @@ bool CameraSystemEditor::AddObject(const std::string& meshFilePath, const std::s
     
     m_objects.push_back(std::move(obj));
     return true;
+}
+
+bool CameraSystemEditor::LoadOusterPacket(const std::string& packetFile) {
+    LOG_INFO_FMT("CameraSystem", "Loading Ouster packet from file: %s", packetFile.c_str());
+    
+    if (!m_ousterStream) {
+        LOG_ERROR("CameraSystem", "Ouster stream not initialized");
+        return false;
+    }
+    
+    // Stop any active streaming to prevent overwriting loaded data
+    if (m_ousterStream->IsStreaming()) {
+        LOG_INFO("CameraSystem", "Stopping active Ouster streaming before loading packet");
+        m_ousterStream->StopStreaming();
+    }
+    
+    // Load the packet file
+    if (!m_ousterStream->LoadPacketFromFile(packetFile)) {
+        LOG_ERROR_FMT("CameraSystem", "Failed to load packet from file: %s", packetFile.c_str());
+        return false;
+    }
+    
+    // Enable Ouster mode so the data will be displayed
+    m_ousterEnabled = true;
+    m_ousterPacketLoaded = true;  // Mark that we loaded from file - don't start streaming
+    // Enable TOF data display so RenderPointCloud will render the Ouster data
+    // (RenderPointCloud checks m_tofDataEnabled || m_ousterEnabled, but we enable both for compatibility)
+    m_tofDataEnabled = true;
+    
+    // Disable simulated TOF generation - we only want to show the loaded packet data
+    // The UpdatePointCloud will check m_ousterEnabled first and return early,
+    // so simulated TOF won't run, but we'll be explicit about it
+    LOG_INFO("CameraSystem", "Ouster packet loaded - streaming disabled, simulated TOF disabled");
+    LOG_INFO("CameraSystem", "Only loaded packet data will be displayed");
+    
+    // Force an immediate update to populate buffers and make data visible
+    // This ensures the data is displayed right away without needing to toggle
+    UpdatePointCloud();
+    
+    return true;
+}
+
+bool CameraSystemEditor::LoadOusterPcap(const std::string& pcapFile, const std::string& metadataFile) {
+    LOG_INFO_FMT("CameraSystem", "Loading Ouster PCAP from file: %s with metadata: %s", pcapFile.c_str(), metadataFile.c_str());
+    
+    if (!m_ousterStream) {
+        LOG_ERROR("CameraSystem", "Ouster stream not initialized");
+        return false;
+    }
+    
+    // Stop any active streaming to prevent overwriting loaded data
+    if (m_ousterStream->IsStreaming()) {
+        LOG_INFO("CameraSystem", "Stopping active Ouster streaming before loading PCAP");
+        m_ousterStream->StopStreaming();
+    }
+    
+    // Disconnect if connected to ensure clean state
+    if (m_ousterStream->IsConnected()) {
+        LOG_INFO("CameraSystem", "Disconnecting from sensor before loading PCAP");
+        m_ousterStream->Disconnect();
+    }
+    
+    // Load the PCAP file with metadata
+    if (!m_ousterStream->LoadPcapFromFile(pcapFile, metadataFile)) {
+        LOG_ERROR_FMT("CameraSystem", "Failed to load PCAP from file: %s", pcapFile.c_str());
+        return false;
+    }
+    
+    // Enable Ouster mode so the data will be displayed
+    m_ousterEnabled = true;
+    m_ousterPacketLoaded = true;
+    m_tofDataEnabled = true;
+    
+    LOG_INFO("CameraSystem", "Ouster PCAP loaded - streaming disabled, simulated TOF disabled");
+    LOG_INFO("CameraSystem", "Only loaded PCAP data will be displayed");
+    
+    // Force an immediate update to populate buffers and make data visible
+    // This will poll the loaded data and populate the point cloud buffer
+    UpdatePointCloud();
+    
+    // Verify that data was actually loaded into the buffer
+    if (m_pointCloud[m_pointCloudReadBuffer].empty() && m_pointCloud[m_pointCloudWriteBuffer].empty()) {
+        LOG_WARNING("CameraSystem", "PCAP loaded but point cloud buffer is empty - attempting to poll again");
+        // Try polling once more
+        UpdatePointCloud();
+    }
+    
+    LOG_INFO_FMT("CameraSystem", "PCAP load complete - point cloud buffer has %zu points", 
+                 m_pointCloud[m_pointCloudReadBuffer].size());
+    
+    return true;
+}
+
+void CameraSystemEditor::SetOusterPcapFiles(const std::string& pcapFile, const std::string& metadataFile) {
+    m_ousterPcapFile = pcapFile;
+    m_ousterMetadataFile = metadataFile;
+    LOG_INFO_FMT("CameraSystem", "Set PCAP files: %s, metadata: %s", pcapFile.c_str(), metadataFile.c_str());
+}
+
+void CameraSystemEditor::DisableAllSensors() {
+    m_ousterEnabled = false;
+    m_tofDataEnabled = false;
+    m_ousterPacketLoaded = false;
+    LOG_INFO("CameraSystem", "All sensors disabled (Ouster and TOF)");
 }
 
 void CameraSystemEditor::RemoveObject(size_t index) {
@@ -1490,7 +1597,11 @@ glm::vec3 CameraSystemEditor::UnprojectPixelWithMatrices(const glm::vec2& screen
 }
 
 void CameraSystemEditor::UpdatePointCloud() {
-    LOG_INFO("CameraSystem", "UpdatePointCloud called");
+    // Reduce logging frequency - only log every 60 frames (about once per second at 60fps)
+    static int updateCounter = 0;
+    if (updateCounter++ % 60 == 0) {
+        LOG_INFO("CameraSystem", "UpdatePointCloud called");
+    }
     
     // ========================================================================
     // TOF PIPELINE START
@@ -1510,81 +1621,197 @@ void CameraSystemEditor::UpdatePointCloud() {
     // Increment frame processing counter to refresh noise at every frame
     m_frameProcessingCounter++;
     
-    // Clear storage (this removes all points)
-    m_pointCloudGrid.clear();
-    m_gridAccumulators.clear();
-    // Clear filtered TOF write buffer (we'll write new data to it)
-    m_filteredTofData[m_filteredTofWriteBuffer].clear();
-    // Clear point cloud write buffer (we'll process into it)
-    m_pointCloud[m_pointCloudWriteBuffer].clear();
-    
     // ========================================================================
     // OUSTER LIDAR MODE - Use real sensor data instead of simulated TOF
     // ========================================================================
+    // Check Ouster mode FIRST before clearing buffers
+    // This ensures loaded packet data is not overwritten
     if (m_ousterEnabled) {
+        // Don't clear buffers if we have loaded packet data - it's already in m_loadedPacketPoints
+        // Only clear if we're streaming live data
+        if (!m_ousterPacketLoaded) {
+            // Clear storage for live streaming (this removes old points)
+            m_pointCloudGrid.clear();
+            m_gridAccumulators.clear();
+            // Clear filtered TOF write buffer (we'll write new data to it)
+            m_filteredTofData[m_filteredTofWriteBuffer].clear();
+            // Clear point cloud write buffer (we'll process into it)
+            m_pointCloud[m_pointCloudWriteBuffer].clear();
+        }
+    } else {
+        // Clear storage (this removes all points) - only for TOF mode
+        m_pointCloudGrid.clear();
+        m_gridAccumulators.clear();
+        // Clear filtered TOF write buffer (we'll write new data to it)
+        m_filteredTofData[m_filteredTofWriteBuffer].clear();
+        // Clear point cloud write buffer (we'll process into it)
+        m_pointCloud[m_pointCloudWriteBuffer].clear();
+    }
+    
+    // Debug: Log Ouster status every 60 frames (about once per second)
+    static int ousterDebugCounter = 0;
+    if (++ousterDebugCounter >= 60) {
+        ousterDebugCounter = 0;
+        LOG_INFO_FMT("CameraSystem", "Ouster status: enabled=%d, stream=%p, streaming=%d",
+                     m_ousterEnabled ? 1 : 0,
+                     (void*)m_ousterStream.get(),
+                     m_ousterStream ? (m_ousterStream->IsStreaming() ? 1 : 0) : 0);
+    }
+    
+    if (m_ousterEnabled) {
+        // Only log "Ouster mode active" every 60 frames to reduce log spam
+        if (updateCounter % 60 == 0) {
+            LOG_INFO("CameraSystem", "Ouster mode active - processing...");
+        }
+        
         if (!m_ousterStream) {
-            LOG_WARNING("CameraSystem", "Ouster enabled but stream not initialized");
+            LOG_WARNING("CameraSystem", "Ouster enabled but stream not initialized!");
             return;
         }
         
-        // Make sure streaming is started
-        if (!m_ousterStream->IsStreaming()) {
-            LOG_INFO("CameraSystem", "Starting Ouster stream...");
+        // Only start streaming if we're not using a loaded packet file
+        // If packet was loaded from file, we don't want to start streaming
+        if (!m_ousterPacketLoaded) {
+            // Make sure connected and streaming is started
             if (!m_ousterStream->IsConnected()) {
-                m_ousterStream->Connect();
+                LOG_INFO("CameraSystem", "Connecting to Ouster sensor...");
+                if (!m_ousterStream->Connect()) {
+                    LOG_ERROR("CameraSystem", "Failed to connect to Ouster sensor");
+                    // If connection fails, disable Ouster mode to prevent fallback to file data
+                    m_ousterEnabled = false;
+                    // Clear point cloud buffer to remove stale data
+                    m_pointCloud[m_pointCloudWriteBuffer].clear();
+                    m_pointCloud[m_pointCloudReadBuffer].clear();
+                    return;
+                }
             }
-            m_ousterStream->StartStreaming();
+            
+            if (!m_ousterStream->IsStreaming()) {
+                LOG_INFO("CameraSystem", "Starting Ouster stream...");
+                m_ousterStream->StartStreaming();
+                // Give the streaming thread time to start and bind to the port
+                std::this_thread::sleep_for(std::chrono::milliseconds(1000));
+                
+                // Verify streaming actually started - if not, disable Ouster mode
+                if (!m_ousterStream->IsStreaming()) {
+                    LOG_ERROR("CameraSystem", "Failed to start Ouster streaming");
+                    m_ousterEnabled = false;
+                    // Clear point cloud buffer to remove stale data
+                    m_pointCloud[m_pointCloudWriteBuffer].clear();
+                    m_pointCloud[m_pointCloudReadBuffer].clear();
+                    return;
+                }
+            }
+            
+            // Only poll for data if we're actually streaming (not from file)
+            if (!m_ousterStream->IsStreaming()) {
+                LOG_WARNING("CameraSystem", "Ouster enabled but not streaming - skipping data poll");
+                return;
+            }
+        } else {
+            // Packet loaded from file - don't start streaming, just use the loaded data
+            LOG_INFO("CameraSystem", "Using loaded packet data (streaming disabled)");
         }
         
         std::vector<PointCloudPoint> ousterPoints;
         double timestamp;
         
         // Poll for new Ouster data
-        if (m_ousterStream->PollPointCloud(ousterPoints, timestamp)) {
-            m_lastOusterTimestamp = timestamp;
-            
-            LOG_INFO_FMT("CameraSystem", "Received %zu points from Ouster (timestamp: %.3f)", 
-                        ousterPoints.size(), timestamp);
-            
-            // Copy Ouster points to filtered TOF buffer (bypasses simulated depth capture)
-            m_filteredTofData[m_filteredTofWriteBuffer] = std::move(ousterPoints);
-            
-            // Apply gridding if enabled
-            if (m_vipresGridMode != TOFGridMode::Disabled) {
-                m_tofProcessing.ApplyGridding(m_filteredTofData[m_filteredTofWriteBuffer], 
-                                              m_pointCloudGrid, 
-                                              m_vipresGridMode, 
-                                              m_vipresGridSize);
-                
-                // Extract gridded points to write buffer
-                for (const auto& pair : m_pointCloudGrid) {
-                    m_pointCloud[m_pointCloudWriteBuffer].push_back(pair.second);
-                }
-            } else {
-                // No gridding - use raw Ouster points
-                m_pointCloud[m_pointCloudWriteBuffer] = m_filteredTofData[m_filteredTofWriteBuffer];
-            }
-            
-            // Swap buffers
-            m_filteredTofReadBuffer = m_filteredTofWriteBuffer;
-            m_filteredTofWriteBuffer = 1 - m_filteredTofWriteBuffer;
-            m_pointCloudReadBuffer = m_pointCloudWriteBuffer;
-            m_pointCloudWriteBuffer = 1 - m_pointCloudWriteBuffer;
-        } else {
-            // No new data this frame - keep previous data (don't clear)
-            LOG_DEBUG("CameraSystem", "No new Ouster data this frame");
+        bool gotData = m_ousterStream->PollPointCloud(ousterPoints, timestamp);
+        
+        // Static flags for tracking no-data state (declared here so we can reset them when we get data)
+        static bool hasLoggedNoData = false;
+        static bool bufferClearedForNoData = false;
+        
+        // Only log polling details every 60 frames to reduce log spam
+        if (updateCounter % 60 == 0) {
+            LOG_INFO_FMT("CameraSystem", "Ouster poll: gotData=%d, queueSize=%zu, packetLoaded=%d, streaming=%d", 
+                         gotData ? 1 : 0, ousterPoints.size(), m_ousterPacketLoaded ? 1 : 0,
+                         m_ousterStream->IsStreaming() ? 1 : 0);
         }
         
-        // Always return when Ouster is enabled - never fall through to simulated TOF
-        return;
-    }
-    
-    // ========================================================================
-    // SIMULATED TOF MODE - Render depth from virtual cameras
-    // ========================================================================
-    if (!m_tofDataEnabled || m_cameras.empty()) {
-        return;
-    }
+        // Only process data if we got new data AND we're in the correct mode
+        // For live streaming mode (!m_ousterPacketLoaded), only process if we're actually streaming
+        // For file mode (m_ousterPacketLoaded), process the loaded file data
+        if (gotData) {
+            // Reset the no-data flags since we successfully got data
+            hasLoggedNoData = false;
+            bufferClearedForNoData = false;
+            // If we're in live mode but not streaming, don't process data (might be old file data)
+            if (!m_ousterPacketLoaded && !m_ousterStream->IsStreaming()) {
+                LOG_WARNING("CameraSystem", "Lidar Live enabled but not streaming - ignoring data (may be from previous file load)");
+                return;
+            }
+            
+            // Process the data
+            m_lastOusterTimestamp = timestamp;
+            
+            // Put Ouster data into filtered TOF buffer so it goes through the TOF pipeline
+            // This ensures gridding, low-pass, smart occupancy, etc. are applied
+            m_filteredTofData[m_filteredTofWriteBuffer] = std::move(ousterPoints);
+            
+            // Reset static flags in the else block below (they're declared there)
+            // We'll access them through a helper or reset them when we get data
+            // For now, just log when we receive data
+            if (updateCounter % 60 == 0) {
+                LOG_INFO_FMT("CameraSystem", "Ouster: %zu points loaded into TOF pipeline buffer (will be processed by TOF pipeline)", 
+                            m_filteredTofData[m_filteredTofWriteBuffer].size());
+            }
+            
+            // Continue to TOF post-processing pipeline to apply gridding, filters, etc.
+            // Don't return early - let the TOF pipeline process the Ouster data
+            // The buffer swap will happen at line 2014, same as for TOF camera data
+        } else {
+            // No data received
+            // If we're in live streaming mode and not receiving data, we should not clear
+            // the buffer every frame - only clear once when switching modes or on first failure
+            // This prevents flickering and excessive logging
+            // (Static flags are declared above in the gotData check section)
+            
+            if (!m_ousterPacketLoaded && m_ousterStream->IsStreaming()) {
+                // We're in live mode and streaming, but no data received
+                // Only clear buffer once when we first detect no data, not every frame
+                if (!bufferClearedForNoData) {
+                    m_pointCloud[m_pointCloudWriteBuffer].clear();
+                    m_pointCloud[m_pointCloudReadBuffer].clear();
+                    m_filteredTofData[m_filteredTofWriteBuffer].clear();
+                    bufferClearedForNoData = true;
+                    LOG_INFO("CameraSystem", "Ouster: No data available - cleared buffers (waiting for data...)");
+                }
+                if (!hasLoggedNoData) {
+                    LOG_INFO("CameraSystem", "Ouster: Streaming active but no data received yet");
+                    hasLoggedNoData = true;
+                }
+            } else {
+                // File mode or not streaming - log normally but less frequently
+                if (updateCounter % 60 == 0) {
+                    LOG_INFO("CameraSystem", "Ouster: No data available this frame");
+                }
+                // Reset flags when not in live streaming mode
+                hasLoggedNoData = false;
+                bufferClearedForNoData = false;
+            }
+            
+            // Don't continue to TOF pipeline if we have no data
+            return;
+        }
+        
+        // Reset static flags when we successfully get data (after the if/else block)
+        // Access the static variables by declaring them outside the else block
+        // Actually, we can't easily reset them here. Instead, we'll reset them when we get data
+        // by checking if we're in the gotData branch
+        
+        // Ouster data has been loaded into m_filteredTofData[m_filteredTofWriteBuffer]
+        // Continue to TOF post-processing pipeline to process it (gridding, filters, etc.)
+        // Skip TOF camera rendering since we're using Ouster data, but continue to TOF pipeline
+    } else {
+        // Ouster not enabled - continue with normal TOF camera rendering
+        // ========================================================================
+        // SIMULATED TOF MODE - Render depth from virtual cameras
+        // ========================================================================
+        if (!m_tofDataEnabled || m_cameras.empty()) {
+            return;
+        }
     
     int fullWidth, fullHeight;
     glfwGetFramebufferSize(m_glfwWindow, &fullWidth, &fullHeight);
@@ -1824,8 +2051,10 @@ void CameraSystemEditor::UpdatePointCloud() {
     }
     
     UpdateCamera();
+    }
     
     // Swap filtered TOF data: write buffer becomes read buffer for processing
+    // This swap happens for both TOF camera data and Ouster data
     std::swap(m_filteredTofReadBuffer, m_filteredTofWriteBuffer);
     
     // ------------------------------------------------------------------------
@@ -2163,7 +2392,9 @@ void CameraSystemEditor::RenderPointCloud() {
                     m_pointCloudBuffersInitialized, m_pointCloud[m_pointCloudReadBuffer].size());
     }
     
-    if (!m_tofDataEnabled || m_pointCloud[m_pointCloudReadBuffer].empty() || !m_pointCloudBuffersInitialized) {
+    // Allow rendering if either TOF or Ouster is enabled
+    bool shouldRender = (m_tofDataEnabled || m_ousterEnabled);
+    if (!shouldRender || m_pointCloud[m_pointCloudReadBuffer].empty() || !m_pointCloudBuffersInitialized) {
         return;
     }
     
@@ -2192,12 +2423,19 @@ void CameraSystemEditor::RenderPointCloud() {
     glEnable(GL_DEPTH_TEST);
     glPointSize(2.0f);  // Match old implementation point size
     
-    // Filter points by weight threshold and apply render color mode before rendering
+    // Filter points by weight threshold and range (-1 to 1 meter = -100 to 100 cm)
+    // Also apply render color mode before rendering
+    const float minRange = -100.0f;  // -1 meter in cm
+    const float maxRange = 100.0f;   // +1 meter in cm
     std::vector<PointCloudPoint> filteredPoints;
     filteredPoints.reserve(m_pointCloud[m_pointCloudReadBuffer].size());
     for (const auto& point : m_pointCloud[m_pointCloudReadBuffer]) {
         if (point.weight >= m_weightThreshold) {
-            PointCloudPoint renderPoint = point;
+            // Filter by range: only show points within -1 to +1 meters on all axes
+            if (point.position.x >= minRange && point.position.x <= maxRange &&
+                point.position.y >= minRange && point.position.y <= maxRange &&
+                point.position.z >= minRange && point.position.z <= maxRange) {
+                PointCloudPoint renderPoint = point;
             
             // Apply render color mode (stored color is preserved in original point)
             switch (m_tofRenderColorMode) {
@@ -2236,7 +2474,8 @@ void CameraSystemEditor::RenderPointCloud() {
                     break;
             }
             
-            filteredPoints.push_back(renderPoint);
+                filteredPoints.push_back(renderPoint);
+            }
         }
     }
     
@@ -2684,15 +2923,19 @@ void CameraSystemEditor::RenderScene() {
     glBindTexture(GL_TEXTURE_2D, defaultWhiteTexture);
     
     // Render objects - check if we should render them based on camera type
-    bool shouldRenderObjects = true;
-    size_t activeIdx = m_cameraSystem.GetActiveCameraIndex();
-    if (activeIdx < m_cameras.size()) {
-        const Camera& activeCam = m_cameras[activeIdx];
-        // If free camera is active, check the toggle
-        if (activeCam.canMove) {
-            shouldRenderObjects = m_vipresFreeCameraObjectEnabled;
+    // When Ouster LiDAR is enabled, don't render OBJ models - only show point cloud
+    bool shouldRenderObjects = !m_ousterEnabled;  // Skip objects when using Ouster
+    
+    if (shouldRenderObjects) {
+        size_t activeIdx = m_cameraSystem.GetActiveCameraIndex();
+        if (activeIdx < m_cameras.size()) {
+            const Camera& activeCam = m_cameras[activeIdx];
+            // If free camera is active, check the toggle
+            if (activeCam.canMove) {
+                shouldRenderObjects = m_vipresFreeCameraObjectEnabled;
+            }
+            // For other cameras (anchor/view), always render objects
         }
-        // For other cameras (anchor/view), always render objects
     }
     
     if (shouldRenderObjects) {
