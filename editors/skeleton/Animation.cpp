@@ -5,7 +5,7 @@
 #include <algorithm>
 #include <cmath>
 #include <glm/gtc/quaternion.hpp>
-#include "../../engine/platform/Logger.h"
+#include "platform/Logger.h"
 
 namespace Engine {
 namespace Editors {

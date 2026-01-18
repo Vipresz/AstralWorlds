@@ -57,6 +57,7 @@ __pycache__/
 *.pyc
 *.pyo
 *.joblib
-
-# Large generated model headers
-camera_system/DensitySDFModel.h
+# Large data files
+*.pcap
+*.bag
+*.bin

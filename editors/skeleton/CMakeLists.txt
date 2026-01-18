@@ -77,16 +77,16 @@ if(USE_HOMEBREW)
         ${BREW_PREFIX}/opt/glm/include
         ${NUKLEAR_DIR}
         ${NUKLEAR_DIR}/demo/glfw_opengl3
-        ${CMAKE_CURRENT_SOURCE_DIR}/../../engine
-        ${CMAKE_CURRENT_SOURCE_DIR}/../../engine/platform
+        ${CMAKE_CURRENT_SOURCE_DIR}/../../RenderingEngine
+        ${CMAKE_CURRENT_SOURCE_DIR}/../../RenderingEngine/platform
     )
 else()
 include_directories(
         ${GAME_LIBS_DIR}/glm-1.0.2
         ${NUKLEAR_DIR}
         ${NUKLEAR_DIR}/demo/glfw_opengl3
-    ${CMAKE_CURRENT_SOURCE_DIR}/../../engine
-    ${CMAKE_CURRENT_SOURCE_DIR}/../../engine/platform
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../RenderingEngine
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../RenderingEngine/platform
 )
 endif()
 
