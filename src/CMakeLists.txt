@@ -54,9 +54,9 @@ set_target_properties(Game PROPERTIES
 
 # Copy shader files to build directory so they can be found at runtime
 file(GLOB SHADER_FILES
-    "${CMAKE_CURRENT_SOURCE_DIR}/../engine/platform/render/shaders/*.vert"
-    "${CMAKE_CURRENT_SOURCE_DIR}/../engine/platform/render/shaders/*.frag"
-    "${CMAKE_CURRENT_SOURCE_DIR}/../engine/platform/render/shaders/*.geom"
+    "${CMAKE_CURRENT_SOURCE_DIR}/../RenderingEngine/platform/render/shaders/*.vert"
+    "${CMAKE_CURRENT_SOURCE_DIR}/../RenderingEngine/platform/render/shaders/*.frag"
+    "${CMAKE_CURRENT_SOURCE_DIR}/../RenderingEngine/platform/render/shaders/*.geom"
 )
 
 # Copy shaders to the same directory as the executable (using generator expression)

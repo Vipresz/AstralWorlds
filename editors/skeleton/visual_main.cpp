@@ -1,5 +1,5 @@
 #include "VisualSkeletonEditor.h"
-#include "../../engine/platform/Logger.h"
+#include "platform/Logger.h"
 #include "ConsoleRedirect.h"
 #include <iostream>
 #include <string>

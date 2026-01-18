@@ -3,11 +3,11 @@
 #endif
 #include "VisualSkeletonEditor.h"
 #include "LibIGLWrapper.h"
-#include "../../engine/platform/render/Window.h"
-#include "../../engine/platform/render/Shader.h"
-#include "../../engine/platform/render/Model.h"
-#include "../../engine/platform/render/Mesh.h"
-#include "../../engine/platform/Logger.h"
+#include "platform/render/Window.h"
+#include "platform/render/Shader.h"
+#include "platform/render/Model.h"
+#include "platform/render/Mesh.h"
+#include "platform/Logger.h"
 #include <filesystem>
 
 #define NK_INCLUDE_FIXED_TYPES
