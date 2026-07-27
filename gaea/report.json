@@ -1,0 +1,45 @@
+{
+  "$id": "1",
+  "Resolution": 1024,
+  "NodeCount": 5,
+  "Result": "Success",
+  "StartTime": "2026-03-17T14:01:12.0768498-07:00",
+  "EndTime": "2026-03-17T14:01:15.4240098-07:00",
+  "Duration": "00:00:03.3471600",
+  "SecondsTaken": {
+    "$id": "2",
+    "$values": [
+      {
+        "$id": "3",
+        "Item1": "Erosion",
+        "Item2": "00:00:00.1430000"
+      },
+      {
+        "$id": "4",
+        "Item1": "Canyon",
+        "Item2": "00:00:01.2480000"
+      },
+      {
+        "$id": "5",
+        "Item1": "Rivers",
+        "Item2": "00:00:00.9040000"
+      },
+      {
+        "$id": "6",
+        "Item1": "Crumble",
+        "Item2": "00:00:00.2980000"
+      },
+      {
+        "$id": "7",
+        "Item1": "SatMap",
+        "Item2": "00:00:00.0760000"
+      }
+    ]
+  },
+  "FastestNode": {
+    "$ref": "7"
+  },
+  "SlowestNode": {
+    "$ref": "4"
+  }
+}

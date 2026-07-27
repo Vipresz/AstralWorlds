@@ -1,0 +1,145 @@
+{
+  "$id": "1",
+  "Id": "6c8166fc-ffa9-4677-b04e-9f167c12fc2e",
+  "Metadata": {
+    "$id": "2",
+    "Name": "",
+    "Description": "",
+    "Version": "2.2.9.0",
+    "DateCreated": "2026-03-17 13:41:31Z",
+    "DateLastBuilt": "2026-03-17 13:41:31Z",
+    "DateLastSaved": "2026-03-17 13:41:31Z"
+  },
+  "Nodes": {
+    "$id": "3",
+    "833": {
+      "$id": "4",
+      "$type": "QuadSpinner.Gaea.Nodes.Canyon, Gaea.Nodes",
+      "Scale": 0.46833286,
+      "Slot": 0.7966657,
+      "Seed": 41254,
+      "Id": 833,
+      "Name": "Canyon",
+      "Position": {
+        "$id": "5",
+        "X": 26838.537,
+        "Y": 26210.916
+      },
+      "Ports": {
+        "$id": "6",
+        "$values": [
+          {
+            "$id": "7",
+            "Name": "In",
+            "Type": "PrimaryIn",
+            "IsExporting": true,
+            "Parent": {
+              "$ref": "4"
+            }
+          },
+          {
+            "$id": "8",
+            "Name": "Out",
+            "Type": "PrimaryOut",
+            "IsExporting": true,
+            "Parent": {
+              "$ref": "4"
+            }
+          },
+          {
+            "$id": "9",
+            "Name": "Depth",
+            "Type": "Out",
+            "IsExporting": true,
+            "Parent": {
+              "$ref": "4"
+            }
+          }
+        ]
+      },
+      "Modifiers": {
+        "$id": "10",
+        "$values": []
+      }
+    },
+    "104": {
+      "$id": "11",
+      "$type": "QuadSpinner.Gaea.Nodes.Canyon, Gaea.Nodes",
+      "Scale": 0.46833286,
+      "Slot": 0.7966657,
+      "Seed": 41254,
+      "Id": 104,
+      "Name": "Canyon",
+      "Position": {
+        "$id": "12",
+        "X": 26838.537,
+        "Y": 26369.25
+      },
+      "Ports": {
+        "$id": "13",
+        "$values": [
+          {
+            "$id": "14",
+            "Name": "In",
+            "Type": "PrimaryIn",
+            "IsExporting": true,
+            "Parent": {
+              "$ref": "11"
+            }
+          },
+          {
+            "$id": "15",
+            "Name": "Out",
+            "Type": "PrimaryOut",
+            "IsExporting": true,
+            "Parent": {
+              "$ref": "11"
+            }
+          },
+          {
+            "$id": "16",
+            "Name": "Depth",
+            "Type": "Out",
+            "IsExporting": true,
+            "Parent": {
+              "$ref": "11"
+            }
+          }
+        ]
+      },
+      "Modifiers": {
+        "$id": "17",
+        "$values": []
+      }
+    }
+  },
+  "Groups": {
+    "$id": "18"
+  },
+  "Notes": {
+    "$id": "19"
+  },
+  "GraphTabs": {
+    "$id": "20",
+    "$values": [
+      {
+        "$id": "21",
+        "Name": "Graph 1",
+        "Color": "Brass",
+        "ZoomFactor": 1.0,
+        "ViewportLocation": {
+          "$id": "22",
+          "X": 26000.0,
+          "Y": 26000.0
+        }
+      }
+    ]
+  },
+  "Width": 5000.0,
+  "Height": 2500.0,
+  "Ratio": 0.5,
+  "Regions": {
+    "$id": "23",
+    "$values": []
+  }
+}
