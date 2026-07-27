@@ -26,7 +26,7 @@ jobs:
           repository: Vipresz/RenderingEngine
           path: RenderingEngine
           ref: ${{ steps.rendering_engine.outputs.sha }}
-          token: ${{ secrets.GITHUB_TOKEN }}
+          token: ${{ secrets.REPO_PAT }}
 
       - name: Configure
         run: cmake -B build -DBUILD_GAME=OFF -DBUILD_SKELETON_EDITOR=OFF -DBUILD_ENGINE_TESTS=ON
@@ -56,7 +56,7 @@ jobs:
           repository: Vipresz/RenderingEngine
           path: RenderingEngine
           ref: ${{ steps.rendering_engine.outputs.sha }}
-          token: ${{ secrets.GITHUB_TOKEN }}
+          token: ${{ secrets.REPO_PAT }}
 
       - name: Install dependencies
         run: sudo apt-get update && sudo apt-get install -y build-essential cmake
