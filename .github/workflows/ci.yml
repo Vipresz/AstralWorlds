@@ -13,7 +13,20 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          submodules: recursive
+          submodules: false
+
+      - name: Resolve RenderingEngine submodule commit
+        id: rendering_engine
+        shell: bash
+        run: echo "sha=$(git ls-tree HEAD RenderingEngine | awk '{print $3}')" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout RenderingEngine
+        uses: actions/checkout@v4
+        with:
+          repository: Vipresz/RenderingEngine
+          path: RenderingEngine
+          ref: ${{ steps.rendering_engine.outputs.sha }}
+          token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Configure
         run: cmake -B build -DBUILD_GAME=OFF -DBUILD_SKELETON_EDITOR=OFF -DBUILD_ENGINE_TESTS=ON
@@ -30,7 +43,20 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          submodules: recursive
+          submodules: false
+
+      - name: Resolve RenderingEngine submodule commit
+        id: rendering_engine
+        shell: bash
+        run: echo "sha=$(git ls-tree HEAD RenderingEngine | awk '{print $3}')" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout RenderingEngine
+        uses: actions/checkout@v4
+        with:
+          repository: Vipresz/RenderingEngine
+          path: RenderingEngine
+          ref: ${{ steps.rendering_engine.outputs.sha }}
+          token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Install dependencies
         run: sudo apt-get update && sudo apt-get install -y build-essential cmake
