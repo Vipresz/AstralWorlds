@@ -23,6 +23,9 @@
 #include "render/systems/AnimationSystem.h"
 #include "render/systems/CameraSystem.h"
 #include "input/InputSystem.h"
+#include "physics/SimplePhysicsWorld.h"
+#include "physics/systems/PhysicsSystem.h"
+#include "audio/AudioSystem.h"
 #include "core/network/NetTypes.h"
 #include "network/systems/NetworkSystem.h"
 #ifdef PLATFORM_HAS_NUKLEAR
@@ -50,6 +53,9 @@ using namespace Engine::Platform::Render;
 using namespace Engine::Platform::Render::Components;
 using namespace Engine::Platform::Render::Systems;
 using namespace Engine::Platform::Input::Systems;
+using namespace Engine::Physics;
+using namespace Engine::Physics::Systems;
+using namespace Engine::Audio;
 using namespace Engine::Platform::Networking::Systems;
 using namespace Game::Character;
 #ifdef PLATFORM_HAS_NUKLEAR
@@ -226,6 +232,19 @@ int main(int argc, char* argv[]) {
         auto cameraSystem = std::make_shared<CameraSystem>();
         systemManager.RegisterSystem(cameraSystem);
         LOG_INFO("Main", "  CameraSystem registered");
+
+        auto physicsWorld = std::make_unique<SimplePhysicsWorld>();
+        physicsWorld->SetTerrainSampler([groundModelPtr = groundModel.get()](float x, float z) {
+            return groundModelPtr ? groundModelPtr->GetHeightAt(x, z) : 0.0f;
+        });
+        auto physicsSystem = std::make_shared<PhysicsSystem>(physicsWorld.get());
+        systemManager.RegisterSystem(physicsSystem);
+        LOG_INFO("Main", "  PhysicsSystem registered");
+
+        auto audioSystem = std::make_shared<AudioSystem>();
+        audioSystem->SetCameraSource(cameraRig.source);
+        systemManager.RegisterSystem(audioSystem);
+        LOG_INFO("Main", "  AudioSystem registered (null backend)");
         
         auto animationSystem = std::make_shared<AnimationSystem>();
         animationSystem->SetEnabled(false);
