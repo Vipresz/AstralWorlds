@@ -1,5 +1,6 @@
 # Build directory
 build/
+build-tests/
 bin/
 lib/
 CMakeFiles/

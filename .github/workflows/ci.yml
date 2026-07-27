@@ -1,0 +1,45 @@
+name: AstralWorlds CI
+
+on:
+  push:
+    branches: [main, master, rgrigorii/menu]
+  pull_request:
+    branches: [main, master, rgrigorii/menu]
+
+jobs:
+  engine-tests-windows:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Configure
+        run: cmake -B build -DBUILD_GAME=OFF -DBUILD_SKELETON_EDITOR=OFF -DBUILD_ENGINE_TESTS=ON
+
+      - name: Build tests
+        run: cmake --build build --config Release --target EngineTests --parallel
+
+      - name: Run tests
+        run: ctest --test-dir build -C Release --output-on-failure --parallel
+
+  engine-tests-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install dependencies
+        run: sudo apt-get update && sudo apt-get install -y build-essential cmake
+
+      - name: Configure
+        run: cmake -B build -DCMAKE_BUILD_TYPE=Release -DBUILD_GAME=OFF -DBUILD_SKELETON_EDITOR=OFF -DBUILD_ENGINE_TESTS=ON
+
+      - name: Build tests
+        run: cmake --build build --target EngineTests --parallel
+
+      - name: Run tests
+        run: ctest --test-dir build --output-on-failure --parallel
