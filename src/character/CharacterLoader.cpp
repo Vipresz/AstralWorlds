@@ -5,14 +5,25 @@
 #include "core/ecs/Registry.h"
 #include "character/CharacterDatabase.h"
 #include "character/EquipmentAttachmentComponent.h"
+#include "render/Animation.h"
+#include "render/Model.h"
+#include "render/Skeleton.h"
 #include "render/components/TransformComponent.h"
 #include "render/components/MeshComponent.h"
 #include "render/components/MaterialComponent.h"
 
+#include <assimp/Importer.hpp>
+#include <assimp/postprocess.h>
+#include <assimp/scene.h>
+#include <assimp/config.h>
+
 #include <cmath>
 #include <fstream>
+#include <vector>
 
 using Engine::ECS::Registry;
+using Engine::Platform::Render::Animation;
+using Engine::Platform::Render::Skeleton;
 using Engine::Platform::Render::Components::MaterialComponent;
 using Engine::Platform::Render::Components::MeshComponent;
 using Engine::Platform::Render::Components::TransformComponent;
@@ -28,7 +39,115 @@ bool FileExists(const std::string& path) {
     return file.good();
 }
 
+bool LoadAnimationClip(const std::string& path, std::unique_ptr<Animation>& outAnimation) {
+    if (!FileExists(path)) {
+        return false;
+    }
+    outAnimation = std::make_unique<Animation>();
+    if (!outAnimation->LoadAnimation(path)) {
+        outAnimation.reset();
+        return false;
+    }
+    return true;
+}
+
 } // namespace
+
+bool CharacterLoader::LoadSkinnedBodyAnimations(const std::string& bodyModelPath,
+                                                CharacterInstance& instance) {
+    if (!instance.m_bodyModel || instance.m_bodyModel->GetBoneCount() == 0) {
+        return false;
+    }
+
+    Assimp::Importer importer;
+    // Keep flags aligned with Model::LoadModel so mesh bone indices match skeleton IDs.
+    importer.SetPropertyBool(AI_CONFIG_IMPORT_FBX_PRESERVE_PIVOTS, false);
+    const aiScene* scene = importer.ReadFile(
+        bodyModelPath,
+        aiProcess_Triangulate | aiProcess_FlipUVs | aiProcess_GenSmoothNormals |
+            aiProcess_JoinIdenticalVertices | aiProcess_LimitBoneWeights);
+    if (!scene) {
+        LOG_WARNING_FMT("CharacterLoader", "Assimp failed to load skeleton from %s", bodyModelPath.c_str());
+        return false;
+    }
+
+    instance.m_skeleton = std::make_unique<Skeleton>();
+    if (!instance.m_skeleton->LoadSkeleton(scene)) {
+        LOG_WARNING_FMT("CharacterLoader", "Failed to extract skeleton from %s", bodyModelPath.c_str());
+        instance.m_skeleton.reset();
+        return false;
+    }
+
+    {
+        std::vector<std::string> meshBoneNames;
+        meshBoneNames.reserve(instance.m_bodyModel->GetBoneCount());
+        for (size_t i = 0; i < instance.m_bodyModel->GetBoneCount(); ++i) {
+            meshBoneNames.push_back(instance.m_bodyModel->GetBoneNameByIndex(static_cast<unsigned int>(i)));
+        }
+        if (!instance.m_skeleton->AlignBoneIdsToMeshOrder(meshBoneNames)) {
+            LOG_WARNING("CharacterLoader",
+                        "Skeleton bone IDs could not be fully aligned to mesh VBO indices — skinning may be wrong");
+        }
+    }
+
+    constexpr const char* kIdleAnim =
+        "graphics/Models/character/animation/regular/Standing.fbx";
+    constexpr const char* kWalkAnim =
+        "graphics/Models/character/animation/regular/Walking.fbx";
+    constexpr const char* kRunAnim =
+        "graphics/Models/character/animation/regular/Run.fbx";
+    constexpr const char* kJumpAnim =
+        "graphics/Models/character/animation/regular/Jumping.fbx";
+
+    LoadAnimationClip(kIdleAnim, instance.m_idleAnimation);
+    LoadAnimationClip(kWalkAnim, instance.m_walkingAnimation);
+    LoadAnimationClip(kRunAnim, instance.m_runningAnimation);
+    LoadAnimationClip(kJumpAnim, instance.m_jumpAnimation);
+
+    auto countChannelMatches = [&](const Animation* animation) -> size_t {
+        if (!animation || !instance.m_skeleton) {
+            return 0;
+        }
+        size_t matches = 0;
+        for (const std::string& channelName : animation->GetBoneNames()) {
+            if (instance.m_skeleton->GetBone(channelName) != nullptr) {
+                ++matches;
+            }
+        }
+        return matches;
+    };
+
+    const size_t walkMatches = countChannelMatches(instance.m_walkingAnimation.get());
+    const size_t runMatches = countChannelMatches(instance.m_runningAnimation.get());
+    const size_t walkChannels =
+        instance.m_walkingAnimation ? instance.m_walkingAnimation->GetBoneNames().size() : 0;
+    const size_t runChannels =
+        instance.m_runningAnimation ? instance.m_runningAnimation->GetBoneNames().size() : 0;
+
+    LOG_INFO_FMT("CharacterLoader",
+                 "Skinned body animations loaded (bones=%zu, idle=%s walk=%s run=%s jump=%s, "
+                 "walkMatches=%zu/%zu runMatches=%zu/%zu)",
+                 instance.m_skeleton->GetBoneCount(),
+                 instance.m_idleAnimation ? "yes" : "no",
+                 instance.m_walkingAnimation ? "yes" : "no",
+                 instance.m_runningAnimation ? "yes" : "no",
+                 instance.m_jumpAnimation ? "yes" : "no",
+                 walkMatches,
+                 walkChannels,
+                 runMatches,
+                 runChannels);
+
+    if (walkMatches < walkChannels || runMatches < runChannels) {
+        LOG_WARNING_FMT("CharacterLoader",
+                        "Animation/skeleton bone name mismatch — limbs may stay in bind pose "
+                        "(walk %zu/%zu, run %zu/%zu)",
+                        walkMatches,
+                        walkChannels,
+                        runMatches,
+                        runChannels);
+    }
+    return true;
+}
 
 CharacterLoader::CharacterLoader(ItemCatalog& catalog, EquipmentRules& rules, ICharacterDatabase& database)
     : m_catalog(catalog), m_rules(rules), m_database(database) {}
@@ -92,6 +211,8 @@ bool CharacterLoader::LoadBody(Registry& registry,
     if (TransformComponent* transform = registry.GetComponent<TransformComponent>(rootEntity)) {
         transform->SetScale(instance.scale);
     }
+
+    LoadSkinnedBodyAnimations(bodyItem->modelPath, instance);
 
     LOG_INFO_FMT("CharacterLoader",
                  "Body '%s' loaded (height=%.2f, scale=%.4f)",

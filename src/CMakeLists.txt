@@ -10,12 +10,18 @@ file(GLOB GAME_SOURCES
     "*.h"
     "character/*.cpp"
     "character/*.h"
+    "systems/*.cpp"
+    "systems/*.h"
+    "systems/*/*.cpp"
+    "systems/*/*.h"
     "ui/*.cpp"
     "ui/*.h"
     "menus/main_menu/src/*.cpp"
     "menus/main_menu/src/*.h"
     "menus/src/*.cpp"
     "menus/src/*.h"
+    "audio/*.cpp"
+    "audio/*.h"
 )
 
 if(NOT GAME_SOURCES)
@@ -139,6 +145,26 @@ if(EXISTS "${CHARACTER_SOURCE_DIR}")
         COMMENT "Copying character data to build directory"
     )
     message(STATUS "Character directory found: ${CHARACTER_SOURCE_DIR}")
+endif()
+
+set(GAME_AUDIO_SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/audio/files")
+if(EXISTS "${GAME_AUDIO_SOURCE_DIR}")
+    add_custom_command(TARGET Game POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:Game>/audio/files"
+        COMMAND ${CMAKE_COMMAND} -E copy_directory "${GAME_AUDIO_SOURCE_DIR}" "$<TARGET_FILE_DIR:Game>/audio/files"
+        COMMENT "Copying game audio files to build directory"
+    )
+    message(STATUS "Game audio directory found: ${GAME_AUDIO_SOURCE_DIR}")
+endif()
+
+set(AUDIO_SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../assets/audio")
+if(EXISTS "${AUDIO_SOURCE_DIR}")
+    add_custom_command(TARGET Game POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:Game>/audio"
+        COMMAND ${CMAKE_COMMAND} -E copy_directory "${AUDIO_SOURCE_DIR}" "$<TARGET_FILE_DIR:Game>/audio"
+        COMMENT "Copying audio assets to build directory"
+    )
+    message(STATUS "Audio directory found: ${AUDIO_SOURCE_DIR}")
 endif()
 
 # Legacy menu folder (optional)

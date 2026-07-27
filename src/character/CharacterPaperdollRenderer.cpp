@@ -5,6 +5,8 @@
 #include "render/Shader.h"
 #include "render/components/MaterialComponent.h"
 #include "render/components/MeshComponent.h"
+#include "render/components/AnimationComponent.h"
+#include "render/Skeleton.h"
 #include "render/Model.h"
 
 #include <glm/gtc/matrix_transform.hpp>
@@ -16,6 +18,7 @@
 using Engine::ECS::Registry;
 using Engine::Platform::Render::Components::MaterialComponent;
 using Engine::Platform::Render::Components::MeshComponent;
+using Engine::Platform::Render::Components::AnimationComponent;
 using Engine::Platform::Render::Model;
 using Engine::Platform::Render::Shader;
 
@@ -47,6 +50,26 @@ glm::mat4 MatrixFromTransform(const glm::vec3& position,
 }
 
 constexpr float kPreviewYawDegrees = 0.0f;
+constexpr int kMaxShaderBones = 100;
+
+void UploadBoneUniforms(GLuint shaderProgramID, const Engine::Platform::Render::Skeleton* skeleton) {
+    const GLint uniformBoneCount = glGetUniformLocation(shaderProgramID, "boneCount");
+    const GLint uniformBoneTransforms = glGetUniformLocation(shaderProgramID, "boneTransforms");
+
+    int boneCount = 0;
+    if (skeleton && skeleton->IsLoaded() && !skeleton->IsBindPoseActive()) {
+        std::vector<glm::mat4> boneMatrices;
+        skeleton->GetFinalBoneMatrices(boneMatrices);
+        boneCount = static_cast<int>(std::min(boneMatrices.size(), static_cast<size_t>(kMaxShaderBones)));
+        if (uniformBoneTransforms != -1 && boneCount > 0) {
+            glUniformMatrix4fv(uniformBoneTransforms, boneCount, GL_FALSE, glm::value_ptr(boneMatrices[0]));
+        }
+    }
+
+    if (uniformBoneCount != -1) {
+        glUniform1i(uniformBoneCount, boneCount);
+    }
+}
 
 glm::mat4 BuildPreviewRootMatrix(const CharacterInstance& instance) {
     const float uniformScale = instance.scale;
@@ -372,10 +395,8 @@ bool CharacterPaperdollRenderer::RenderScene(Registry& registry,
     glBindTexture(GL_TEXTURE_2D, m_defaultWhiteTexture);
 
     const glm::mat4 previewRootMatrix = BuildPreviewRootMatrix(instance);
-    const GLint uniformBoneCount = glGetUniformLocation(shaderProgramID, "boneCount");
-    if (uniformBoneCount != -1) {
-        glUniform1i(uniformBoneCount, 0);
-    }
+    const AnimationComponent* animComp = registry.GetComponent<AnimationComponent>(characterEntity);
+    UploadBoneUniforms(shaderProgramID, animComp ? animComp->skeleton : nullptr);
 
     bool drewAnyMesh = false;
     for (Engine::EntityID entityId : renderEntities) {
@@ -413,7 +434,7 @@ bool CharacterPaperdollRenderer::RenderScene(Registry& registry,
             glUniform1f(uniformShininess, shininess);
         }
 
-        meshComp->model->RenderModel();
+        meshComp->model->RenderModelPerMeshTexture(glGetUniformLocation(shaderProgramID, "useTexture"));
         drewAnyMesh = true;
     }
 

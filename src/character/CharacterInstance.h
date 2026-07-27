@@ -2,7 +2,9 @@
 
 #include "core/Types.h"
 #include "core/ecs/Registry.h"
+#include "render/Animation.h"
 #include "render/Model.h"
+#include "render/Skeleton.h"
 
 #include <memory>
 #include <vector>
@@ -23,14 +25,23 @@ public:
     float bottomY = 0.0f;
 
     Engine::Platform::Render::Model* GetBodyModel() const { return m_bodyModel.get(); }
+    bool HasSkinnedBody() const;
     float GetHeadHeightOffset() const;
 
+    ~CharacterInstance();
+
+    void WireAnimationComponent(Engine::ECS::Registry& registry);
     void Clear(Engine::ECS::Registry& registry);
 
 private:
     friend class CharacterLoader;
 
     std::unique_ptr<Engine::Platform::Render::Model> m_bodyModel;
+    std::unique_ptr<Engine::Platform::Render::Skeleton> m_skeleton;
+    std::unique_ptr<Engine::Platform::Render::Animation> m_idleAnimation;
+    std::unique_ptr<Engine::Platform::Render::Animation> m_walkingAnimation;
+    std::unique_ptr<Engine::Platform::Render::Animation> m_runningAnimation;
+    std::unique_ptr<Engine::Platform::Render::Animation> m_jumpAnimation;
     std::vector<std::unique_ptr<Engine::Platform::Render::Model>> m_itemModels;
     std::vector<Engine::EntityID> m_equipmentEntities;
 };

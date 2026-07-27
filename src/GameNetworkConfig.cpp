@@ -39,6 +39,36 @@ GameNetworkConfig GameNetworkConfig::ParseCommandLine(int argc, char* argv[]) {
                 config.displayName = value;
                 ++i;
             }
+        } else if (arg == "--user" || arg == "-u") {
+            const std::string value = ArgValue(argc, argv, i);
+            if (!value.empty()) {
+                config.username = value;
+                ++i;
+            }
+        } else if (arg == "--password") {
+            const std::string value = ArgValue(argc, argv, i);
+            if (!value.empty()) {
+                config.password = value;
+                ++i;
+            }
+        } else if (arg == "--auth-token") {
+            const std::string value = ArgValue(argc, argv, i);
+            if (!value.empty()) {
+                config.authToken = value;
+                ++i;
+            }
+        } else if (arg == "--tls") {
+            config.useTls = true;
+        } else if (arg == "--tls-insecure") {
+            config.useTls = true;
+            config.tlsInsecure = true;
+        } else if (arg == "--tls-ca") {
+            const std::string value = ArgValue(argc, argv, i);
+            if (!value.empty()) {
+                config.tlsCaPath = value;
+                config.useTls = true;
+                ++i;
+            }
         } else if (arg == "--offline" || arg == "--no-network") {
             config.enabled = false;
         }

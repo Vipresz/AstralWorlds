@@ -69,3 +69,7 @@ jobs:
 
       - name: Run tests
         run: ctest --test-dir build --output-on-failure --parallel
+
+  # H6 note: Platform + game_server + TLS still require OpenGL/native deps and are
+  # not built here (BUILD_ENGINE_PLATFORM=OFF). Authority/payload hardening is covered
+  # by EngineTests (AuthorityHardeningTest, NetServerIntegrationTest).

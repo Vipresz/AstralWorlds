@@ -18,7 +18,7 @@ namespace Game {
 
 // Game-specific mouse rules:
 // - LMB hold: orbit camera (cursor captured)
-// - RMB hold: orbit camera + turn character with camera (cursor captured)
+// - RMB hold: orbit camera; character yaw is driven by InputSystem/MovementCommand
 // - otherwise: free cursor for UI
 class GameCameraInput : public Engine::ECS::ISystem {
 public:
@@ -37,10 +37,8 @@ private:
     Engine::Platform::Render::ICameraSource* m_camera = nullptr;
     Engine::EntityID m_characterEntity = 0;
     std::function<bool()> m_inputBlockQuery;
-    float m_characterTurnSpeed = 720.0f;
 
     bool IsBlocked() const { return m_inputBlockQuery && m_inputBlockQuery(); }
-    void OrientCharacterToCamera(float deltaTime, Engine::ECS::Registry& registry);
 };
 
 } // namespace Game

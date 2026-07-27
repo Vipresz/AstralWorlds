@@ -47,6 +47,7 @@ private:
                          CharacterInstance& instance,
                          const CharacterLoadout& loadout);
     bool LoadModelForItem(const ItemDefinition& item, std::unique_ptr<Engine::Platform::Render::Model>& outModel);
+    bool LoadSkinnedBodyAnimations(const std::string& bodyModelPath, CharacterInstance& instance);
 
     ItemCatalog& m_catalog;
     EquipmentRules& m_rules;

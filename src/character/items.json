@@ -5,7 +5,7 @@
       "id": "body_male_default",
       "slot": "body",
       "name": "Male Base Body",
-      "model": "graphics/Models/character/graphics/male_model.obj"
+      "model": "graphics/Models/character/animation/magic/FinalBaseMesh.fbx"
     }
   ]
 }

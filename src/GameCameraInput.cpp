@@ -21,25 +21,22 @@ bool IsMouseDown(Engine::Platform::Window* window, int button) {
     return glfwWindow && glfwGetMouseButton(glfwWindow, button) == GLFW_PRESS;
 }
 
-float NormalizeDegrees(float angle) {
-    while (angle > 180.0f) angle -= 360.0f;
-    while (angle < -180.0f) angle += 360.0f;
-    return angle;
-}
-
 } // namespace
 
 GameCameraInput::GameCameraInput(Engine::Platform::Window* window,
                                  Engine::Platform::Render::ICameraSource* camera,
                                  Engine::EntityID characterEntity)
     : m_window(window), m_camera(camera), m_characterEntity(characterEntity) {
-    // After InputSystem (0) and CameraSystem (10) so camera orbit + follow are current
-    SetPriority(15);
+    // Run before InputSystem (0) so RMB/LMB orbit updates camera facing used by movement.
+    SetPriority(-5);
 }
 
 void GameCameraInput::Initialize(Engine::ECS::Registry& /*registry*/) {}
 
 void GameCameraInput::Update(float deltaTime, Engine::ECS::Registry& registry, uint64_t /*tickNumber*/) {
+    (void)deltaTime;
+    (void)registry;
+
     if (!m_window || IsBlocked()) {
         if (m_window) {
             m_window->SetCursorCaptured(false);
@@ -50,7 +47,8 @@ void GameCameraInput::Update(float deltaTime, Engine::ECS::Registry& registry, u
     const bool lmb = IsMouseDown(m_window, GLFW_MOUSE_BUTTON_LEFT);
     const bool rmb = IsMouseDown(m_window, GLFW_MOUSE_BUTTON_RIGHT);
 
-    // LMB: orbit camera only. RMB: orbit camera and turn character with it.
+    // LMB: orbit camera only. RMB: orbit camera; character yaw comes from InputSystem
+    // via MovementCommand.facingYawDegrees so prediction/server reconcile stay coherent.
     const bool orbitCamera = lmb || rmb;
     m_window->SetCursorCaptured(orbitCamera);
 
@@ -71,39 +69,11 @@ void GameCameraInput::Update(float deltaTime, Engine::ECS::Registry& registry, u
             m_camera->OnScroll(scroll);
         }
     }
-
-    if (rmb) {
-        OrientCharacterToCamera(deltaTime, registry);
-    }
 }
 
 void GameCameraInput::Shutdown(Engine::ECS::Registry& /*registry*/) {
     if (m_window) {
         m_window->SetCursorCaptured(false);
-    }
-}
-
-void GameCameraInput::OrientCharacterToCamera(float deltaTime, Engine::ECS::Registry& registry) {
-    if (!m_camera || m_characterEntity == 0) {
-        return;
-    }
-
-    auto* transform = registry.GetComponent<Engine::Platform::Render::Components::TransformComponent>(m_characterEntity);
-    if (!transform) {
-        return;
-    }
-
-    const float desiredYaw = NormalizeDegrees(m_camera->GetPlanarFacingYawDegrees());
-    float currentYaw = NormalizeDegrees(transform->GetYaw());
-
-    float angleDiff = NormalizeDegrees(desiredYaw - currentYaw);
-
-    const float maxRotation = m_characterTurnSpeed * deltaTime;
-    if (std::abs(angleDiff) > 0.5f) {
-        const float rotation = std::copysign(std::min(std::abs(angleDiff), maxRotation), angleDiff);
-        transform->SetYaw(NormalizeDegrees(currentYaw + rotation));
-    } else {
-        transform->SetYaw(desiredYaw);
     }
 }
 

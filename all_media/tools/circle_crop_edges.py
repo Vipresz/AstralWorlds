@@ -19,6 +19,7 @@ Examples:
   python circle_crop_edges.py input.png --preview
   python circle_crop_edges.py input.png -t 6
   python circle_crop_edges.py input.png --fit 8
+  python circle_crop_edges.py input.png --sensitivity 7
   python circle_crop_edges.py input.png --width 512
   python circle_crop_edges.py input_folder/ --recursive
 """
@@ -38,9 +39,16 @@ from PIL import Image
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tif", ".tiff"}
 FIT_MAX = 10
 FIT_DEFAULT = 5
+SENSITIVITY_MAX = 10
+SENSITIVITY_DEFAULT = 5
 EDGE_SOURCES = ("auto", "alpha", "silhouette", "canny")
 ALPHA_THRESHOLD = 128
-BG_TOLERANCE_DEFAULT = 24
+# Silhouette mode uses border flood-fill; this is the flood lo/up diff at --sensitivity 5.
+BG_TOLERANCE_DEFAULT = 8
+FLOOD_TOLERANCE_MIN = 2
+FLOOD_TOLERANCE_MAX = 14
+CANNY_LOW_DEFAULT = 40
+CANNY_HIGH_DEFAULT = 120
 BOUNDARY_MODE_CONTOUR = "contour"
 BOUNDARY_MODE_POLAR = "polar"
 
@@ -82,6 +90,32 @@ def resolve_fit_parameters(fit: int) -> tuple[int, int]:
     return smooth_window, poly_degree
 
 
+def resolve_sensitivity_parameters(sensitivity: int) -> tuple[int, int, int]:
+    """Map unified sensitivity to (canny_low, canny_high, flood_tolerance).
+
+    Higher values keep softer near-background fringe.
+    Lower values flood further from the borders to eat drop shadows.
+    Level 5 uses canny 40/120 and flood tolerance 8.
+    """
+    sensitivity = max(0, min(SENSITIVITY_MAX, int(sensitivity)))
+    canny_low_floor = 180
+    canny_high_floor = 350
+    # Flood tolerance is inverted vs "sensitivity": low sens -> high flood.
+    flood_floor = FLOOD_TOLERANCE_MAX
+    flood_ceil = FLOOD_TOLERANCE_MIN
+    if sensitivity <= SENSITIVITY_DEFAULT:
+        t = sensitivity / float(SENSITIVITY_DEFAULT)
+        canny_low = int(round(canny_low_floor + (CANNY_LOW_DEFAULT - canny_low_floor) * t))
+        canny_high = int(round(canny_high_floor + (CANNY_HIGH_DEFAULT - canny_high_floor) * t))
+        flood_tolerance = int(round(flood_floor + (BG_TOLERANCE_DEFAULT - flood_floor) * t))
+    else:
+        t = (sensitivity - SENSITIVITY_DEFAULT) / float(SENSITIVITY_MAX - SENSITIVITY_DEFAULT)
+        canny_low = int(round(CANNY_LOW_DEFAULT + (10 - CANNY_LOW_DEFAULT) * t))
+        canny_high = int(round(CANNY_HIGH_DEFAULT + (35 - CANNY_HIGH_DEFAULT) * t))
+        flood_tolerance = int(round(BG_TOLERANCE_DEFAULT + (flood_ceil - BG_TOLERANCE_DEFAULT) * t))
+    return canny_low, canny_high, max(1, flood_tolerance)
+
+
 def estimate_background_color(rgba: np.ndarray) -> np.ndarray:
     height, width = rgba.shape[:2]
     sample_points = [
@@ -98,14 +132,59 @@ def estimate_background_color(rgba: np.ndarray) -> np.ndarray:
     return np.median(samples, axis=0)
 
 
+def build_silhouette_mask_flood(rgba: np.ndarray, *, flood_tolerance: int) -> np.ndarray:
+    """Mark background by flooding inward from the image borders.
+
+    Soft drop shadows stay connected to the solid backdrop, so they are
+    consumed as background. Opaque icon pixels stop the flood.
+    """
+    height, width = rgba.shape[:2]
+    image = rgba[..., :3].copy()
+    flood_mask = np.zeros((height + 2, width + 2), dtype=np.uint8)
+    tolerance = max(1, int(flood_tolerance))
+    lo_diff = (tolerance, tolerance, tolerance)
+    up_diff = (tolerance, tolerance, tolerance)
+    flags = int(cv2.FLOODFILL_MASK_ONLY) | (255 << 8)
+    seeds = [
+        (0, 0),
+        (width - 1, 0),
+        (0, height - 1),
+        (width - 1, height - 1),
+        (width // 2, 0),
+        (width // 2, height - 1),
+        (0, height // 2),
+        (width - 1, height // 2),
+    ]
+    for seed_x, seed_y in seeds:
+        cv2.floodFill(
+            image,
+            flood_mask,
+            (seed_x, seed_y),
+            (0, 0, 0),
+            loDiff=lo_diff,
+            upDiff=up_diff,
+            flags=flags,
+        )
+
+    background = flood_mask[1:-1, 1:-1]
+    return np.where(background > 0, 0, 255).astype(np.uint8)
+
+
+def build_silhouette_mask_color_distance(rgba: np.ndarray, *, bg_tolerance: int) -> np.ndarray:
+    background = estimate_background_color(rgba)
+    rgb = rgba[..., :3].astype(np.float32)
+    difference = np.linalg.norm(rgb - background, axis=2)
+    return (difference > float(bg_tolerance)).astype(np.uint8) * 255
+
+
 def build_foreground_mask(rgba: np.ndarray, *, bg_tolerance: int) -> np.ndarray:
     if image_has_transparency(rgba):
         mask = (rgba[..., 3] >= ALPHA_THRESHOLD).astype(np.uint8) * 255
     else:
-        background = estimate_background_color(rgba)
-        rgb = rgba[..., :3].astype(np.float32)
-        difference = np.linalg.norm(rgb - background, axis=2)
-        mask = (difference > float(bg_tolerance)).astype(np.uint8) * 255
+        mask = build_silhouette_mask_flood(rgba, flood_tolerance=bg_tolerance)
+        if not np.any(mask):
+            # Fallback if flood ate everything (very aggressive tolerance / tiny icon).
+            mask = build_silhouette_mask_color_distance(rgba, bg_tolerance=max(24, bg_tolerance))
 
     kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
     mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel, iterations=1)
@@ -829,6 +908,19 @@ def process_image(
     return cropped, detection.edges, raw_boundary, fitted_boundary, cut_boundary
 
 
+def resolve_edge_detection_args(args: argparse.Namespace) -> tuple[int, int, int, int]:
+    """Return (sensitivity, canny_low, canny_high, bg_tolerance) from CLI args."""
+    sensitivity = max(0, min(SENSITIVITY_MAX, int(args.sensitivity)))
+    canny_low, canny_high, bg_tolerance = resolve_sensitivity_parameters(sensitivity)
+    if args.canny_low is not None:
+        canny_low = int(args.canny_low)
+    if args.canny_high is not None:
+        canny_high = int(args.canny_high)
+    if args.bg_tolerance is not None:
+        bg_tolerance = max(1, int(args.bg_tolerance))
+    return sensitivity, canny_low, canny_high, bg_tolerance
+
+
 def parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
@@ -867,13 +959,41 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--sensitivity",
+        type=int,
+        default=SENSITIVITY_DEFAULT,
+        metavar="N",
+        help=(
+            f"Edge detection sensitivity (0-{SENSITIVITY_MAX}, default {SENSITIVITY_DEFAULT}). "
+            "Lower floods more of the soft drop shadow into the background. "
+            "Higher keeps softer near-bg fringe. "
+            "Sets canny thresholds and --bg-tolerance unless those are given explicitly. "
+            "Also adjustable in --preview."
+        ),
+    )
+    parser.add_argument(
         "--bg-tolerance",
         type=int,
-        default=BG_TOLERANCE_DEFAULT,
-        help="Background color distance for silhouette mode (higher keeps more edge pixels)",
+        default=None,
+        help=(
+            "Silhouette background flood-fill tolerance "
+            f"(default from --sensitivity; typical {FLOOD_TOLERANCE_MIN}-{FLOOD_TOLERANCE_MAX}, "
+            f"default level uses {BG_TOLERANCE_DEFAULT}). "
+            "Higher eats more soft shadow; too high can nibble the icon edge."
+        ),
     )
-    parser.add_argument("--canny-low", type=int, default=40, help="Canny lower threshold")
-    parser.add_argument("--canny-high", type=int, default=120, help="Canny upper threshold")
+    parser.add_argument(
+        "--canny-low",
+        type=int,
+        default=None,
+        help=f"Canny lower threshold (default from --sensitivity; historical default {CANNY_LOW_DEFAULT})",
+    )
+    parser.add_argument(
+        "--canny-high",
+        type=int,
+        default=None,
+        help=f"Canny upper threshold (default from --sensitivity; historical default {CANNY_HIGH_DEFAULT})",
+    )
     parser.add_argument("--blur", type=int, default=5, help="Gaussian blur kernel size before edge detect")
     parser.add_argument(
         "--no-gradient",
@@ -913,7 +1033,10 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument(
         "--preview",
         action="store_true",
-        help="Open an interactive window with a slider to pick strip thickness (S=save, Q=quit)",
+        help=(
+            "Open an interactive window with sliders for sensitivity and strip thickness "
+            "(S=save, Q=quit)"
+        ),
     )
     parser.add_argument(
         "--shrink",
@@ -999,6 +1122,8 @@ def build_preview_frame(
     raw_boundary: np.ndarray,
     fitted_boundary: np.ndarray,
     cut_boundary: np.ndarray,
+    *,
+    sensitivity: int,
     strip_thickness: float,
 ) -> np.ndarray:
     overlay = rgba.copy()
@@ -1022,7 +1147,7 @@ def build_preview_frame(
     frame[header : header + right.shape[0], left.shape[1] + gap :] = right_bgr
 
     label = (
-        f"strip={strip_thickness:.0f}px  green=raw edge  orange=fit  "
+        f"sens={sensitivity}  strip={strip_thickness:.0f}px  green=raw  orange=fit  "
         f"cyan=cut  |  S save  Q quit"
     )
     cv2.putText(frame, label, (10, 24), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (230, 230, 230), 1, cv2.LINE_AA)
@@ -1031,17 +1156,34 @@ def build_preview_frame(
 
 def interactive_strip_preview(
     rgba: np.ndarray,
-    detection: OuterEdgeDetection,
     *,
+    edge_source: str,
+    blur: int,
+    use_gradient: bool,
+    num_rays: int,
+    edge_step: float,
     fit: int,
+    refine_center: bool,
+    initial_sensitivity: int,
     initial_strip: float,
     shrink: int,
     expand: int,
-) -> float | None:
-    window = "Edge strip thickness"
+    canny_low_override: int | None,
+    canny_high_override: int | None,
+    bg_tolerance_override: int | None,
+) -> tuple[int, float] | None:
+    window = "Edge crop preview"
     max_strip = max(40, min(rgba.shape[:2]) // 3)
+    initial_sensitivity = max(0, min(SENSITIVITY_MAX, int(initial_sensitivity)))
 
     cv2.namedWindow(window, cv2.WINDOW_NORMAL)
+    cv2.createTrackbar(
+        "sensitivity",
+        window,
+        initial_sensitivity,
+        SENSITIVITY_MAX,
+        lambda _value: None,
+    )
     cv2.createTrackbar(
         "strip thickness px",
         window,
@@ -1050,9 +1192,38 @@ def interactive_strip_preview(
         lambda _value: None,
     )
 
-    selected = float(initial_strip)
+    selected_sensitivity = initial_sensitivity
+    selected_strip = float(initial_strip)
+    cached_sensitivity = -1
+    detection: OuterEdgeDetection | None = None
+
     while True:
+        sensitivity = int(cv2.getTrackbarPos("sensitivity", window))
         strip = float(cv2.getTrackbarPos("strip thickness px", window))
+
+        if detection is None or sensitivity != cached_sensitivity:
+            canny_low, canny_high, bg_tolerance = resolve_sensitivity_parameters(sensitivity)
+            if canny_low_override is not None:
+                canny_low = canny_low_override
+            if canny_high_override is not None:
+                canny_high = canny_high_override
+            if bg_tolerance_override is not None:
+                bg_tolerance = max(1, bg_tolerance_override)
+            detection = detect_outer_edge(
+                rgba,
+                edge_source=edge_source,
+                bg_tolerance=bg_tolerance,
+                canny_low=canny_low,
+                canny_high=canny_high,
+                blur=blur,
+                use_gradient=use_gradient,
+                num_rays=num_rays,
+                edge_step=edge_step,
+                fit=fit,
+                refine_center=refine_center,
+            )
+            cached_sensitivity = sensitivity
+
         cropped, raw_boundary, fitted_boundary, cut_boundary = render_crop(
             rgba,
             detection,
@@ -1067,7 +1238,8 @@ def interactive_strip_preview(
             raw_boundary,
             fitted_boundary,
             cut_boundary,
-            strip,
+            sensitivity=sensitivity,
+            strip_thickness=strip,
         )
         cv2.imshow(window, frame)
 
@@ -1076,9 +1248,10 @@ def interactive_strip_preview(
             cv2.destroyWindow(window)
             return None
         if key in (ord("s"), ord("S"), 13):
-            selected = strip
+            selected_sensitivity = sensitivity
+            selected_strip = strip
             cv2.destroyWindow(window)
-            return selected
+            return selected_sensitivity, selected_strip
 
     return None
 
@@ -1090,14 +1263,17 @@ def process_single_file(
     *,
     fit: int,
     strip_thickness: float,
+    canny_low: int,
+    canny_high: int,
+    bg_tolerance: int,
 ) -> int:
     rgba = load_rgba(input_path)
     detection = detect_outer_edge(
         rgba,
         edge_source=args.edge_source,
-        bg_tolerance=max(1, args.bg_tolerance),
-        canny_low=args.canny_low,
-        canny_high=args.canny_high,
+        bg_tolerance=max(1, bg_tolerance),
+        canny_low=canny_low,
+        canny_high=canny_high,
         blur=args.blur,
         use_gradient=not args.no_gradient,
         num_rays=max(64, args.rays),
@@ -1169,6 +1345,7 @@ def process_folder(input_dir: Path, args: argparse.Namespace) -> int:
 
     fit = max(0, min(FIT_MAX, args.fit))
     strip_thickness = max(0.0, args.strip_thickness)
+    _, canny_low, canny_high, bg_tolerance = resolve_edge_detection_args(args)
 
     print(f"Processing {len(images)} image(s) from {input_dir}")
     print(f"Output folder: {output_dir}")
@@ -1188,6 +1365,9 @@ def process_folder(input_dir: Path, args: argparse.Namespace) -> int:
                 args,
                 fit=fit,
                 strip_thickness=strip_thickness,
+                canny_low=canny_low,
+                canny_high=canny_high,
+                bg_tolerance=bg_tolerance,
             )
         except Exception as error:  # noqa: BLE001 - batch tool should continue on failure
             failures += 1
@@ -1218,36 +1398,40 @@ def main(argv: list[str] | None = None) -> int:
 
     output_path = args.output.resolve() if args.output else default_output_path(input_path, args.suffix)
     fit = max(0, min(FIT_MAX, args.fit))
+    sensitivity, canny_low, canny_high, bg_tolerance = resolve_edge_detection_args(args)
 
     rgba = load_rgba(input_path)
-    detection = detect_outer_edge(
-        rgba,
-        edge_source=args.edge_source,
-        bg_tolerance=max(1, args.bg_tolerance),
-        canny_low=args.canny_low,
-        canny_high=args.canny_high,
-        blur=args.blur,
-        use_gradient=not args.no_gradient,
-        num_rays=max(64, args.rays),
-        edge_step=max(0.25, args.edge_step),
-        fit=fit,
-        refine_center=not args.no_refine_center,
-    )
-
     strip_thickness = max(0.0, args.strip_thickness)
     if args.preview:
         picked = interactive_strip_preview(
             rgba,
-            detection,
+            edge_source=args.edge_source,
+            blur=args.blur,
+            use_gradient=not args.no_gradient,
+            num_rays=max(64, args.rays),
+            edge_step=max(0.25, args.edge_step),
             fit=fit,
+            refine_center=not args.no_refine_center,
+            initial_sensitivity=sensitivity,
             initial_strip=strip_thickness,
             shrink=max(0, args.shrink),
             expand=max(0, args.expand),
+            canny_low_override=args.canny_low,
+            canny_high_override=args.canny_high,
+            bg_tolerance_override=args.bg_tolerance,
         )
         if picked is None:
             print("Preview cancelled.")
             return 0
-        strip_thickness = picked
+        sensitivity, strip_thickness = picked
+        canny_low, canny_high, bg_tolerance = resolve_sensitivity_parameters(sensitivity)
+        if args.canny_low is not None:
+            canny_low = int(args.canny_low)
+        if args.canny_high is not None:
+            canny_high = int(args.canny_high)
+        if args.bg_tolerance is not None:
+            bg_tolerance = max(1, int(args.bg_tolerance))
+        print(f"Selected sensitivity: {sensitivity}")
         print(f"Selected strip thickness: {strip_thickness:.0f}px")
 
     status = process_single_file(
@@ -1256,9 +1440,16 @@ def main(argv: list[str] | None = None) -> int:
         args,
         fit=fit,
         strip_thickness=strip_thickness,
+        canny_low=canny_low,
+        canny_high=canny_high,
+        bg_tolerance=bg_tolerance,
     )
     smooth_window, poly_degree = resolve_fit_parameters(fit)
     print(f"Fit: {fit} (smooth window {smooth_window}, harmonic degree {poly_degree})")
+    print(
+        f"Sensitivity: {sensitivity} "
+        f"(canny {canny_low}/{canny_high}, flood-tolerance {bg_tolerance})"
+    )
     print(f"Strip thickness: {strip_thickness:.1f}px")
     if args.width > 0:
         print(f"Output width: {args.width}px")

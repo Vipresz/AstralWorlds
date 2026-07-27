@@ -8,6 +8,10 @@
 #include "character/EquipmentRules.h"
 #include "character/NameplateComponent.h"
 #include "character/CharacterNameplateRenderer.h"
+#include "character/CharacterReplication.h"
+#include "character/CharacterReplicationComponent.h"
+#include "audio/CharacterWalkAudioSystem.h"
+#include "systems/character/RemoteLoadoutApplySystem.h"
 #include "core/ecs/Registry.h"
 #include "core/System.h"
 #include "render/Window.h"
@@ -27,7 +31,13 @@
 #include "physics/systems/PhysicsSystem.h"
 #include "audio/AudioSystem.h"
 #include "core/network/NetTypes.h"
+#include "core/network/LoadoutReplication.h"
+#include "core/network/NetworkPayloads.h"
 #include "network/systems/NetworkSystem.h"
+#include "network/systems/ReplicationSystem.h"
+#ifdef ENGINE_ENABLE_AUDIO
+#include "audio/MiniaudioBackend.h"
+#endif
 #ifdef PLATFORM_HAS_NUKLEAR
 #include "ui/UISystem.h"
 #include "ui/MenuStyle.h"
@@ -58,6 +68,7 @@ using namespace Engine::Physics::Systems;
 using namespace Engine::Audio;
 using namespace Engine::Platform::Networking::Systems;
 using namespace Game::Character;
+using namespace Game::Audio;
 #ifdef PLATFORM_HAS_NUKLEAR
 using namespace Engine::Platform::UI;
 using namespace Game::UI;
@@ -157,6 +168,37 @@ int main(int argc, char* argv[]) {
         }
         characterLoader.PlaceOnTerrain(registry, character.id, characterInstance, spawnX, spawnZ, terrainHeight);
 
+        std::shared_ptr<NetworkSystem> networkSystem;
+        std::shared_ptr<ReplicationSystem> replicationSystem;
+
+        auto syncReplicationLoadout = [&](EntityID entityId, const CharacterLoginContext& loginContext) {
+            CharacterLoadout loadout;
+            if (!characterLoader.FetchLoginLoadout(loginContext, loadout)) {
+                return;
+            }
+            CharacterReplicationComponent* replicationComp =
+                registry.GetComponent<CharacterReplicationComponent>(entityId);
+            if (!replicationComp) {
+                replicationComp = &registry.AddComponent<CharacterReplicationComponent>(entityId);
+            }
+            replicationComp->loadout = loadout;
+
+            // Publish loadout to authoritative server (server owns replication snapshots).
+            if (networkSystem && networkSystem->IsLoggedIn()) {
+                Engine::Net::GenericDataPayload payload;
+                payload.userId = networkSystem->GetLocalUserId();
+                payload.tick = 0;
+                payload.channel = Engine::Net::kLoadoutChannel;
+                const Engine::Net::NetBuffer loadoutBuffer = ToReplicatedLoadout(loadout).Serialize();
+                payload.data = loadoutBuffer.Data();
+                networkSystem->GetClient().SendGenericData(payload);
+            }
+        };
+        CharacterLoginContext initialLogin;
+        initialLogin.displayName = networkConfig.displayName;
+        initialLogin.isOnlineLogin = false;
+        syncReplicationLoadout(character.id, initialLogin);
+
         const float nameplateHeight = characterInstance.GetHeadHeightOffset() + 0.15f;
         AttachNameplate(registry, character.id, networkConfig.displayName.c_str(), nameplateHeight);
 
@@ -165,6 +207,7 @@ int main(int argc, char* argv[]) {
 
         auto& animComp = registry.AddComponent<AnimationComponent>(character.id);
         animComp.groundLevel = terrainHeight;
+        characterInstance.WireAnimationComponent(registry);
         
         LOG_INFO("Main", "Initializing systems...");
         SystemManager systemManager;
@@ -173,7 +216,6 @@ int main(int argc, char* argv[]) {
         systemManager.RegisterSystem(characterEquipmentSystem);
         LOG_INFO("Main", "  CharacterEquipmentSystem registered");
 
-        std::shared_ptr<NetworkSystem> networkSystem;
         bool networkConnected = false;
         bool networkWantsConnect = networkConfig.enabled;
         float networkRetryCooldown = 0.0f;
@@ -183,6 +225,7 @@ int main(int argc, char* argv[]) {
                 LOG_WARNING("Main", "Failed to refresh character loadout after login");
                 return;
             }
+            characterInstance.WireAnimationComponent(registry);
             characterLoader.PlaceOnTerrain(
                 registry, character.id, characterInstance, spawnX, spawnZ, terrainHeight);
             cameraRig.SetHeightOffset(characterInstance.GetHeadHeightOffset());
@@ -195,10 +238,56 @@ int main(int argc, char* argv[]) {
                 networkSystem->SetRemotePlayerModel(
                     characterInstance.GetBodyModel(), characterInstance.scale);
             }
+            syncReplicationLoadout(character.id, loginContext);
         };
 
         if (networkConfig.enabled) {
+            replicationSystem = std::make_shared<ReplicationSystem>();
+            RegisterLoadoutReplication(*replicationSystem);
+            systemManager.RegisterSystem(replicationSystem);
+            LOG_INFO("Main", "  ReplicationSystem registered");
+
             networkSystem = std::make_shared<NetworkSystem>();
+            networkSystem->SetAuthoritativeClient(true);
+            networkSystem->SetPeerEntityHandler(
+                [replicationSystem](Engine::Net::UserId userId, EntityID entityId) {
+                    replicationSystem->RegisterReplicatedEntity(userId, entityId);
+                });
+            // Authoritative server publishes snapshots — clients only apply them.
+            // Local transform comes from prediction + TransformState reconcile; applying
+            // server EntitySnapshot transforms would stomp scale and fight prediction.
+            auto applyReplicationSnapshot =
+                [networkSystem, replicationSystem, &registry](const Engine::Net::EntitySnapshot& snapshot) {
+                    if (snapshot.entityId == networkSystem->GetLocalUserId()) {
+                        Engine::Net::EntitySnapshot filtered = snapshot;
+                        filtered.components.erase(
+                            std::remove_if(
+                                filtered.components.begin(),
+                                filtered.components.end(),
+                                [](const Engine::Net::ComponentSnapshot& component) {
+                                    return component.componentId ==
+                                               Engine::Net::kTransformReplicationComponent ||
+                                           component.componentId ==
+                                               Engine::Net::kAnimationReplicationComponent;
+                                }),
+                            filtered.components.end());
+                        replicationSystem->ApplyEntitySnapshot(filtered, registry);
+                        return;
+                    }
+                    replicationSystem->ApplyEntitySnapshot(snapshot, registry);
+                };
+            networkSystem->SetEntitySnapshotHandler(applyReplicationSnapshot);
+            networkSystem->SetWorldSnapshotHandler(
+                [networkSystem, applyReplicationSnapshot, &registry](
+                    const Engine::Net::WorldSnapshotPayload& snapshot) {
+                    const Engine::Net::UserId localUserId = networkSystem->GetLocalUserId();
+                    for (const Engine::Net::EntitySnapshot& entity : snapshot.entities) {
+                        if (entity.entityId != localUserId) {
+                            networkSystem->EnsureRemoteEntity(entity.entityId, registry);
+                        }
+                        applyReplicationSnapshot(entity);
+                    }
+                });
             networkSystem->SetLocalPlayerEntity(character.id);
             networkSystem->SetRemotePlayerModel(
                 characterInstance.GetBodyModel(), characterInstance.scale);
@@ -213,6 +302,12 @@ int main(int argc, char* argv[]) {
                     AttachNameplate(reg, entityId, displayName.c_str(), remoteNameplateHeight);
                 });
             systemManager.RegisterSystem(networkSystem);
+
+            auto remoteLoadoutSystem = std::make_shared<RemoteLoadoutApplySystem>(
+                characterLoader, networkSystem.get(), character.id);
+            systemManager.RegisterSystem(remoteLoadoutSystem);
+            LOG_INFO("Main", "  RemoteLoadoutApplySystem registered");
+
             LOG_INFO_FMT("Main",
                          "  NetworkSystem registered (will connect to %s:%u as \"%s\")",
                          networkConfig.serverHost.c_str(),
@@ -229,6 +324,23 @@ int main(int argc, char* argv[]) {
         systemManager.RegisterSystem(inputSystem);
         LOG_INFO("Main", "  InputSystem registered");
 
+        if (networkSystem) {
+            networkSystem->SetInputBuffer(&inputSystem->GetInputBuffer());
+            if (!networkConfig.username.empty()) {
+                networkSystem->SetCredentials(networkConfig.username, networkConfig.password);
+            }
+            if (!networkConfig.authToken.empty()) {
+                networkSystem->SetAuthToken(networkConfig.authToken);
+            }
+            if (networkConfig.useTls) {
+                Engine::Platform::Networking::TlsConfig tls;
+                tls.enabled = true;
+                tls.caCertificatePath = networkConfig.tlsCaPath;
+                tls.insecureSkipVerify = networkConfig.tlsInsecure;
+                networkSystem->SetTlsConfig(tls);
+            }
+        }
+
         auto cameraSystem = std::make_shared<CameraSystem>();
         systemManager.RegisterSystem(cameraSystem);
         LOG_INFO("Main", "  CameraSystem registered");
@@ -242,14 +354,23 @@ int main(int argc, char* argv[]) {
         LOG_INFO("Main", "  PhysicsSystem registered");
 
         auto audioSystem = std::make_shared<AudioSystem>();
+#ifdef ENGINE_ENABLE_AUDIO
+        audioSystem->SetBackend(std::make_unique<MiniaudioBackend>());
+        LOG_INFO("Main", "  AudioSystem registered (miniaudio backend)");
+#else
+        LOG_INFO("Main", "  AudioSystem registered (null backend)");
+#endif
         audioSystem->SetCameraSource(cameraRig.source);
         systemManager.RegisterSystem(audioSystem);
-        LOG_INFO("Main", "  AudioSystem registered (null backend)");
+
+        auto walkAudioSystem =
+            std::make_shared<CharacterWalkAudioSystem>(audioSystem.get(), character.id);
+        systemManager.RegisterSystem(walkAudioSystem);
+        LOG_INFO("Main", "  CharacterWalkAudioSystem registered");
         
         auto animationSystem = std::make_shared<AnimationSystem>();
-        animationSystem->SetEnabled(false);
         systemManager.RegisterSystem(animationSystem);
-        LOG_INFO("Main", "  AnimationSystem registered (disabled for OBJ player model)");
+        LOG_INFO("Main", "  AnimationSystem registered");
         
         auto renderSystem = std::make_shared<RenderSystem>(&shader, cameraRig.source, projection);
         systemManager.RegisterSystem(renderSystem);
@@ -273,6 +394,9 @@ int main(int argc, char* argv[]) {
                 networkConnected = true;
                 networkWantsConnect = false;
                 LOG_INFO_FMT("Main", "Connected to server as user %u", networkSystem->GetLocalUserId());
+                if (replicationSystem) {
+                    replicationSystem->RegisterReplicatedEntity(networkSystem->GetLocalUserId(), character.id);
+                }
 
                 CharacterLoginContext onlineLogin;
                 onlineLogin.userId = networkSystem->GetLocalUserId();
