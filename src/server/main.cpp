@@ -1,5 +1,6 @@
 #include "Logger.h"
 
+#include "character/CharacterStats.h"
 #include "core/network/NetTypes.h"
 
 #include "network/AuthoritativeGameSimulator.h"
@@ -196,6 +197,9 @@ int main(int argc, char* argv[]) {
         simulator = std::make_unique<AuthoritativeGameSimulator>(server);
 
         simulator->SetSpawnPosition(glm::vec3(5.0f, 0.0f, 5.0f));
+        Game::Character::CharacterStats characterStats;
+        Game::Character::LoadCharacterStats(characterStats);
+        simulator->SetMovementSpeeds(characterStats.walkSpeed, characterStats.runSpeed);
         const std::string heightmapPath =
             ParseArgValue(argc, argv, "--heightmap").empty()
                 ? std::string("terrain/barren_scar/00.png")

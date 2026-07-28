@@ -9,6 +9,7 @@
 #include "character/CharacterPaperdollRenderer.h"
 #include "core/Types.h"
 
+#include <chrono>
 #include <memory>
 #include <string>
 #include <vector>
@@ -49,6 +50,28 @@ struct MinimapHudConfig {
     float borderInsetFraction = 0.13f;
 };
 
+// One bar slot inside the character HUD frame. Fractions are relative to the HUD rect
+// (0,0 = HUD top-left, 1,1 = HUD bottom-right), not the screen.
+struct CharacterHudBarConfig {
+    std::string id;
+    float xFraction = 0.0f;
+    float yFraction = 0.0f;
+    float widthFraction = 1.0f;
+    float heightFraction = 1.0f;
+};
+
+struct CharacterHudConfig {
+    std::string texturePath = "menus/hud/hud.png";
+    // Design-space size in pixels (scaled by UI scale vs 1280x720 reference).
+    // Authored in src/menus/manifest.json as source_width / source_height.
+    int sourceWidth = 400;
+    int sourceHeight = 103;
+    float xFraction = 0.015f;
+    float yFraction = 0.02f;
+    std::string anchor = "top_left";
+    std::vector<CharacterHudBarConfig> bars;
+};
+
 struct OverlayPanelConfig {
     std::string buttonId;
     std::string texturePath;
@@ -77,6 +100,23 @@ struct CloseButtonConfig {
     bool centerOnCorner = true;
 };
 
+struct PaperdollRotateButtonConfig {
+    std::string leftTexturePath = "menus/paperdoll/arrows/rotate_left_side.png";
+    std::string rightTexturePath = "menus/paperdoll/arrows/rotate_right_side.png";
+    std::string leftLightTexturePath = "menus/paperdoll/arrows/rotate_left_side_light.png";
+    std::string rightLightTexturePath = "menus/paperdoll/arrows/rotate_right_side_light.png";
+    // Vertical center of the buttons, measured up from the panel bottom (0.20 = 20% above bottom).
+    float yFromBottomFraction = 0.20f;
+    float sizeFraction = 0.10f;
+    // Button width / height. Height is derived as width / aspectRatio.
+    float aspectRatio = 1.0f;
+    // Horizontal centers as fractions of panel width (0 = left edge, 1 = right edge).
+    float leftXFraction = 0.18f;
+    float rightXFraction = 0.82f;
+    // Continuous spin speed while a rotate arrow is held.
+    float degreesPerSecond = 120.0f;
+};
+
 struct CharacterMenuConfig {
     static constexpr const char* kManifestPath = "menus/manifest.json";
     static constexpr const char* kRoot = "menus";
@@ -89,8 +129,10 @@ struct CharacterMenuConfig {
     float barButtonYFraction = 0.5f;
     std::vector<BarButtonConfig> barButtons;
     MinimapHudConfig minimap;
+    CharacterHudConfig characterHud;
     std::vector<OverlayPanelConfig> panels;
     CloseButtonConfig closeButton;
+    PaperdollRotateButtonConfig paperdollRotate;
     int minScreenWidth = 1280;
     int minScreenHeight = 720;
 
@@ -154,6 +196,10 @@ private:
     std::unique_ptr<Engine::Platform::Render::Texture> m_bottomBarTexture;
     std::unique_ptr<Engine::Platform::Render::Texture> m_closeDarkTexture;
     std::unique_ptr<Engine::Platform::Render::Texture> m_closeLightTexture;
+    std::unique_ptr<Engine::Platform::Render::Texture> m_paperdollRotateLeftTexture;
+    std::unique_ptr<Engine::Platform::Render::Texture> m_paperdollRotateRightTexture;
+    std::unique_ptr<Engine::Platform::Render::Texture> m_paperdollRotateLeftLightTexture;
+    std::unique_ptr<Engine::Platform::Render::Texture> m_paperdollRotateRightLightTexture;
     std::vector<LoadedBarButton> m_barButtons;
     std::vector<LoadedOverlayPanel> m_overlayPanels;
     std::unique_ptr<Game::Character::CharacterPaperdollRenderer> m_paperdollRenderer;
@@ -161,6 +207,9 @@ private:
     Engine::EntityID m_paperdollCharacterEntity = Engine::INVALID_ENTITY;
     Engine::Platform::Render::Shader* m_paperdollShader = nullptr;
     Game::Character::CharacterInstance* m_paperdollCharacterInstance = nullptr;
+    float m_paperdollYawDegrees = 0.0f;
+    bool m_hasPaperdollRotateClock = false;
+    std::chrono::steady_clock::time_point m_lastPaperdollRotateTime{};
     bool m_visible = false;
     mutable bool m_pointerOverBarUi = false;
     mutable bool m_pointerOverPanelUi = false;

@@ -38,7 +38,7 @@ void CharacterInstance::WireAnimationComponent(Registry& registry) {
 
     AnimationComponent* animComp = registry.GetComponent<AnimationComponent>(rootEntity);
     if (!animComp) {
-        return;
+        animComp = &registry.AddComponent<AnimationComponent>(rootEntity);
     }
 
     animComp->skeleton = m_skeleton.get();
@@ -46,9 +46,16 @@ void CharacterInstance::WireAnimationComponent(Registry& registry) {
     animComp->walkingAnimation = m_walkingAnimation.get();
     animComp->runningAnimation = m_runningAnimation.get();
     animComp->jumpAnimation = m_jumpAnimation.get();
-    animComp->currentAnimation = animComp->idleAnimation;
-    animComp->currentAnimationTime = 0.0f;
-    animComp->isLooping = true;
+    animComp->jumpMovingAnimation = m_jumpMovingAnimation.get();
+    animComp->fallingAnimation = m_fallingAnimation.get();
+    animComp->landingAnimation = m_landingAnimation.get();
+    animComp->leftTurnAnimation = m_leftTurnAnimation.get();
+    animComp->rightTurnAnimation = m_rightTurnAnimation.get();
+    if (!animComp->currentAnimation) {
+        animComp->currentAnimation = animComp->idleAnimation;
+        animComp->currentAnimationTime = 0.0f;
+        animComp->isLooping = true;
+    }
 }
 
 void CharacterInstance::Clear(Registry& registry) {
@@ -60,6 +67,11 @@ void CharacterInstance::Clear(Registry& registry) {
     m_equipmentEntities.clear();
     m_itemModels.clear();
 
+    m_rightTurnAnimation.reset();
+    m_leftTurnAnimation.reset();
+    m_landingAnimation.reset();
+    m_fallingAnimation.reset();
+    m_jumpMovingAnimation.reset();
     m_jumpAnimation.reset();
     m_runningAnimation.reset();
     m_walkingAnimation.reset();
@@ -73,8 +85,16 @@ void CharacterInstance::Clear(Registry& registry) {
             animComp->walkingAnimation = nullptr;
             animComp->runningAnimation = nullptr;
             animComp->jumpAnimation = nullptr;
+            animComp->jumpMovingAnimation = nullptr;
+            animComp->fallingAnimation = nullptr;
+            animComp->landingAnimation = nullptr;
+            animComp->leftTurnAnimation = nullptr;
+            animComp->rightTurnAnimation = nullptr;
             animComp->currentAnimation = nullptr;
             animComp->currentAnimationTime = 0.0f;
+            animComp->landingActive = false;
+            animComp->wasAirborneLastFrame = false;
+            animComp->fallingTimeThisAirtime = 0.0f;
         }
         if (registry.HasComponent<MeshComponent>(rootEntity)) {
             registry.RemoveComponent<MeshComponent>(rootEntity);

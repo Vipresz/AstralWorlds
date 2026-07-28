@@ -53,6 +53,9 @@ void RemoteLoadoutApplySystem::Update(float deltaTime,
 
         CharacterInstance& instance = m_remoteInstances[entityId];
         if (m_loader.ApplyLoadout(registry, instance, entityId, replicationComp->loadout)) {
+            // ApplyLoadout clears anim pointers; re-wire skeleton/clips so AnimationSystem
+            // can play walk/run/jump driven by NetworkSystem remote transform state.
+            instance.WireAnimationComponent(registry);
             m_lastApplied[entityId] = replicationComp->loadout;
         }
     }

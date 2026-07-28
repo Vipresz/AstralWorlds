@@ -504,6 +504,32 @@ bool CharacterMenu::LoadConfig(CharacterMenuConfig& out, const char* manifestPat
         JsonTryGetFloat(minimapJson, "border_inset_fraction", out.minimap.borderInsetFraction);
     }
 
+    const std::string characterHudJson = JsonExtractObject(json, "character_hud");
+    if (!characterHudJson.empty()) {
+        std::string hudRelative;
+        if (JsonTryGetString(characterHudJson, "texture", hudRelative)) {
+            out.characterHud.texturePath = JoinPath(CharacterMenuConfig::kRoot, hudRelative);
+        }
+        JsonTryGetInt(characterHudJson, "source_width", out.characterHud.sourceWidth);
+        JsonTryGetInt(characterHudJson, "source_height", out.characterHud.sourceHeight);
+        JsonTryGetFloat(characterHudJson, "x_fraction", out.characterHud.xFraction);
+        JsonTryGetFloat(characterHudJson, "y_fraction", out.characterHud.yFraction);
+        JsonTryGetString(characterHudJson, "anchor", out.characterHud.anchor);
+
+        out.characterHud.bars.clear();
+        for (const std::string& barJson : JsonExtractArrayObjects(characterHudJson, "bars")) {
+            CharacterHudBarConfig bar;
+            JsonTryGetString(barJson, "id", bar.id);
+            JsonTryGetFloat(barJson, "x_fraction", bar.xFraction);
+            JsonTryGetFloat(barJson, "y_fraction", bar.yFraction);
+            JsonTryGetFloat(barJson, "width_fraction", bar.widthFraction);
+            JsonTryGetFloat(barJson, "height_fraction", bar.heightFraction);
+            if (!bar.id.empty()) {
+                out.characterHud.bars.push_back(std::move(bar));
+            }
+        }
+    }
+
     const std::string paperdollJson = JsonExtractObject(json, "paperdoll");
     out.panels.clear();
     for (const std::string& panelJson : JsonExtractArrayObjects(json, "panels")) {
@@ -552,6 +578,74 @@ bool CharacterMenu::LoadConfig(CharacterMenuConfig& out, const char* manifestPat
             out.closeButton.yAnchorFraction,
             out.closeButton.marginFraction,
             out.closeButton.centerOnCorner);
+    }
+
+    const std::string paperdollRotateJson = JsonExtractObject(json, "paperdoll_rotate");
+    if (!paperdollRotateJson.empty()) {
+        JsonTryGetFloat(
+            paperdollRotateJson, "y_from_bottom_fraction", out.paperdollRotate.yFromBottomFraction);
+        JsonTryGetFloat(paperdollRotateJson, "size_fraction", out.paperdollRotate.sizeFraction);
+        JsonTryGetFloat(paperdollRotateJson, "aspect_ratio", out.paperdollRotate.aspectRatio);
+        // Prefer degrees_per_second; accept degrees_per_click as a legacy alias.
+        if (!JsonTryGetFloat(
+                paperdollRotateJson, "degrees_per_second", out.paperdollRotate.degreesPerSecond)) {
+            JsonTryGetFloat(
+                paperdollRotateJson, "degrees_per_click", out.paperdollRotate.degreesPerSecond);
+        }
+
+        // Backward-compatible alias: side_inset_fraction mirrors left/right from the edges.
+        float sideInset = -1.0f;
+        if (JsonTryGetFloat(paperdollRotateJson, "side_inset_fraction", sideInset) &&
+            sideInset >= 0.0f) {
+            out.paperdollRotate.leftXFraction = sideInset;
+            out.paperdollRotate.rightXFraction = 1.0f - sideInset;
+        }
+
+        const std::string leftJson = JsonExtractObject(paperdollRotateJson, "left");
+        if (!leftJson.empty()) {
+            JsonTryGetFloat(leftJson, "x_fraction", out.paperdollRotate.leftXFraction);
+            const std::string leftTextures = JsonExtractObject(leftJson, "textures");
+            std::string darkRelative;
+            std::string lightRelative;
+            if (!leftTextures.empty()) {
+                JsonTryGetString(leftTextures, "dark", darkRelative);
+                JsonTryGetString(leftTextures, "light", lightRelative);
+            } else {
+                JsonTryGetString(leftJson, "dark", darkRelative);
+                JsonTryGetString(leftJson, "light", lightRelative);
+            }
+            if (!darkRelative.empty()) {
+                out.paperdollRotate.leftTexturePath =
+                    JoinPath(CharacterMenuConfig::kRoot, darkRelative);
+            }
+            if (!lightRelative.empty()) {
+                out.paperdollRotate.leftLightTexturePath =
+                    JoinPath(CharacterMenuConfig::kRoot, lightRelative);
+            }
+        }
+
+        const std::string rightJson = JsonExtractObject(paperdollRotateJson, "right");
+        if (!rightJson.empty()) {
+            JsonTryGetFloat(rightJson, "x_fraction", out.paperdollRotate.rightXFraction);
+            const std::string rightTextures = JsonExtractObject(rightJson, "textures");
+            std::string darkRelative;
+            std::string lightRelative;
+            if (!rightTextures.empty()) {
+                JsonTryGetString(rightTextures, "dark", darkRelative);
+                JsonTryGetString(rightTextures, "light", lightRelative);
+            } else {
+                JsonTryGetString(rightJson, "dark", darkRelative);
+                JsonTryGetString(rightJson, "light", lightRelative);
+            }
+            if (!darkRelative.empty()) {
+                out.paperdollRotate.rightTexturePath =
+                    JoinPath(CharacterMenuConfig::kRoot, darkRelative);
+            }
+            if (!lightRelative.empty()) {
+                out.paperdollRotate.rightLightTexturePath =
+                    JoinPath(CharacterMenuConfig::kRoot, lightRelative);
+            }
+        }
     }
 
     LOG_INFO_FMT("CharacterMenu", "Manifest loaded: bottom_bar=%s", out.bottomBarTexturePath.c_str());
@@ -607,6 +701,42 @@ bool CharacterMenu::Initialize(const CharacterMenuConfig* config) {
                         "Close button light texture not loaded (%s)",
                         m_config.closeButton.lightTexturePath.c_str());
         m_closeLightTexture.reset();
+    }
+
+    m_paperdollRotateLeftTexture = std::make_unique<Engine::Platform::Render::Texture>(
+        m_config.paperdollRotate.leftTexturePath.c_str());
+    if (!m_paperdollRotateLeftTexture->LoadTextureUI(256)) {
+        LOG_WARNING_FMT("CharacterMenu",
+                        "Paperdoll rotate-left texture not loaded (%s)",
+                        m_config.paperdollRotate.leftTexturePath.c_str());
+        m_paperdollRotateLeftTexture.reset();
+    }
+
+    m_paperdollRotateRightTexture = std::make_unique<Engine::Platform::Render::Texture>(
+        m_config.paperdollRotate.rightTexturePath.c_str());
+    if (!m_paperdollRotateRightTexture->LoadTextureUI(256)) {
+        LOG_WARNING_FMT("CharacterMenu",
+                        "Paperdoll rotate-right texture not loaded (%s)",
+                        m_config.paperdollRotate.rightTexturePath.c_str());
+        m_paperdollRotateRightTexture.reset();
+    }
+
+    m_paperdollRotateLeftLightTexture = std::make_unique<Engine::Platform::Render::Texture>(
+        m_config.paperdollRotate.leftLightTexturePath.c_str());
+    if (!m_paperdollRotateLeftLightTexture->LoadTextureUI(256)) {
+        LOG_WARNING_FMT("CharacterMenu",
+                        "Paperdoll rotate-left light texture not loaded (%s)",
+                        m_config.paperdollRotate.leftLightTexturePath.c_str());
+        m_paperdollRotateLeftLightTexture.reset();
+    }
+
+    m_paperdollRotateRightLightTexture = std::make_unique<Engine::Platform::Render::Texture>(
+        m_config.paperdollRotate.rightLightTexturePath.c_str());
+    if (!m_paperdollRotateRightLightTexture->LoadTextureUI(256)) {
+        LOG_WARNING_FMT("CharacterMenu",
+                        "Paperdoll rotate-right light texture not loaded (%s)",
+                        m_config.paperdollRotate.rightLightTexturePath.c_str());
+        m_paperdollRotateRightLightTexture.reset();
     }
 
     m_barButtons.clear();
@@ -666,6 +796,22 @@ void CharacterMenu::Shutdown() {
         m_closeLightTexture->ClearTexture();
         m_closeLightTexture.reset();
     }
+    if (m_paperdollRotateLeftTexture) {
+        m_paperdollRotateLeftTexture->ClearTexture();
+        m_paperdollRotateLeftTexture.reset();
+    }
+    if (m_paperdollRotateRightTexture) {
+        m_paperdollRotateRightTexture->ClearTexture();
+        m_paperdollRotateRightTexture.reset();
+    }
+    if (m_paperdollRotateLeftLightTexture) {
+        m_paperdollRotateLeftLightTexture->ClearTexture();
+        m_paperdollRotateLeftLightTexture.reset();
+    }
+    if (m_paperdollRotateRightLightTexture) {
+        m_paperdollRotateRightLightTexture->ClearTexture();
+        m_paperdollRotateRightLightTexture.reset();
+    }
     for (LoadedBarButton& button : m_barButtons) {
         if (button.darkTexture) {
             button.darkTexture->ClearTexture();
@@ -686,6 +832,8 @@ void CharacterMenu::Shutdown() {
     m_paperdollCharacterEntity = Engine::INVALID_ENTITY;
     m_paperdollShader = nullptr;
     m_paperdollCharacterInstance = nullptr;
+    m_paperdollYawDegrees = 0.0f;
+    m_hasPaperdollRotateClock = false;
 }
 
 namespace {
@@ -829,6 +977,75 @@ bool DrawPanelCloseButton(struct nk_context* ctx,
     return nk_input_is_mouse_click_in_rect(&ctx->input, NK_BUTTON_LEFT, closeBounds);
 }
 
+struct PaperdollRotateButtonBounds {
+    struct nk_rect left{};
+    struct nk_rect right{};
+};
+
+PaperdollRotateButtonBounds PaperdollRotateBoundsFromPanel(
+    const struct nk_rect& panelBounds,
+    const PaperdollRotateButtonConfig& config) {
+    PaperdollRotateButtonBounds result;
+    const float width =
+        std::min(panelBounds.w, panelBounds.h) * std::clamp(config.sizeFraction, 0.04f, 0.25f);
+    const float aspectRatio = std::max(0.05f, config.aspectRatio);
+    const float height = width / aspectRatio;
+    const float yFromBottom = std::clamp(config.yFromBottomFraction, 0.05f, 0.45f);
+    const float leftX = std::clamp(config.leftXFraction, 0.0f, 1.0f);
+    const float rightX = std::clamp(config.rightXFraction, 0.0f, 1.0f);
+    const float centerY = panelBounds.y + panelBounds.h * (1.0f - yFromBottom);
+
+    result.left = nk_rect(
+        panelBounds.x + panelBounds.w * leftX - width * 0.5f,
+        centerY - height * 0.5f,
+        width,
+        height);
+    result.right = nk_rect(
+        panelBounds.x + panelBounds.w * rightX - width * 0.5f,
+        centerY - height * 0.5f,
+        width,
+        height);
+    return result;
+}
+
+bool DrawPaperdollRotateButton(struct nk_context* ctx,
+                               struct nk_command_buffer* canvas,
+                               const struct nk_rect& bounds,
+                               const Engine::Platform::Render::Texture* darkTexture,
+                               const Engine::Platform::Render::Texture* lightTexture,
+                               bool& pointerOverPanelUi) {
+    if (!ctx || !canvas) {
+        return false;
+    }
+
+    const bool hovering = nk_input_is_mouse_hovering_rect(&ctx->input, bounds);
+    if (hovering) {
+        pointerOverPanelUi = true;
+    }
+
+    const bool pressed =
+        hovering && ctx->input.mouse.buttons[NK_BUTTON_LEFT].down;
+    const Engine::Platform::Render::Texture* texture =
+        pressed ? (lightTexture && lightTexture->IsLoaded() ? lightTexture : darkTexture)
+                : (darkTexture && darkTexture->IsLoaded() ? darkTexture : lightTexture);
+    if (!texture || !texture->IsLoaded()) {
+        return false;
+    }
+
+    Engine::Platform::UI::DrawTexture(canvas, *texture, bounds, nk_rgba(255, 255, 255, 255));
+    return pressed;
+}
+
+float NormalizeYawDegrees(float yaw) {
+    while (yaw > 180.0f) {
+        yaw -= 360.0f;
+    }
+    while (yaw < -180.0f) {
+        yaw += 360.0f;
+    }
+    return yaw;
+}
+
 } // namespace
 
 CharacterMenu::LoadedBarButton* CharacterMenu::FindBarButton(const std::string& id) {
@@ -953,6 +1170,10 @@ void CharacterMenu::Build(struct nk_context* ctx,
             panelLayout.panelH);
 
         const CloseButtonConfig panelCloseButton = ResolvePanelCloseButton(panel.config);
+        const PaperdollRotateButtonBounds rotateBounds =
+            panel.config.hasCharacterPreview
+                ? PaperdollRotateBoundsFromPanel(panelBounds, m_config.paperdollRotate)
+                : PaperdollRotateButtonBounds{};
 
         if (panel.dragging) {
             if (ctx->input.mouse.buttons[NK_BUTTON_LEFT].down) {
@@ -982,7 +1203,14 @@ void CharacterMenu::Build(struct nk_context* ctx,
 
             const struct nk_rect closeBounds =
                 CloseButtonBoundsFromPanel(panelBounds, panelCloseButton);
-            if (!nk_input_is_mouse_hovering_rect(&ctx->input, closeBounds)) {
+            const bool overClose = nk_input_is_mouse_hovering_rect(&ctx->input, closeBounds);
+            const bool overRotateLeft =
+                panel.config.hasCharacterPreview &&
+                nk_input_is_mouse_hovering_rect(&ctx->input, rotateBounds.left);
+            const bool overRotateRight =
+                panel.config.hasCharacterPreview &&
+                nk_input_is_mouse_hovering_rect(&ctx->input, rotateBounds.right);
+            if (!overClose && !overRotateLeft && !overRotateRight) {
                 panel.dragging = true;
                 m_pointerOverPanelUi = true;
             }
@@ -997,6 +1225,7 @@ void CharacterMenu::Build(struct nk_context* ctx,
         if (panel.config.hasCharacterPreview && m_paperdollRenderer && m_paperdollRegistry &&
             m_paperdollShader && m_paperdollCharacterInstance &&
             m_paperdollCharacterEntity != Engine::INVALID_ENTITY) {
+            m_paperdollRenderer->SetYawDegrees(m_paperdollYawDegrees);
             const struct nk_rect previewBounds =
                 CharacterPreviewBoundsFromPanel(panelBounds, panel.config);
             DrawCharacterPreviewOnPanel(canvas,
@@ -1006,6 +1235,40 @@ void CharacterMenu::Build(struct nk_context* ctx,
                                         m_paperdollCharacterEntity,
                                         *m_paperdollCharacterInstance,
                                         *m_paperdollShader);
+
+            const PaperdollRotateButtonBounds liveRotateBounds =
+                PaperdollRotateBoundsFromPanel(panelBounds, m_config.paperdollRotate);
+
+            const auto now = std::chrono::steady_clock::now();
+            float deltaSeconds = 1.0f / 60.0f;
+            if (m_hasPaperdollRotateClock) {
+                deltaSeconds = std::chrono::duration<float>(now - m_lastPaperdollRotateTime).count();
+                deltaSeconds = std::clamp(deltaSeconds, 0.0f, 0.05f);
+            }
+            m_lastPaperdollRotateTime = now;
+            m_hasPaperdollRotateClock = true;
+
+            const float speed = std::max(0.0f, m_config.paperdollRotate.degreesPerSecond);
+            const float step = speed * deltaSeconds;
+            // Left arrow: clockwise. Right arrow: anti-clockwise. Hold for smooth spin.
+            if (DrawPaperdollRotateButton(ctx,
+                                          canvas,
+                                          liveRotateBounds.left,
+                                          m_paperdollRotateLeftTexture.get(),
+                                          m_paperdollRotateLeftLightTexture.get(),
+                                          m_pointerOverPanelUi)) {
+                m_paperdollYawDegrees = NormalizeYawDegrees(m_paperdollYawDegrees - step);
+                m_paperdollRenderer->SetYawDegrees(m_paperdollYawDegrees);
+            }
+            if (DrawPaperdollRotateButton(ctx,
+                                          canvas,
+                                          liveRotateBounds.right,
+                                          m_paperdollRotateRightTexture.get(),
+                                          m_paperdollRotateRightLightTexture.get(),
+                                          m_pointerOverPanelUi)) {
+                m_paperdollYawDegrees = NormalizeYawDegrees(m_paperdollYawDegrees + step);
+                m_paperdollRenderer->SetYawDegrees(m_paperdollYawDegrees);
+            }
         }
 
         if (nk_input_is_mouse_hovering_rect(&ctx->input, panelBounds)) {

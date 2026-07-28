@@ -2,6 +2,7 @@
 
 #include "character/EquipmentAttachmentComponent.h"
 #include "core/ecs/Registry.h"
+#include "render/Animation.h"
 #include "render/Shader.h"
 #include "render/components/MaterialComponent.h"
 #include "render/components/MeshComponent.h"
@@ -13,6 +14,7 @@
 #include <glm/gtc/type_ptr.hpp>
 #include <algorithm>
 #include <cmath>
+#include <map>
 #include <vector>
 
 using Engine::ECS::Registry;
@@ -49,7 +51,6 @@ glm::mat4 MatrixFromTransform(const glm::vec3& position,
     return transform;
 }
 
-constexpr float kPreviewYawDegrees = 0.0f;
 constexpr int kMaxShaderBones = 100;
 
 void UploadBoneUniforms(GLuint shaderProgramID, const Engine::Platform::Render::Skeleton* skeleton) {
@@ -71,25 +72,83 @@ void UploadBoneUniforms(GLuint shaderProgramID, const Engine::Platform::Render::
     }
 }
 
-glm::mat4 BuildPreviewRootMatrix(const CharacterInstance& instance) {
+struct SavedSkeletonPose {
+    bool bindPoseActive = true;
+    std::vector<std::pair<std::string, glm::mat4>> boneFinals;
+};
+
+SavedSkeletonPose CaptureSkeletonPose(Engine::Platform::Render::Skeleton& skeleton) {
+    SavedSkeletonPose saved;
+    saved.bindPoseActive = skeleton.IsBindPoseActive();
+    saved.boneFinals.reserve(skeleton.GetBoneCount());
+    for (const auto& pair : skeleton.GetBones()) {
+        saved.boneFinals.emplace_back(pair.first, pair.second.finalTransformation);
+    }
+    return saved;
+}
+
+void RestoreSkeletonPose(Engine::Platform::Render::Skeleton& skeleton, const SavedSkeletonPose& saved) {
+    if (saved.bindPoseActive) {
+        skeleton.ResetToBindPose();
+        return;
+    }
+
+    for (const auto& entry : saved.boneFinals) {
+        if (Engine::Platform::Render::Bone* bone = skeleton.GetBone(entry.first)) {
+            bone->finalTransformation = entry.second;
+        }
+    }
+    skeleton.SetBindPoseActive(false);
+}
+
+void ApplyStandingIdlePose(Engine::Platform::Render::Skeleton& skeleton,
+                           const Engine::Platform::Render::Animation& idleAnimation,
+                           float& idleAnimationTimeSeconds,
+                           float deltaSeconds) {
+    const float ticksPerSecond = idleAnimation.GetTicksPerSecond();
+    const float durationTicks = idleAnimation.GetDuration();
+    if (ticksPerSecond <= 0.0f) {
+        skeleton.ResetToBindPose();
+        return;
+    }
+
+    idleAnimationTimeSeconds += std::max(0.0f, deltaSeconds);
+    const float durationSeconds = durationTicks / ticksPerSecond;
+    if (durationSeconds > 0.0f) {
+        idleAnimationTimeSeconds = std::fmod(idleAnimationTimeSeconds, durationSeconds);
+        if (idleAnimationTimeSeconds < 0.0f) {
+            idleAnimationTimeSeconds += durationSeconds;
+        }
+    }
+
+    std::map<std::string, glm::mat4> transforms;
+    idleAnimation.GetBoneTransforms(idleAnimationTimeSeconds * ticksPerSecond, transforms);
+    skeleton.UpdateBoneTransforms(transforms);
+}
+
+glm::mat4 BuildPreviewRootMatrix(const CharacterInstance& instance, float yawDegrees) {
     const float uniformScale = instance.scale;
     const float footY = -instance.bottomY * uniformScale;
-    glm::mat4 transform = glm::translate(glm::mat4(1.0f), glm::vec3(0.0f, footY, 0.0f));
-    if (kPreviewYawDegrees != 0.0f) {
-        transform =
-            glm::rotate(transform, glm::radians(kPreviewYawDegrees), glm::vec3(0.0f, 1.0f, 0.0f));
-    }
+    const float worldMinY = footY + instance.bottomY * uniformScale;
+    const float worldMaxY = footY + (instance.bottomY + instance.height) * uniformScale;
+    const float centerY = (worldMinY + worldMaxY) * 0.5f;
+
+    // Rotate around the vertical body-center axis, then keep feet planted.
+    glm::mat4 transform = glm::translate(glm::mat4(1.0f), glm::vec3(0.0f, centerY, 0.0f));
+    transform = glm::rotate(transform, glm::radians(yawDegrees), glm::vec3(0.0f, 1.0f, 0.0f));
+    transform = glm::translate(transform, glm::vec3(0.0f, footY - centerY, 0.0f));
     transform = glm::scale(transform, glm::vec3(uniformScale));
     return transform;
 }
 
 glm::mat4 BuildPreviewEquipmentMatrix(const CharacterInstance& instance,
-                                      const EquipmentAttachmentComponent& attachment) {
+                                      const EquipmentAttachmentComponent& attachment,
+                                      float yawDegrees) {
     const float uniformScale = instance.scale;
     const float footY = -instance.bottomY * uniformScale;
 
     const glm::vec3 parentPosition(0.0f, footY, 0.0f);
-    const glm::vec3 parentRotation(0.0f, kPreviewYawDegrees, 0.0f);
+    const glm::vec3 parentRotation(0.0f, yawDegrees, 0.0f);
     const glm::vec3 parentScale(uniformScale);
 
     glm::vec3 worldOffset = attachment.localOffset;
@@ -210,6 +269,9 @@ CharacterPaperdollRenderer::~CharacterPaperdollRenderer() {
 void CharacterPaperdollRenderer::Shutdown() {
     DestroyFramebuffer();
     DestroyDefaultTextures();
+    m_yawDegrees = 0.0f;
+    m_idleAnimationTime = 0.0f;
+    m_hasIdleAnimClock = false;
 }
 
 void CharacterPaperdollRenderer::EnsureDefaultTextures() {
@@ -394,9 +456,36 @@ bool CharacterPaperdollRenderer::RenderScene(Registry& registry,
     glActiveTexture(GL_TEXTURE1);
     glBindTexture(GL_TEXTURE_2D, m_defaultWhiteTexture);
 
-    const glm::mat4 previewRootMatrix = BuildPreviewRootMatrix(instance);
-    const AnimationComponent* animComp = registry.GetComponent<AnimationComponent>(characterEntity);
-    UploadBoneUniforms(shaderProgramID, animComp ? animComp->skeleton : nullptr);
+    const glm::mat4 previewRootMatrix = BuildPreviewRootMatrix(instance, m_yawDegrees);
+    AnimationComponent* animComp = registry.GetComponent<AnimationComponent>(characterEntity);
+    Engine::Platform::Render::Skeleton* skeleton =
+        (animComp && animComp->skeleton && animComp->skeleton->IsLoaded()) ? animComp->skeleton
+                                                                            : nullptr;
+
+    SavedSkeletonPose savedPose;
+    bool restoredPose = false;
+    if (skeleton) {
+        savedPose = CaptureSkeletonPose(*skeleton);
+
+        const auto now = std::chrono::steady_clock::now();
+        float deltaSeconds = 1.0f / 60.0f;
+        if (m_hasIdleAnimClock) {
+            deltaSeconds = std::chrono::duration<float>(now - m_lastIdleAnimTime).count();
+            deltaSeconds = std::clamp(deltaSeconds, 0.0f, 0.05f);
+        }
+        m_lastIdleAnimTime = now;
+        m_hasIdleAnimClock = true;
+
+        if (animComp->idleAnimation && animComp->idleAnimation->IsLoaded()) {
+            ApplyStandingIdlePose(
+                *skeleton, *animComp->idleAnimation, m_idleAnimationTime, deltaSeconds);
+        } else {
+            skeleton->ResetToBindPose();
+        }
+        restoredPose = true;
+    }
+
+    UploadBoneUniforms(shaderProgramID, skeleton);
 
     bool drewAnyMesh = false;
     for (Engine::EntityID entityId : renderEntities) {
@@ -410,7 +499,7 @@ bool CharacterPaperdollRenderer::RenderScene(Registry& registry,
             const EquipmentAttachmentComponent* attachment =
                 registry.GetComponent<EquipmentAttachmentComponent>(entityId);
             if (attachment) {
-                modelMatrix = BuildPreviewEquipmentMatrix(instance, *attachment);
+                modelMatrix = BuildPreviewEquipmentMatrix(instance, *attachment, m_yawDegrees);
             }
         }
 
@@ -434,8 +523,12 @@ bool CharacterPaperdollRenderer::RenderScene(Registry& registry,
             glUniform1f(uniformShininess, shininess);
         }
 
-        meshComp->model->RenderModelPerMeshTexture(glGetUniformLocation(shaderProgramID, "useTexture"));
+        meshComp->model->RenderModelPerMeshTexture(shader.GetUseTextureLocation());
         drewAnyMesh = true;
+    }
+
+    if (restoredPose && skeleton) {
+        RestoreSkeletonPose(*skeleton, savedPose);
     }
 
     return drewAnyMesh;

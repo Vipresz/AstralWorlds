@@ -4,10 +4,12 @@
 #include "character/CharacterLoader.h"
 #include "character/CharacterDatabase.h"
 #include "character/CharacterEquipmentSystem.h"
+#include "character/CharacterStats.h"
 #include "character/ItemCatalog.h"
 #include "character/EquipmentRules.h"
 #include "character/NameplateComponent.h"
 #include "character/CharacterNameplateRenderer.h"
+#include "ui/CharacterHud.h"
 #include "character/CharacterReplication.h"
 #include "character/CharacterReplicationComponent.h"
 #include "audio/CharacterWalkAudioSystem.h"
@@ -27,8 +29,6 @@
 #include "render/systems/AnimationSystem.h"
 #include "render/systems/CameraSystem.h"
 #include "input/InputSystem.h"
-#include "physics/SimplePhysicsWorld.h"
-#include "physics/systems/PhysicsSystem.h"
 #include "audio/AudioSystem.h"
 #include "core/network/NetTypes.h"
 #include "core/network/LoadoutReplication.h"
@@ -49,6 +49,7 @@
 #include <memory>
 #include <exception>
 #include <cstdio>
+#include <cstdlib>
 #include <string>
 #include <algorithm>
 #include <vector>
@@ -63,8 +64,6 @@ using namespace Engine::Platform::Render;
 using namespace Engine::Platform::Render::Components;
 using namespace Engine::Platform::Render::Systems;
 using namespace Engine::Platform::Input::Systems;
-using namespace Engine::Physics;
-using namespace Engine::Physics::Systems;
 using namespace Engine::Audio;
 using namespace Engine::Platform::Networking::Systems;
 using namespace Game::Character;
@@ -96,8 +95,71 @@ int main(int argc, char* argv[]) {
             return 1;
         }
         LOG_INFO_FMT("Main", "Window initialized: %dx%d", mainWindow.getBufferWidth(), mainWindow.getBufferHeight());
-        
+
+#ifdef PLATFORM_HAS_NUKLEAR
+        std::shared_ptr<UISystem> uiSystem = std::make_shared<UISystem>();
+        MenuStyle menuStyle = MenuStyle::Astral();
+        MainMenuConfig menuConfig;
+        MainMenu::LoadConfig(menuConfig);
+        if (menuConfig.minScreenWidth > 0 && menuConfig.minScreenHeight > 0) {
+            glfwSetWindowSizeLimits(
+                mainWindow.GetGLFWWindow(),
+                menuConfig.minScreenWidth,
+                menuConfig.minScreenHeight,
+                GLFW_DONT_CARE,
+                GLFW_DONT_CARE);
+        }
+        menuStyle.metrics.hudFontSize = menuConfig.textSize;
+        std::unique_ptr<MainMenu> mainMenu = std::make_unique<MainMenu>();
+        std::unique_ptr<CharacterMenu> characterMenu = std::make_unique<CharacterMenu>();
+        Engine::Platform::UI::Minimap minimap;
+        Game::UI::CharacterHud characterHud;
+        const bool menuBlocksStart = true;
+        bool bootUiReady = false;
+        if (uiSystem->Initialize(&mainWindow, menuStyle)) {
+            mainMenu->Initialize(&menuConfig);
+            uiSystem->SetUIBuilder([menu = mainMenu.get(), uiSys = uiSystem.get()](
+                                       struct nk_context* ctx,
+                                       const MenuStyle& style,
+                                       int screenW,
+                                       int screenH) {
+                menu->Build(ctx, style, *uiSys, screenW, screenH);
+                uiSys->SetBlockingGameInput(menu->BlocksGameInput());
+            });
+            bootUiReady = true;
+            LOG_INFO("Main", "Boot loading UI ready");
+        } else {
+            LOG_WARNING("Main", "UISystem failed to initialize — continuing without loading screen");
+            mainMenu.reset();
+        }
+
+        auto pumpBootLoading = [&](float progress, const char* status) {
+            if (!bootUiReady || !mainMenu || !uiSystem) {
+                return;
+            }
+            mainMenu->SetLoadProgress(progress);
+            if (status) {
+                mainMenu->SetLoadStatus(status);
+            }
+            mainWindow.pollEvents();
+            if (mainWindow.getShouldClose()) {
+                return;
+            }
+            mainWindow.updateFramebufferSize();
+            glViewport(0, 0, mainWindow.getBufferWidth(), mainWindow.getBufferHeight());
+            glClearColor(0.02f, 0.02f, 0.04f, 1.0f);
+            glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+            uiSystem->PresentFrame();
+            mainWindow.swapBuffers();
+        };
+        pumpBootLoading(0.02f, "Starting...");
+#else
+        const bool menuBlocksStart = false;
+        auto pumpBootLoading = [](float, const char*) {};
+#endif
+
         LOG_INFO("Main", "Loading shaders...");
+        pumpBootLoading(0.08f, "Loading shaders...");
         Shader shader;
         shader.CreateFromFiles("shaders/shader.vert", "shaders/shader.frag");
         if (!shader.IsValid()) {
@@ -114,6 +176,7 @@ int main(int argc, char* argv[]) {
         glm::mat4 projection = glm::perspective(glm::radians(45.0f), aspectRatio, 0.1f, 2000.0f);
         
         LOG_INFO("Main", "Creating ECS registry...");
+        pumpBootLoading(0.15f, "Loading character data...");
         Registry registry;
 
         ItemCatalog itemCatalog;
@@ -133,6 +196,7 @@ int main(int argc, char* argv[]) {
         cameraRig.ConfigureFollowTarget(character.id, registry, 0.1f, 100.0f, 0.5f, 0.5f);
         
         LOG_INFO("Main", "Creating terrain from heightmap...");
+        pumpBootLoading(0.30f, "Loading terrain...");
         Entity ground = registry.CreateEntity();
         std::unique_ptr<Model> groundModel = std::make_unique<Model>();
         const std::string heightmapPath = "terrain/barren_scar/00.png";
@@ -144,6 +208,7 @@ int main(int argc, char* argv[]) {
             LOG_WARNING("Main", "Heightmap not found, falling back to flat plane");
             groundModel->CreatePlane(100.0f, 100.0f);
         }
+        pumpBootLoading(0.55f, "Loading world...");
         
         auto& groundTransform = registry.AddComponent<TransformComponent>(ground.id);
         groundTransform.SetPosition(0.0f, 0.0f, 0.0f);
@@ -159,17 +224,21 @@ int main(int argc, char* argv[]) {
         const float spawnZ = 5.0f;
         const float terrainHeight = groundModel->GetHeightAt(spawnX, spawnZ);
 
-        CharacterLoginContext offlineLogin;
-        offlineLogin.displayName = networkConfig.displayName;
-        offlineLogin.isOnlineLogin = false;
-        if (!characterLoader.LoginAndBuild(registry, characterInstance, character.id, offlineLogin)) {
-            LOG_ERROR("Main", "Failed to build character from loadout");
-            return 1;
+        // Character mesh/loadout is loaded once on PLAY (enter-world), not during boot.
+        transform.SetPosition(spawnX, terrainHeight, spawnZ);
+        auto& animComp = registry.AddComponent<AnimationComponent>(character.id);
+        animComp.groundLevel = terrainHeight;
+        cameraRig.SetHeightOffset(1.7f);
+        cameraRig.followCamera.Update(0.0f);
+
+        pumpBootLoading(0.78f, "Initializing systems...");
+        if (mainWindow.getShouldClose()) {
+            return 0;
         }
-        characterLoader.PlaceOnTerrain(registry, character.id, characterInstance, spawnX, spawnZ, terrainHeight);
 
         std::shared_ptr<NetworkSystem> networkSystem;
         std::shared_ptr<ReplicationSystem> replicationSystem;
+        bool characterLoaded = false;
 
         auto syncReplicationLoadout = [&](EntityID entityId, const CharacterLoginContext& loginContext) {
             CharacterLoadout loadout;
@@ -194,20 +263,37 @@ int main(int argc, char* argv[]) {
                 networkSystem->GetClient().SendGenericData(payload);
             }
         };
-        CharacterLoginContext initialLogin;
-        initialLogin.displayName = networkConfig.displayName;
-        initialLogin.isOnlineLogin = false;
-        syncReplicationLoadout(character.id, initialLogin);
 
-        const float nameplateHeight = characterInstance.GetHeadHeightOffset() + 0.15f;
-        AttachNameplate(registry, character.id, networkConfig.displayName.c_str(), nameplateHeight);
-
-        cameraRig.SetHeightOffset(characterInstance.GetHeadHeightOffset());
-        cameraRig.followCamera.Update(0.0f);
-
-        auto& animComp = registry.AddComponent<AnimationComponent>(character.id);
-        animComp.groundLevel = terrainHeight;
-        characterInstance.WireAnimationComponent(registry);
+        auto loadLocalCharacter = [&](const CharacterLoginContext& loginContext) -> bool {
+            if (characterLoaded) {
+                return true;
+            }
+            if (!characterLoader.LoginAndBuild(registry, characterInstance, character.id, loginContext)) {
+                LOG_ERROR("Main", "Failed to build character from loadout");
+                return false;
+            }
+            characterInstance.WireAnimationComponent(registry);
+            characterLoader.PlaceOnTerrain(
+                registry, character.id, characterInstance, spawnX, spawnZ, terrainHeight);
+            cameraRig.SetHeightOffset(characterInstance.GetHeadHeightOffset());
+            cameraRig.followCamera.Update(0.0f);
+            AttachNameplate(
+                registry,
+                character.id,
+                loginContext.displayName.c_str(),
+                characterInstance.GetHeadHeightOffset() + 0.15f);
+            if (AnimationComponent* anim = registry.GetComponent<AnimationComponent>(character.id)) {
+                anim->groundLevel = terrainHeight;
+            }
+            if (networkSystem) {
+                networkSystem->SetRemotePlayerModel(
+                    characterInstance.GetBodyModel(), characterInstance.scale);
+            }
+            syncReplicationLoadout(character.id, loginContext);
+            characterLoaded = true;
+            LOG_INFO("Main", "Local character loaded");
+            return true;
+        };
         
         LOG_INFO("Main", "Initializing systems...");
         SystemManager systemManager;
@@ -220,26 +306,6 @@ int main(int argc, char* argv[]) {
         bool networkWantsConnect = networkConfig.enabled;
         float networkRetryCooldown = 0.0f;
         constexpr float kNetworkRetrySeconds = 3.0f;
-        auto reloadCharacterFromLogin = [&](const CharacterLoginContext& loginContext) {
-            if (!characterLoader.LoginAndBuild(registry, characterInstance, character.id, loginContext)) {
-                LOG_WARNING("Main", "Failed to refresh character loadout after login");
-                return;
-            }
-            characterInstance.WireAnimationComponent(registry);
-            characterLoader.PlaceOnTerrain(
-                registry, character.id, characterInstance, spawnX, spawnZ, terrainHeight);
-            cameraRig.SetHeightOffset(characterInstance.GetHeadHeightOffset());
-            AttachNameplate(
-                registry,
-                character.id,
-                loginContext.displayName.c_str(),
-                characterInstance.GetHeadHeightOffset() + 0.15f);
-            if (networkSystem) {
-                networkSystem->SetRemotePlayerModel(
-                    characterInstance.GetBodyModel(), characterInstance.scale);
-            }
-            syncReplicationLoadout(character.id, loginContext);
-        };
 
         if (networkConfig.enabled) {
             replicationSystem = std::make_shared<ReplicationSystem>();
@@ -289,8 +355,7 @@ int main(int argc, char* argv[]) {
                     }
                 });
             networkSystem->SetLocalPlayerEntity(character.id);
-            networkSystem->SetRemotePlayerModel(
-                characterInstance.GetBodyModel(), characterInstance.scale);
+            // Body model is set after PLAY loads the character.
             networkSystem->SetTerrainModel(groundModel.get());
             networkSystem->SetRemotePlayerSetupHandler(
                 [&characterInstance](Registry& reg,
@@ -318,7 +383,9 @@ int main(int argc, char* argv[]) {
         }
         
         auto inputSystem = std::make_shared<InputSystem>(&mainWindow);
-        inputSystem->SetMovementSpeed(1.4f); // Walking speed (realistic)
+        CharacterStats characterStats;
+        LoadCharacterStats(characterStats);
+        inputSystem->SetMovementSpeeds(characterStats.walkSpeed, characterStats.runSpeed);
         inputSystem->SetCharacterEntity(character.id);
         inputSystem->SetTerrainModel(groundModel.get());
         systemManager.RegisterSystem(inputSystem);
@@ -344,14 +411,6 @@ int main(int argc, char* argv[]) {
         auto cameraSystem = std::make_shared<CameraSystem>();
         systemManager.RegisterSystem(cameraSystem);
         LOG_INFO("Main", "  CameraSystem registered");
-
-        auto physicsWorld = std::make_unique<SimplePhysicsWorld>();
-        physicsWorld->SetTerrainSampler([groundModelPtr = groundModel.get()](float x, float z) {
-            return groundModelPtr ? groundModelPtr->GetHeightAt(x, z) : 0.0f;
-        });
-        auto physicsSystem = std::make_shared<PhysicsSystem>(physicsWorld.get());
-        systemManager.RegisterSystem(physicsSystem);
-        LOG_INFO("Main", "  PhysicsSystem registered");
 
         auto audioSystem = std::make_shared<AudioSystem>();
 #ifdef ENGINE_ENABLE_AUDIO
@@ -383,10 +442,35 @@ int main(int argc, char* argv[]) {
         systemManager.RegisterSystem(gameCameraInput);
         LOG_INFO("Main", "  GameCameraInput registered (LMB orbit, RMB face camera)");
 
+#ifdef PLATFORM_HAS_NUKLEAR
+        auto pumpEnterLoading = [&](float progress, const char* status) {
+            if (!bootUiReady || !mainMenu || !uiSystem || !mainMenu->IsEnterWorldLoading()) {
+                return;
+            }
+            mainMenu->SetEnterLoadProgress(progress);
+            if (status) {
+                mainMenu->SetEnterLoadStatus(status);
+            }
+            mainWindow.pollEvents();
+            if (mainWindow.getShouldClose()) {
+                return;
+            }
+            mainWindow.updateFramebufferSize();
+            glViewport(0, 0, mainWindow.getBufferWidth(), mainWindow.getBufferHeight());
+            glClearColor(0.02f, 0.02f, 0.04f, 1.0f);
+            glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+            uiSystem->PresentFrame();
+            mainWindow.swapBuffers();
+        };
+#else
+        auto pumpEnterLoading = [](float, const char*) {};
+#endif
+
         auto tryConnectNetwork = [&]() {
             if (!networkSystem || networkConnected || !networkWantsConnect || networkRetryCooldown > 0.0f) {
                 return;
             }
+            pumpEnterLoading(0.20f, "Connecting...");
             if (networkSystem->ConnectAndLogin(
                     networkConfig.serverHost,
                     networkConfig.serverPort,
@@ -394,6 +478,7 @@ int main(int argc, char* argv[]) {
                 networkConnected = true;
                 networkWantsConnect = false;
                 LOG_INFO_FMT("Main", "Connected to server as user %u", networkSystem->GetLocalUserId());
+                pumpEnterLoading(0.55f, "Loading character...");
                 if (replicationSystem) {
                     replicationSystem->RegisterReplicatedEntity(networkSystem->GetLocalUserId(), character.id);
                 }
@@ -402,7 +487,16 @@ int main(int argc, char* argv[]) {
                 onlineLogin.userId = networkSystem->GetLocalUserId();
                 onlineLogin.displayName = networkConfig.displayName;
                 onlineLogin.isOnlineLogin = true;
-                reloadCharacterFromLogin(onlineLogin);
+                if (!loadLocalCharacter(onlineLogin)) {
+                    pumpEnterLoading(0.55f, "Character load failed");
+                    return;
+                }
+                pumpEnterLoading(1.0f, "Ready");
+#ifdef PLATFORM_HAS_NUKLEAR
+                if (mainMenu && mainMenu->IsEnterWorldLoading()) {
+                    mainMenu->NotifyEnterWorldReady();
+                }
+#endif
             } else {
                 networkRetryCooldown = kNetworkRetrySeconds;
                 LOG_WARNING_FMT("Main",
@@ -410,43 +504,20 @@ int main(int argc, char* argv[]) {
                                 networkConfig.serverHost.c_str(),
                                 networkConfig.serverPort,
                                 kNetworkRetrySeconds);
+                pumpEnterLoading(0.35f, "Waiting for server...");
             }
         };
 
 #ifdef PLATFORM_HAS_NUKLEAR
-        std::shared_ptr<UISystem> uiSystem;
-        MenuStyle menuStyle = MenuStyle::Astral();
-        MainMenuConfig menuConfig;
-        std::unique_ptr<MainMenu> mainMenu = std::make_unique<MainMenu>();
-        std::unique_ptr<CharacterMenu> characterMenu = std::make_unique<CharacterMenu>();
-        Engine::Platform::UI::Minimap minimap;
-        const bool menuBlocksStart = true;
-#else
-        const bool menuBlocksStart = false;
-#endif
-
-#ifdef PLATFORM_HAS_NUKLEAR
-        uiSystem = std::make_shared<UISystem>();
-        MainMenu::LoadConfig(menuConfig);
-        if (menuConfig.minScreenWidth > 0 && menuConfig.minScreenHeight > 0) {
-            glfwSetWindowSizeLimits(
-                mainWindow.GetGLFWWindow(),
-                menuConfig.minScreenWidth,
-                menuConfig.minScreenHeight,
-                GLFW_DONT_CARE,
-                GLFW_DONT_CARE);
-        }
-        menuStyle.metrics.hudFontSize = menuConfig.textSize;
-        if (uiSystem->Initialize(&mainWindow, menuStyle)) {
-            if (!mainMenu->Initialize(&menuConfig)) {
-                LOG_WARNING("Main", "Main menu button textures failed to load — using text-only PLAY button");
-            }
+        pumpBootLoading(0.90f, "Loading menus...");
+        if (bootUiReady && uiSystem && mainMenu) {
             CharacterMenuConfig characterMenuConfig;
             CharacterMenu::LoadConfig(characterMenuConfig);
             if (!characterMenu->Initialize(&characterMenuConfig)) {
                 LOG_WARNING("Main", "Character menu bottom bar failed to load");
             }
             characterMenu->SetPaperdollCharacter(&registry, character.id, &shader, &characterInstance);
+            pumpBootLoading(0.94f, "Loading HUD...");
             if (!minimap.Initialize(heightmapPath.c_str(),
                                     groundModel.get(),
                                     kTerrainSizeX,
@@ -462,9 +533,15 @@ int main(int argc, char* argv[]) {
                 minimap.SetTrackedEntity(character.id);
                 LOG_INFO("Main", "  Minimap initialized (top-right HUD)");
             }
+            if (!characterHud.Initialize(characterMenuConfig.characterHud)) {
+                LOG_WARNING("Main", "Character HUD failed to load");
+            } else {
+                LOG_INFO("Main", "  Character HUD initialized (top-left)");
+            }
             uiSystem->SetUIBuilder([menu = mainMenu.get(),
                                     characterMenu = characterMenu.get(),
                                     minimap = &minimap,
+                                    characterHud = &characterHud,
                                     network = networkSystem.get(),
                                     uiSys = uiSystem.get(),
                                     &registry,
@@ -483,6 +560,7 @@ int main(int argc, char* argv[]) {
                         characterMenu->Build(ctx, style, *uiSys, screenW, screenH);
                     }
                     if (menu->IsGameStarted()) {
+                        characterHud->Draw(ctx, screenW, screenH);
                         static thread_local std::vector<EntityID> minimapRemotePlayers;
                         minimapRemotePlayers.clear();
                         if (network) {
@@ -518,7 +596,15 @@ int main(int argc, char* argv[]) {
             });
             systemManager.RegisterSystem(uiSystem);
             LOG_INFO("Main", "  UISystem registered (main menu)");
-        } else {
+            pumpBootLoading(1.0f, "Ready");
+            mainMenu->SetReady();
+            // Draw one ready frame so PLAY appears before the first game-loop tick.
+            pumpBootLoading(1.0f, "Ready");
+            if (const char* autoPlay = std::getenv("AW_AUTO_PLAY");
+                autoPlay && autoPlay[0] == '1') {
+                mainMenu->BeginEnterWorld();
+            }
+        } else if (uiSystem) {
             LOG_WARNING("Main", "UISystem failed to initialize — running without menus");
             mainMenu.reset();
         }
@@ -528,7 +614,16 @@ int main(int argc, char* argv[]) {
         LOG_INFO("Main", "All systems initialized");
 
         if (!menuBlocksStart) {
-            tryConnectNetwork();
+            if (networkWantsConnect) {
+                tryConnectNetwork();
+            } else {
+                CharacterLoginContext offlineLogin;
+                offlineLogin.displayName = networkConfig.displayName;
+                offlineLogin.isOnlineLogin = false;
+                if (!loadLocalCharacter(offlineLogin)) {
+                    return 1;
+                }
+            }
         }
         
         LOG_INFO("Main", "=== Entering game loop ===");
@@ -564,8 +659,30 @@ int main(int argc, char* argv[]) {
             }
 
 #ifdef PLATFORM_HAS_NUKLEAR
-            if (mainMenu && mainMenu->IsGameStarted() && networkWantsConnect && !networkConnected) {
-                tryConnectNetwork();
+            if (mainMenu) {
+                // PLAY → enter-world loading screen, then connect / finish offline join.
+                if (mainMenu->IsEnterWorldLoading()) {
+                    if (networkWantsConnect && !networkConnected) {
+                        tryConnectNetwork();
+                    } else if (!networkWantsConnect || !networkSystem) {
+                        // Offline PLAY: load character once, then splash/fade.
+                        if (!characterLoaded) {
+                            pumpEnterLoading(0.45f, "Loading character...");
+                            CharacterLoginContext offlineLogin;
+                            offlineLogin.displayName = networkConfig.displayName;
+                            offlineLogin.isOnlineLogin = false;
+                            if (loadLocalCharacter(offlineLogin)) {
+                                pumpEnterLoading(1.0f, "Ready");
+                                mainMenu->NotifyEnterWorldReady();
+                            } else {
+                                mainMenu->SetEnterLoadStatus("Character load failed");
+                            }
+                        } else {
+                            mainMenu->NotifyEnterWorldReady();
+                        }
+                    }
+                }
+                mainMenu->Update(deltaTime);
             }
 #endif
             

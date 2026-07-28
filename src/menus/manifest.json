@@ -16,11 +16,35 @@
     "margin_pixels": 21,
     "border_inset_fraction": 0.13
   },
+  "character_hud": {
+    "texture": "hud/hud.png",
+    "source_width": 300,
+    "source_height": 78,
+    "x_fraction": 0.015,
+    "y_fraction": 0.02,
+    "anchor": "top_left",
+    "bars": [
+      {
+        "id": "health",
+        "x_fraction": 0.28,
+        "y_fraction": 0.28,
+        "width_fraction": 0.60,
+        "height_fraction": 0.218
+      },
+      {
+        "id": "mana",
+        "x_fraction": 0.28,
+        "y_fraction": 0.558,
+        "width_fraction": 0.60,
+        "height_fraction": 0.218
+      }
+    ]
+  },
   "paperdoll": {
     "texture": "paperdoll/paperdoll_2.png",
     "width_fraction": 0.25,
     "x_fraction": 0.18,
-    "y_fraction": 0.42
+    "y_fraction": 0.35
   },
   "panels": [
     {
@@ -47,6 +71,26 @@
     "textures": {
       "dark": "close/close_dark.png",
       "light": "close/close_light.png"
+    }
+  },
+  "paperdoll_rotate": {
+    "y_from_bottom_fraction": 0.29,
+    "size_fraction": 0.15,
+    "aspect_ratio": 2.0,
+    "degrees_per_second": 120.0,
+    "left": {
+      "x_fraction": 0.32,
+      "textures": {
+        "dark": "paperdoll/arrows/rotate_left_side.png",
+        "light": "paperdoll/arrows/rotate_left_side_light.png"
+      }
+    },
+    "right": {
+      "x_fraction": 0.68,
+      "textures": {
+        "dark": "paperdoll/arrows/rotate_right_side.png",
+        "light": "paperdoll/arrows/rotate_right_side_light.png"
+      }
     }
   },
   "bar_buttons": {

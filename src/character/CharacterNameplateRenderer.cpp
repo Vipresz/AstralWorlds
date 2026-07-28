@@ -5,6 +5,8 @@
 #include "ui/OverlayWindow.h"
 #include "ui/WorldToScreen.h"
 
+#include <cmath>
+
 #define NK_INCLUDE_FIXED_TYPES
 #define NK_INCLUDE_DEFAULT_ALLOCATOR
 #include "nuklear.h"
@@ -58,7 +60,11 @@ void CharacterNameplateRenderer::Draw(struct nk_context* ctx,
         }
 
         NameplateText::DrawCentered(
-            ctx, fonts, nameplate->displayName, screen.x, screen.y);
+            ctx,
+            fonts,
+            nameplate->displayName,
+            std::floor(screen.x + 0.5f),
+            std::floor(screen.y + 0.5f));
     }
 }
 

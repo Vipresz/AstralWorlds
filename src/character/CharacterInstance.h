@@ -42,6 +42,11 @@ private:
     std::unique_ptr<Engine::Platform::Render::Animation> m_walkingAnimation;
     std::unique_ptr<Engine::Platform::Render::Animation> m_runningAnimation;
     std::unique_ptr<Engine::Platform::Render::Animation> m_jumpAnimation;
+    std::unique_ptr<Engine::Platform::Render::Animation> m_jumpMovingAnimation;
+    std::unique_ptr<Engine::Platform::Render::Animation> m_fallingAnimation;
+    std::unique_ptr<Engine::Platform::Render::Animation> m_landingAnimation;
+    std::unique_ptr<Engine::Platform::Render::Animation> m_leftTurnAnimation;
+    std::unique_ptr<Engine::Platform::Render::Animation> m_rightTurnAnimation;
     std::vector<std::unique_ptr<Engine::Platform::Render::Model>> m_itemModels;
     std::vector<Engine::EntityID> m_equipmentEntities;
 };

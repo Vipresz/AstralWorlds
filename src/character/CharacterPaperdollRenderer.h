@@ -5,6 +5,8 @@
 
 #include <GL/glew.h>
 
+#include <chrono>
+
 namespace Engine {
 namespace ECS {
 class Registry;
@@ -25,6 +27,10 @@ public:
     ~CharacterPaperdollRenderer();
 
     void Shutdown();
+
+    // Yaw around the body center vertical axis (degrees). Paperdoll-only; does not affect world.
+    void SetYawDegrees(float yawDegrees) { m_yawDegrees = yawDegrees; }
+    float GetYawDegrees() const { return m_yawDegrees; }
 
     bool RenderToTexture(Engine::ECS::Registry& registry,
                          Engine::EntityID characterEntity,
@@ -57,6 +63,10 @@ private:
     int m_height = 0;
     GLuint m_defaultWhiteTexture = 0;
     GLuint m_defaultShadowMap = 0;
+    float m_yawDegrees = 0.0f;
+    float m_idleAnimationTime = 0.0f;
+    bool m_hasIdleAnimClock = false;
+    std::chrono::steady_clock::time_point m_lastIdleAnimTime{};
 };
 
 } // namespace Character

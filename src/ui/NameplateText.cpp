@@ -8,6 +8,8 @@
 #define NK_INCLUDE_FONT_BAKING
 #include "nuklear.h"
 
+#include <cmath>
+
 namespace Game {
 namespace UI {
 
@@ -33,8 +35,9 @@ void NameplateText::DrawCentered(struct nk_context* ctx,
     const int textLen = static_cast<int>(nk_strlen(text));
     const float textW = userFont->width(userFont->userdata, userFont->height, text, textLen);
     const float textH = userFont->height;
-    const float textX = screenX - textW * 0.5f;
-    const float textY = screenY - textH;
+    // Pixel-snap so the label doesn't shimmer into a double-image while airborne.
+    const float textX = std::floor(screenX - textW * 0.5f + 0.5f);
+    const float textY = std::floor(screenY - textH + 0.5f);
     const struct nk_rect textRect = nk_rect(textX, textY, textW, textH);
 
     struct nk_command_buffer* canvas = nk_window_get_canvas(ctx);
