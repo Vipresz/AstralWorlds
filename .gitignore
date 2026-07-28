@@ -1,5 +1,18 @@
 # Build directory
 build/
+build-*/
+build-ci-local/
+build-cov/
+build-dev/
+build-tests/
+external/
+bin/
+lib/
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+Makefile
+*.dir/
 
 # Build artifacts
 *.o
@@ -10,6 +23,8 @@ build/
 *.lib
 *.obj
 *.pdb
+*.ilk
+*.exp
 *.tlog
 *.filters
 *.vcxproj
@@ -17,11 +32,9 @@ build/
 *.sln
 *.lastbuildstate
 *.recipe
-cmake_install.cmake
-CMakeCache.txt
-CMakeFiles/
 
 # IDE files
+.vs/
 .vscode/
 .idea/
 *.swp
@@ -34,13 +47,18 @@ Thumbs.db
 
 # Log files
 *.log
+LastCoverageResults.log
+server.log
 *_debug.log
 *_editor_debug.log
 
-# JSON config files (generated)
+# JSON config files (generated) — keep game manifests/loadouts
 *.json
 !package.json
 !tsconfig.json
+!src/character/**/*.json
+!src/menus/**/*.json
+
 docs/
 
 # ML Extractor - Training data and outputs
@@ -57,6 +75,7 @@ __pycache__/
 *.pyc
 *.pyo
 *.joblib
+
 # Large data files
 *.pcap
 *.bag

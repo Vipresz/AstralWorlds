@@ -1,0 +1,139 @@
+{
+  "version": 2,
+  "description": "Character screen overlay shown after PLAY. Paths are relative to menus/ at runtime.",
+  "root": "menus",
+  "screen": {
+    "min_width": 1280,
+    "min_height": 720
+  },
+  "bottom_bar": {
+    "texture": "char_screen/bottom_menu.png",
+    "width_fraction": 0.6
+  },
+  "minimap": {
+    "border_texture": "map/map.png",
+    "size_pixels": 234,
+    "margin_pixels": 21,
+    "border_inset_fraction": 0.13
+  },
+  "character_hud": {
+    "texture": "hud/hud.png",
+    "source_width": 300,
+    "source_height": 78,
+    "x_fraction": 0.015,
+    "y_fraction": 0.02,
+    "anchor": "top_left",
+    "bars": [
+      {
+        "id": "health",
+        "x_fraction": 0.28,
+        "y_fraction": 0.28,
+        "width_fraction": 0.60,
+        "height_fraction": 0.218
+      },
+      {
+        "id": "mana",
+        "x_fraction": 0.28,
+        "y_fraction": 0.558,
+        "width_fraction": 0.60,
+        "height_fraction": 0.218
+      }
+    ]
+  },
+  "paperdoll": {
+    "texture": "paperdoll/paperdoll_2.png",
+    "width_fraction": 0.25,
+    "x_fraction": 0.18,
+    "y_fraction": 0.35
+  },
+  "panels": [
+    {
+      "button_id": "char",
+      "texture": "paperdoll/paperdoll_2.png",
+      "width_fraction": 0.25,
+      "x_fraction": 0.18,
+      "y_fraction": 0.42,
+      "close_button": {
+        "size_fraction": 0.08,
+        "x_anchor_fraction": 0.995,
+        "y_anchor_fraction": 0.0205,
+        "margin_fraction": 0.0,
+        "placement": "center_on_corner"
+      },
+      "character_preview": {
+        "size_fraction": 0.65,
+        "x_fraction": 0.5,
+        "y_fraction": 0.5
+      }
+    }
+  ],
+  "close_button": {
+    "textures": {
+      "dark": "close/close_dark.png",
+      "light": "close/close_light.png"
+    }
+  },
+  "paperdoll_rotate": {
+    "y_from_bottom_fraction": 0.29,
+    "size_fraction": 0.15,
+    "aspect_ratio": 2.0,
+    "degrees_per_second": 120.0,
+    "left": {
+      "x_fraction": 0.32,
+      "textures": {
+        "dark": "paperdoll/arrows/rotate_left_side.png",
+        "light": "paperdoll/arrows/rotate_left_side_light.png"
+      }
+    },
+    "right": {
+      "x_fraction": 0.68,
+      "textures": {
+        "dark": "paperdoll/arrows/rotate_right_side.png",
+        "light": "paperdoll/arrows/rotate_right_side_light.png"
+      }
+    }
+  },
+  "bar_buttons": {
+    "icon_height_fraction": 0.43137254901960784,
+    "y_fraction": 0.49,
+    "x_spacing_fraction": 0.05350877192982456140350877192982,
+    "first_x_fraction": 0.6838308173773625628217642848642,
+    "buttons": [
+      {
+        "id": "char",
+        "textures": {
+          "dark": "char_screen/icons/char_dark.png",
+          "light": "char_screen/icons/char_light.png"
+        }
+      },
+      {
+        "id": "bag",
+        "textures": {
+          "dark": "char_screen/icons/bag_dark.png",
+          "light": "char_screen/icons/bag_light.png"
+        }
+      },
+      {
+        "id": "quests",
+        "textures": {
+          "dark": "char_screen/icons/quests_dark.png",
+          "light": "char_screen/icons/quests_light.png"
+        }
+      },
+      {
+        "id": "settings",
+        "textures": {
+          "dark": "char_screen/icons/settings_dark.png",
+          "light": "char_screen/icons/settings_light.png"
+        }
+      },
+      {
+        "id": "social",
+        "textures": {
+          "dark": "char_screen/icons/social_dark.png",
+          "light": "char_screen/icons/social_light.png"
+        }
+      }
+    ]
+  }
+}

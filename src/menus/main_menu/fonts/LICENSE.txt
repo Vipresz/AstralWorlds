@@ -1,0 +1,16 @@
+Inter and JetBrains Mono are bundled for AstralWorlds UI and HUD text.
+
+Inter
+  Copyright (c) 2016 The Inter Project Authors
+  Licensed under the SIL Open Font License, Version 1.1
+  https://openfontlicense.org
+
+JetBrains Mono
+  Copyright 2020 The JetBrains Mono Project Authors
+  Licensed under the SIL Open Font License, Version 1.1
+  https://openfontlicense.org
+
+You may use, study, modify, and redistribute these fonts under the OFL.
+See the full license text at https://openfontlicense.org/documents/ofl-1.1.txt
+
+Source downloads: menu/tools/download_fonts.py

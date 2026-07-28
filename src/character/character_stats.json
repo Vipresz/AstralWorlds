@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "description": "Gameplay character locomotion stats. Speeds are world units per second.",
+  "locomotion": {
+    "walk_speed": 2.8,
+    "run_speed": 5.25
+  }
+}

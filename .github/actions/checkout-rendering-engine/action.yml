@@ -1,0 +1,24 @@
+name: Checkout RenderingEngine
+description: Check out the RenderingEngine submodule commit referenced by the parent repo.
+
+inputs:
+  token:
+    description: GitHub token with access to the private RenderingEngine repo.
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Resolve RenderingEngine submodule commit
+      id: rendering_engine
+      shell: bash
+      run: echo "sha=$(git ls-tree HEAD RenderingEngine | awk '{print $3}')" >> "$GITHUB_OUTPUT"
+
+    - name: Checkout RenderingEngine
+      uses: actions/checkout@v4
+      with:
+        repository: Vipresz/RenderingEngine
+        path: RenderingEngine
+        ref: ${{ steps.rendering_engine.outputs.sha }}
+        token: ${{ inputs.token }}
+        submodules: recursive

@@ -33,14 +33,36 @@ set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
 set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
 
+# Nuklear (menus / 2D overlay) — prefer bundled copy in RenderingEngine
+set(RENDERING_ENGINE_NUKLEAR "${CMAKE_CURRENT_SOURCE_DIR}/RenderingEngine/third_party/nuklear")
+set(EXTERNAL_NUKLEAR "${CMAKE_CURRENT_SOURCE_DIR}/external/Nuklear")
+get_filename_component(GAMES_DIR "${CMAKE_CURRENT_SOURCE_DIR}/.." ABSOLUTE)
+set(GAME_LIBS_DIR "${GAMES_DIR}/game_libs")
+
+if(EXISTS "${RENDERING_ENGINE_NUKLEAR}/nuklear.h")
+    set(NUKLEAR_DIR "${RENDERING_ENGINE_NUKLEAR}" CACHE PATH "Nuklear library root")
+    message(STATUS "Nuklear found (bundled): ${NUKLEAR_DIR}")
+elseif(EXISTS "${EXTERNAL_NUKLEAR}/nuklear.h")
+    set(NUKLEAR_DIR "${EXTERNAL_NUKLEAR}" CACHE PATH "Nuklear library root")
+    message(STATUS "Nuklear found (external): ${NUKLEAR_DIR}")
+elseif(EXISTS "${GAME_LIBS_DIR}/Nuklear/nuklear.h")
+    set(NUKLEAR_DIR "${GAME_LIBS_DIR}/Nuklear" CACHE PATH "Nuklear library root")
+    message(STATUS "Nuklear found (game_libs): ${NUKLEAR_DIR}")
+else()
+    message(WARNING "Nuklear not found — UI menus will not build")
+endif()
+
 # ============================================================================
 # Build Components
 # ============================================================================
 
 # Build RenderingEngine library (Engine + Platform for rendering, UI, logging)
-# This provides generic components that can be reused across projects
 if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/RenderingEngine/CMakeLists.txt")
     set(BUILD_ENGINE_EXAMPLES OFF CACHE BOOL "" FORCE)
+    set(BUILD_ENGINE_TESTS ${BUILD_ENGINE_TESTS} CACHE BOOL "Build RenderingEngine unit tests" FORCE)
+    if(NOT BUILD_GAME AND NOT BUILD_SKELETON_EDITOR AND BUILD_ENGINE_TESTS)
+        set(BUILD_ENGINE_PLATFORM OFF CACHE BOOL "" FORCE)
+    endif()
     add_subdirectory(RenderingEngine)
     message(STATUS "Added RenderingEngine from: ${CMAKE_CURRENT_SOURCE_DIR}/RenderingEngine")
 else()
@@ -50,13 +72,16 @@ endif()
 # Build options for specific targets
 option(BUILD_GAME "Build the main game executable" ON)
 option(BUILD_SKELETON_EDITOR "Build the skeleton editor" ON)
+option(BUILD_ENGINE_TESTS "Build RenderingEngine unit tests" ON)
 
-# Build game executable (final player executable)
+if(BUILD_ENGINE_TESTS)
+    enable_testing()
+endif()
+
 if(BUILD_GAME AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/src/CMakeLists.txt")
     add_subdirectory(src)
 endif()
 
-# Build skeleton editor
 if(BUILD_SKELETON_EDITOR AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/editors/skeleton/CMakeLists.txt")
     add_subdirectory(editors/skeleton)
 endif()

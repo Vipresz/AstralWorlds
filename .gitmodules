@@ -1,0 +1,3 @@
+[submodule "RenderingEngine"]
+	path = RenderingEngine
+	url = https://github.com/Vipresz/RenderingEngine.git

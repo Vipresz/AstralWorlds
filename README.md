@@ -77,6 +77,35 @@ cd build/bin/Release
 
 First build takes 5-15 minutes (GLFW/Assimp compilation). Subsequent builds are incremental.
 
+## CI/CD
+
+Split so engine tests are not duplicated across repos:
+
+| Repo | Workflow | Trigger | Purpose |
+|------|----------|---------|---------|
+| **RenderingEngine** | `ci.yml` | push/PR | Engine unit tests (Windows + Linux) + coverage gate |
+| **AstralWorlds** | `ci.yml` | push/PR | Build `game.exe`, `game_server.exe` (Windows) and `game_server` (Linux) |
+| **AstralWorlds** | `cd.yml` | tag `v*` or manual | Package Windows release zip and publish a GitHub Release |
+
+Secrets required (AstralWorlds):
+
+- `REPO_PAT` — token with read access to the private `RenderingEngine` submodule repo
+
+Local CI helpers:
+
+```powershell
+# Windows: bootstrap ../game_libs when missing (used by AstralWorlds CI)
+./tools/ci/bootstrap_game_libs.ps1
+
+# Windows: package a Release build
+./tools/ci/package_windows_game.ps1 -BuildDir build -Config Release
+```
+
+```bash
+# Linux: install native deps for game/server builds
+./tools/ci/install_linux_game_deps.sh
+```
+
 ## Rendering
 
 Shaders: `engine/platform/render/shaders/`

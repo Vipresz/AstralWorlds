@@ -1,0 +1,39 @@
+
+──────────────────────────────────────────────────────────────────────────────────────────  GAEA BUILD SWARM  2.2.9.0 ──
+
+                                                                                                   
+          Filename:  │ C:/Users/inque/OneDrive/Desktop/Work/games/AstralWorlds/gaea/level.terrain  
+    Build Location:  │ C:\Users\inque\OneDrive\Desktop\Work\games\AstralWorlds\gaea                
+        Build Type:  │ Standard                                                                    
+  Build Resolution:  │ 1024 × 1024                                                                 
+     Build Profile:  │ None / Last Saved Settings                                                  
+             Nodes:  │ 05 to build                                                                 
+                     │ 01 to export                                                                
+                                                                                                   
+
+──────────────────────────────────────────────────────────────────────────────────────────  GAEA BUILD SWARM  2.2.9.0 ──
+
+                                                                                                   
+          Filename:  │ C:/Users/inque/OneDrive/Desktop/Work/games/AstralWorlds/gaea/level.terrain  
+    Build Location:  │ C:\Users\inque\OneDrive\Desktop\Work\games\AstralWorlds\gaea                
+        Build Type:  │ Standard                                                                    
+  Build Resolution:  │ 1024 × 1024                                                                 
+     Build Profile:  │ None / Last Saved Settings                                                  
+             Nodes:  │ 05 to build                                                                 
+                     │ 01 to export                                                                
+                                                                                                   
+
+──────────────────────────────────────────────────────────────────────────────────────────────────────── Build Report ──
+
+              Build Results                            Statistics            
+                                                                             
+          Result: │ Success                  Erosion │ 0:00:00.143           
+      Resolution: │ 1024                      Canyon │ 0:00:01.248           
+      Node Count: │ 5                         Rivers │ 0:00:00.904           
+      Start Time: │ 03/17/2026 14:01:12      Crumble │ 0:00:00.298           
+        End Time: │ 03/17/2026 14:01:15              │                       
+        Duration: │ 00:00:03.3471600         Fastest │ SatMap @ 0:00:00.076  
+  Non-Build Time: │ 00:00:00.6781600         Slowest │ Canyon @ 0:00:01.248  
+                                                                             
+                                             * nodes that took <100ms are    
+                                                       excluded.             

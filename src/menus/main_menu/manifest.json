@@ -1,0 +1,61 @@
+{
+  "version": 2,
+  "description": "Main menu layout and assets. Paths are relative to menus/main_menu/ at runtime (next to game.exe).",
+  "root": "menus/main_menu",
+  "screen": {
+    "min_width": 1280,
+    "min_height": 720
+  },
+  "background": {
+    "texture": "backgrounds/background.png"
+  },
+  "loading_bar": {
+    "empty": "loading/loadingEmpty.png",
+    "full": "loading/loadingFull.png",
+    "label": "Loading...",
+    "layout": {
+      "width_fraction": 0.45,
+      "y_fraction": 0.88
+    }
+  },
+  "enter_world": {
+    "loading_background": "loading_images/void_waste_old.png",
+    "ready_background": "loading_images/void_waste.png",
+    "label": "Entering world...",
+    "hold_seconds": 0.5,
+    "fade_seconds": 0.75
+  },
+  "play_button": {
+    "texture": "buttons/clicked.png",
+    "label": "PLAY",
+    "text_size": 24,
+    "layout": {
+      "max_width_fraction": 0.15,
+      "y_fraction": 0.9,
+      "fallback_width": 280,
+      "fallback_height": 80
+    },
+    "colors": {
+      "label_idle": [255, 255, 255, 255],
+      "label_pressed": [150, 150, 150, 255],
+      "shadow": [0, 0, 0, 200]
+    }
+  },
+  "fonts": {
+    "inter_regular": {
+      "path": "fonts/Inter-Regular.ttf",
+      "usage": "Menu body text and default UI labels",
+      "engine_role": "UiRegular"
+    },
+    "inter_bold": {
+      "path": "fonts/Inter-Bold.ttf",
+      "usage": "Menu titles, buttons, HUD headings",
+      "engine_role": "UiBold"
+    },
+    "jetbrains_mono": {
+      "path": "fonts/JetBrainsMono-Regular.ttf",
+      "usage": "Debug overlays, timers, numeric HUD",
+      "engine_role": "Mono"
+    }
+  }
+}
