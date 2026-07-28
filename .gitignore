@@ -1,6 +1,11 @@
 # Build directory
 build/
+build-*/
+build-ci-local/
+build-cov/
+build-dev/
 build-tests/
+external/
 bin/
 lib/
 CMakeFiles/
@@ -42,6 +47,7 @@ Thumbs.db
 
 # Log files
 *.log
+LastCoverageResults.log
 server.log
 *_debug.log
 *_editor_debug.log
