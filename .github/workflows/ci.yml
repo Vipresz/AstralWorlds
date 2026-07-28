@@ -5,27 +5,25 @@ on:
     branches: [main, master, rgrigorii/menu]
   pull_request:
     branches: [main, master, rgrigorii/menu]
+  workflow_dispatch:
+
+concurrency:
+  group: engine-ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   engine-tests-windows:
     runs-on: windows-latest
+    timeout-minutes: 30
     steps:
       - name: Checkout
         uses: actions/checkout@v4
         with:
           submodules: false
 
-      - name: Resolve RenderingEngine submodule commit
-        id: rendering_engine
-        shell: bash
-        run: echo "sha=$(git ls-tree HEAD RenderingEngine | awk '{print $3}')" >> "$GITHUB_OUTPUT"
-
       - name: Checkout RenderingEngine
-        uses: actions/checkout@v4
+        uses: ./.github/actions/checkout-rendering-engine
         with:
-          repository: Vipresz/RenderingEngine
-          path: RenderingEngine
-          ref: ${{ steps.rendering_engine.outputs.sha }}
           token: ${{ secrets.REPO_PAT }}
 
       - name: Configure
@@ -39,23 +37,16 @@ jobs:
 
   engine-tests-linux:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - name: Checkout
         uses: actions/checkout@v4
         with:
           submodules: false
 
-      - name: Resolve RenderingEngine submodule commit
-        id: rendering_engine
-        shell: bash
-        run: echo "sha=$(git ls-tree HEAD RenderingEngine | awk '{print $3}')" >> "$GITHUB_OUTPUT"
-
       - name: Checkout RenderingEngine
-        uses: actions/checkout@v4
+        uses: ./.github/actions/checkout-rendering-engine
         with:
-          repository: Vipresz/RenderingEngine
-          path: RenderingEngine
-          ref: ${{ steps.rendering_engine.outputs.sha }}
           token: ${{ secrets.REPO_PAT }}
 
       - name: Install dependencies
@@ -70,6 +61,5 @@ jobs:
       - name: Run tests
         run: ctest --test-dir build --output-on-failure -j 1 --label-exclude aggregate
 
-  # H6 note: Platform + game_server + TLS still require OpenGL/native deps and are
-  # not built here (BUILD_ENGINE_PLATFORM=OFF). Authority/payload hardening is covered
-  # by EngineTests (AuthorityHardeningTest, NetServerIntegrationTest).
+  # Game + server build validation lives in game-ci.yml.
+  # Release packaging lives in cd.yml (tag push v*).

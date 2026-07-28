@@ -1,0 +1,61 @@
+name: AstralWorlds CD
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag to publish (for manual runs)
+        required: false
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  release-windows:
+    runs-on: windows-latest
+    timeout-minutes: 120
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: false
+
+      - name: Checkout RenderingEngine
+        uses: ./.github/actions/checkout-rendering-engine
+        with:
+          token: ${{ secrets.REPO_PAT }}
+
+      - name: Cache game_libs
+        uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}/../game_libs
+          key: game-libs-windows-${{ runner.os }}-v1
+
+      - name: Bootstrap game_libs
+        shell: pwsh
+        run: ./tools/ci/bootstrap_game_libs.ps1
+
+      - name: Configure
+        run: >
+          cmake -B build
+          -DBUILD_GAME=ON
+          -DBUILD_SKELETON_EDITOR=OFF
+          -DBUILD_ENGINE_TESTS=OFF
+
+      - name: Build release binaries
+        run: cmake --build build --config Release --target Game GameServer --parallel
+
+      - name: Package Windows build
+        shell: pwsh
+        run: ./tools/ci/package_windows_game.ps1 -BuildDir build -Config Release -OutputZip dist/astral-worlds-windows.zip
+
+      - name: Publish GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+          name: AstralWorlds ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+          files: dist/astral-worlds-windows.zip
+          generate_release_notes: true
