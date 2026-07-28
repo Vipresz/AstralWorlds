@@ -32,15 +32,16 @@ jobs:
         with:
           token: ${{ secrets.REPO_PAT }}
 
-      - name: Cache game_libs
-        uses: actions/cache@v4
-        with:
-          path: ${{ github.workspace }}/../game_libs
-          key: game-libs-windows-${{ runner.os }}-v1
-
-      - name: Bootstrap game_libs
+      - name: Verify engine libs
         shell: pwsh
-        run: ./tools/ci/bootstrap_game_libs.ps1
+        run: |
+          foreach ($p in @(
+            "RenderingEngine/libs/glm-1.0.2/glm/glm.hpp",
+            "RenderingEngine/libs/glfw-3.4/include/GLFW/glfw3.h",
+            "RenderingEngine/libs/assimp-6.0.2/include/assimp/Importer.hpp"
+          )) {
+            if (-not (Test-Path $p)) { throw "Missing engine lib: $p" }
+          }
 
       - name: Configure
         run: >

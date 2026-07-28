@@ -21,3 +21,4 @@ runs:
         path: RenderingEngine
         ref: ${{ steps.rendering_engine.outputs.sha }}
         token: ${{ inputs.token }}
+        submodules: recursive
