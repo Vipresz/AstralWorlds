@@ -5,6 +5,8 @@ namespace Game {
 void GameCameraRig::ConfigureFollowTarget(Engine::EntityID target, Engine::ECS::Registry& registry,
                                           float minDistance, float maxDistance,
                                           float rotationSpeed, float zoomSpeed) {
+    obstruction.SetRegistry(&registry);
+    followCamera.SetObstructionQuery(&obstruction);
     followCamera.SetTarget(target, &registry);
     followCamera.SetMinDistance(minDistance);
     followCamera.SetMaxDistance(maxDistance);

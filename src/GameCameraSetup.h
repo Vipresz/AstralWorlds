@@ -1,5 +1,6 @@
 #pragma once
 
+#include "GameCameraObstruction.h"
 #include "render/FollowCamera.h"
 #include "render/ICameraSource.h"
 #include "render/systems/CameraSystem.h"
@@ -21,6 +22,7 @@ namespace Game {
 // Game-owned camera wiring — keeps FollowCamera setup in src/, not RenderingEngine.
 struct GameCameraRig {
     Engine::Platform::Render::FollowCamera followCamera;
+    GameCameraObstruction obstruction;
     Engine::Platform::Render::ICameraSource* source = nullptr;
 
     void ConfigureFollowTarget(Engine::EntityID target, Engine::ECS::Registry& registry,

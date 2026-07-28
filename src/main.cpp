@@ -594,6 +594,10 @@ int main(int argc, char* argv[]) {
             gameCameraInput->SetInputBlockQuery([menu = mainMenu.get(), characterMenu = characterMenu.get()]() {
                 return menu->BlocksGameInput() || characterMenu->BlocksGameInput();
             });
+            cameraRig.obstruction.SetInputBlockedQuery(
+                [menu = mainMenu.get(), characterMenu = characterMenu.get()]() {
+                    return menu->BlocksGameInput() || characterMenu->BlocksGameInput();
+                });
             systemManager.RegisterSystem(uiSystem);
             LOG_INFO("Main", "  UISystem registered (main menu)");
             pumpBootLoading(1.0f, "Ready");
