@@ -58,6 +58,14 @@ jobs:
           if (-not (Test-Path "build/bin/Release/game_server.exe")) { throw "game_server.exe missing" }
           Write-Host "Game and server binaries built successfully."
 
+      - name: Smoke test game.exe
+        shell: pwsh
+        working-directory: build/bin/Release
+        run: |
+          $proc = Start-Process -FilePath ".\game.exe" -ArgumentList "--smoke-test" -PassThru -Wait -NoNewWindow
+          if ($proc.ExitCode -ne 0) { throw "game.exe --smoke-test failed with exit code $($proc.ExitCode)" }
+          Write-Host "game.exe smoke test passed."
+
       - name: Upload Windows game artifact
         uses: actions/upload-artifact@v4
         with:

@@ -2,6 +2,8 @@
 
 #include "character/CharacterStats.h"
 #include "core/network/NetTypes.h"
+#include "core/network/MovementCommand.h"
+#include "core/network/ShardConfig.h"
 
 #include "network/AuthoritativeGameSimulator.h"
 
@@ -72,7 +74,10 @@ void PrintUsage(const char* program) {
 
               << "  " << program << " --heightmap <terrain.png>\n"
 
-              << "  " << program << " --tls-cert <cert.pem> --tls-key <key.pem>\n\n"
+              << "  " << program << " --tls-cert <cert.pem> --tls-key <key.pem>\n"
+              << "  " << program << " --max-players <count>\n"
+              << "  " << program << " --shard-id <id>\n"
+              << "  " << program << " --redirect-host <host> --redirect-port <port>\n\n"
 
               << "Default: authoritative ECS simulation on port " << kDefaultPort << "\n";
 
@@ -243,6 +248,11 @@ int main(int argc, char* argv[]) {
 
         });
 
+        server.SetMovementCommandInterceptor([&simulator](Engine::Net::UserId userId,
+                                                          Engine::Net::MovementCommand& command) {
+            return simulator && simulator->HandleMovementCommand(userId, command);
+        });
+
     }
 
 
@@ -280,6 +290,25 @@ int main(int argc, char* argv[]) {
         LOG_INFO("Server", "TLS enabled for incoming TCP connections");
 
     }
+
+
+
+    Engine::Net::ShardConfig shardConfig;
+    const std::string maxPlayersArg = ParseArgValue(argc, argv, "--max-players");
+    if (!maxPlayersArg.empty()) {
+        shardConfig.maxPlayers = static_cast<uint32_t>(std::atoi(maxPlayersArg.c_str()));
+    }
+    const std::string shardIdArg = ParseArgValue(argc, argv, "--shard-id");
+    if (!shardIdArg.empty()) {
+        shardConfig.shardId = static_cast<uint32_t>(std::atoi(shardIdArg.c_str()));
+    }
+    shardConfig.redirectHost = ParseArgValue(argc, argv, "--redirect-host");
+    const std::string redirectPortArg = ParseArgValue(argc, argv, "--redirect-port");
+    if (!redirectPortArg.empty()) {
+        shardConfig.redirectTcpPort = static_cast<uint16_t>(std::atoi(redirectPortArg.c_str()));
+        shardConfig.redirectUdpPort = static_cast<uint16_t>(shardConfig.redirectTcpPort + 1);
+    }
+    server.SetShardConfig(shardConfig);
 
 
 

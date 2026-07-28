@@ -81,6 +81,19 @@ int main(int argc, char* argv[]) {
 
     const Game::GameNetworkConfig networkConfig = Game::GameNetworkConfig::ParseCommandLine(argc, argv);
 
+    if (networkConfig.smokeTest) {
+        EngineLogging::Logger& logger = EngineLogging::Logger::GetInstance();
+        logger.Initialize("smoke.log");
+        Window smokeWindow(64, 64);
+        if (smokeWindow.Initialize() != 0) {
+            fprintf(stderr, "Smoke test failed: window init\n");
+            return 1;
+        }
+        smokeWindow.swapBuffers();
+        LOG_INFO("Main", "Smoke test passed");
+        return 0;
+    }
+
     EngineLogging::Logger& logger = EngineLogging::Logger::GetInstance();
     logger.Initialize("debug.log");
     logger.SetMinLevel(EngineLogging::LogLevel::LevelInfo);

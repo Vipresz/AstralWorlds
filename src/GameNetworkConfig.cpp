@@ -71,6 +71,9 @@ GameNetworkConfig GameNetworkConfig::ParseCommandLine(int argc, char* argv[]) {
             }
         } else if (arg == "--offline" || arg == "--no-network") {
             config.enabled = false;
+        } else if (arg == "--smoke-test") {
+            config.smokeTest = true;
+            config.enabled = false;
         }
     }
 

@@ -18,6 +18,7 @@ struct GameNetworkConfig {
     bool tlsInsecure = false;
     std::string tlsCaPath;
     bool enabled = true;
+    bool smokeTest = false;
 
     static GameNetworkConfig ParseCommandLine(int argc, char* argv[]);
 };
