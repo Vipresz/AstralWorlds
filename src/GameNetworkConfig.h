@@ -19,6 +19,10 @@ struct GameNetworkConfig {
     std::string tlsCaPath;
     bool enabled = true;
     bool smokeTest = false;
+    bool e2eTest = false;
+    int e2eRunSeconds = 8;
+    int e2eMovementSamples = 5;
+    std::string e2eReportPath = "e2e_report.json";
 
     static GameNetworkConfig ParseCommandLine(int argc, char* argv[]);
 };

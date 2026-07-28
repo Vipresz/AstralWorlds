@@ -20,6 +20,10 @@ namespace Character {
 
 CharacterInstance::~CharacterInstance() = default;
 
+Engine::Platform::Render::Model* CharacterInstance::GetBodyModel() const {
+    return m_bodyAssets && m_bodyAssets->bodyModel ? m_bodyAssets->bodyModel.get() : nullptr;
+}
+
 float CharacterInstance::GetHeadHeightOffset() const {
     if (height > 0.01f) {
         return height * scale;
@@ -28,11 +32,25 @@ float CharacterInstance::GetHeadHeightOffset() const {
 }
 
 bool CharacterInstance::HasSkinnedBody() const {
-    return m_skeleton != nullptr && m_skeleton->IsLoaded();
+    return m_bodyAssets && m_bodyAssets->skeleton && m_bodyAssets->skeleton->IsLoaded();
+}
+
+void CharacterInstance::SetBodyAssets(std::shared_ptr<const CharacterBodyAssets> assets) {
+    m_bodyAssets = std::move(assets);
+    if (!m_bodyAssets) {
+        height = 0.0f;
+        bottomY = 0.0f;
+        scale = 1.0f;
+        return;
+    }
+
+    height = m_bodyAssets->height;
+    bottomY = m_bodyAssets->bottomY;
+    scale = m_bodyAssets->scale;
 }
 
 void CharacterInstance::WireAnimationComponent(Registry& registry) {
-    if (rootEntity == Engine::INVALID_ENTITY || !m_skeleton || !m_skeleton->IsLoaded()) {
+    if (rootEntity == Engine::INVALID_ENTITY || !HasSkinnedBody()) {
         return;
     }
 
@@ -41,16 +59,16 @@ void CharacterInstance::WireAnimationComponent(Registry& registry) {
         animComp = &registry.AddComponent<AnimationComponent>(rootEntity);
     }
 
-    animComp->skeleton = m_skeleton.get();
-    animComp->idleAnimation = m_idleAnimation.get();
-    animComp->walkingAnimation = m_walkingAnimation.get();
-    animComp->runningAnimation = m_runningAnimation.get();
-    animComp->jumpAnimation = m_jumpAnimation.get();
-    animComp->jumpMovingAnimation = m_jumpMovingAnimation.get();
-    animComp->fallingAnimation = m_fallingAnimation.get();
-    animComp->landingAnimation = m_landingAnimation.get();
-    animComp->leftTurnAnimation = m_leftTurnAnimation.get();
-    animComp->rightTurnAnimation = m_rightTurnAnimation.get();
+    animComp->skeleton = m_bodyAssets->skeleton.get();
+    animComp->idleAnimation = m_bodyAssets->idleAnimation.get();
+    animComp->walkingAnimation = m_bodyAssets->walkingAnimation.get();
+    animComp->runningAnimation = m_bodyAssets->runningAnimation.get();
+    animComp->jumpAnimation = m_bodyAssets->jumpAnimation.get();
+    animComp->jumpMovingAnimation = m_bodyAssets->jumpMovingAnimation.get();
+    animComp->fallingAnimation = m_bodyAssets->fallingAnimation.get();
+    animComp->landingAnimation = m_bodyAssets->landingAnimation.get();
+    animComp->leftTurnAnimation = m_bodyAssets->leftTurnAnimation.get();
+    animComp->rightTurnAnimation = m_bodyAssets->rightTurnAnimation.get();
     if (!animComp->currentAnimation) {
         animComp->currentAnimation = animComp->idleAnimation;
         animComp->currentAnimationTime = 0.0f;
@@ -66,17 +84,6 @@ void CharacterInstance::Clear(Registry& registry) {
     }
     m_equipmentEntities.clear();
     m_itemModels.clear();
-
-    m_rightTurnAnimation.reset();
-    m_leftTurnAnimation.reset();
-    m_landingAnimation.reset();
-    m_fallingAnimation.reset();
-    m_jumpMovingAnimation.reset();
-    m_jumpAnimation.reset();
-    m_runningAnimation.reset();
-    m_walkingAnimation.reset();
-    m_idleAnimation.reset();
-    m_skeleton.reset();
 
     if (rootEntity != Engine::INVALID_ENTITY) {
         if (AnimationComponent* animComp = registry.GetComponent<AnimationComponent>(rootEntity)) {
@@ -104,11 +111,7 @@ void CharacterInstance::Clear(Registry& registry) {
         }
     }
 
-    if (m_bodyModel) {
-        m_bodyModel->ClearModel();
-        m_bodyModel.reset();
-    }
-
+    m_bodyAssets.reset();
     scale = 1.0f;
     height = 0.0f;
     bottomY = 0.0f;

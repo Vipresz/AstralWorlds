@@ -2,6 +2,7 @@
 #include "AppPaths.h"
 #include "GameNetworkConfig.h"
 #include "character/CharacterLoader.h"
+#include "character/CharacterBodyAssetCache.h"
 #include "character/CharacterDatabase.h"
 #include "character/CharacterEquipmentSystem.h"
 #include "character/CharacterStats.h"
@@ -53,6 +54,8 @@
 #include <string>
 #include <algorithm>
 #include <vector>
+#include <chrono>
+#include <fstream>
 #include <GLFW/glfw3.h>
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
@@ -81,6 +84,8 @@ int main(int argc, char* argv[]) {
 
     const Game::GameNetworkConfig networkConfig = Game::GameNetworkConfig::ParseCommandLine(argc, argv);
 
+    const bool e2eMode = networkConfig.e2eTest;
+
     if (networkConfig.smokeTest) {
         EngineLogging::Logger& logger = EngineLogging::Logger::GetInstance();
         logger.Initialize("smoke.log");
@@ -102,7 +107,7 @@ int main(int argc, char* argv[]) {
     
     try {
         LOG_INFO("Main", "Initializing window...");
-        Window mainWindow(1366, 768);
+        Window mainWindow(e2eMode ? 128 : 1366, e2eMode ? 128 : 768);
         if (mainWindow.Initialize() != 0) {
             LOG_ERROR("Main", "Failed to initialize window");
             return 1;
@@ -197,6 +202,10 @@ int main(int argc, char* argv[]) {
         ServerLoadoutDatabase characterDatabase;
         itemCatalog.Load();
         equipmentRules.Load();
+        const ItemDefinition* defaultBody = itemCatalog.DefaultBody();
+        if (defaultBody && !defaultBody->modelPath.empty()) {
+            CharacterBodyAssetCache::Instance().GetOrLoad(defaultBody->id, defaultBody->modelPath);
+        }
         CharacterLoader characterLoader(itemCatalog, equipmentRules, characterDatabase);
         CharacterInstance characterInstance;
         
@@ -252,6 +261,12 @@ int main(int argc, char* argv[]) {
         std::shared_ptr<NetworkSystem> networkSystem;
         std::shared_ptr<ReplicationSystem> replicationSystem;
         bool characterLoaded = false;
+        std::chrono::steady_clock::time_point e2eSessionStart = std::chrono::steady_clock::now();
+        std::chrono::steady_clock::time_point e2eConnectDone{};
+        std::chrono::steady_clock::time_point e2eCharacterDone{};
+        bool e2eConnectRecorded = false;
+        bool e2eReadyRecorded = false;
+        bool e2eReportWritten = false;
 
         auto syncReplicationLoadout = [&](EntityID entityId, const CharacterLoginContext& loginContext) {
             CharacterLoadout loadout;
@@ -304,6 +319,9 @@ int main(int argc, char* argv[]) {
             }
             syncReplicationLoadout(character.id, loginContext);
             characterLoaded = true;
+            if (e2eMode) {
+                e2eCharacterDone = std::chrono::steady_clock::now();
+            }
             LOG_INFO("Main", "Local character loaded");
             return true;
         };
@@ -490,6 +508,10 @@ int main(int argc, char* argv[]) {
                     networkConfig.displayName)) {
                 networkConnected = true;
                 networkWantsConnect = false;
+                if (e2eMode) {
+                    e2eConnectDone = std::chrono::steady_clock::now();
+                    e2eConnectRecorded = true;
+                }
                 LOG_INFO_FMT("Main", "Connected to server as user %u", networkSystem->GetLocalUserId());
                 pumpEnterLoading(0.55f, "Loading character...");
                 if (replicationSystem) {
@@ -617,8 +639,8 @@ int main(int argc, char* argv[]) {
             mainMenu->SetReady();
             // Draw one ready frame so PLAY appears before the first game-loop tick.
             pumpBootLoading(1.0f, "Ready");
-            if (const char* autoPlay = std::getenv("AW_AUTO_PLAY");
-                autoPlay && autoPlay[0] == '1') {
+            if ((const char* autoPlay = std::getenv("AW_AUTO_PLAY");
+                 (autoPlay && autoPlay[0] == '1') || e2eMode)) {
                 mainMenu->BeginEnterWorld();
             }
         } else if (uiSystem) {
@@ -708,6 +730,46 @@ int main(int argc, char* argv[]) {
             } catch (const std::exception& e) {
                 LOG_ERROR_FMT("Main", "System update error: %s", e.what());
                 break;
+            }
+
+            if (e2eMode) {
+                const bool sessionReady =
+                    characterLoaded && (!networkConfig.enabled || networkConnected);
+                if (sessionReady && !e2eReadyRecorded) {
+                    e2eReadyRecorded = true;
+                }
+
+                const float elapsedSeconds = std::chrono::duration<float>(
+                                                std::chrono::steady_clock::now() - e2eSessionStart)
+                                                .count();
+                if (sessionReady && elapsedSeconds >= static_cast<float>(networkConfig.e2eRunSeconds) &&
+                    !e2eReportWritten) {
+                    const auto writeMs = [](const std::chrono::steady_clock::time_point& start,
+                                            const std::chrono::steady_clock::time_point& end) -> double {
+                        if (start.time_since_epoch().count() == 0 ||
+                            end.time_since_epoch().count() == 0) {
+                            return 0.0;
+                        }
+                        return std::chrono::duration<double, std::milli>(end - start).count();
+                    };
+
+                    std::ofstream report(networkConfig.e2eReportPath, std::ios::trunc);
+                    if (report) {
+                        report << "{"
+                               << "\"connected\":" << (networkConnected ? "true" : "false") << ","
+                               << "\"character_loaded\":true,"
+                               << "\"connect_ms\":"
+                               << writeMs(e2eSessionStart, e2eConnectDone) << ","
+                               << "\"character_load_ms\":"
+                               << writeMs(e2eConnectRecorded ? e2eConnectDone : e2eSessionStart,
+                                           e2eCharacterDone)
+                               << ","
+                               << "\"session_seconds\":" << elapsedSeconds << "}";
+                    }
+                    e2eReportWritten = true;
+                    LOG_INFO_FMT("Main", "E2E report written to %s", networkConfig.e2eReportPath.c_str());
+                    mainWindow.setShouldClose(true);
+                }
             }
             
             if (mainWindow.getShouldClose()) break;

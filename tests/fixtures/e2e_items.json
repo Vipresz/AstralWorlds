@@ -1,0 +1,17 @@
+{
+  "default_body": "body_male_default",
+  "items": [
+    {
+      "id": "body_male_default",
+      "slot": "body",
+      "name": "Male Base Body",
+      "model": "graphics/Models/character/animation/magic/FinalBaseMesh.fbx"
+    },
+    {
+      "id": "prop_cube",
+      "slot": "back",
+      "name": "Test Cube Prop",
+      "model": "tests/fixtures/meshes/prop_cube.obj"
+    }
+  ]
+}
