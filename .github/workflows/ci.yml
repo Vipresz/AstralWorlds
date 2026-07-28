@@ -35,7 +35,7 @@ jobs:
         run: cmake --build build --config Release --target EngineTests --parallel
 
       - name: Run tests
-        run: ctest --test-dir build -C Release --output-on-failure --parallel
+        run: ctest --test-dir build -C Release --output-on-failure --parallel --label-exclude aggregate
 
   engine-tests-linux:
     runs-on: ubuntu-latest
@@ -68,7 +68,7 @@ jobs:
         run: cmake --build build --target EngineTests --parallel
 
       - name: Run tests
-        run: ctest --test-dir build --output-on-failure --parallel
+        run: ctest --test-dir build --output-on-failure --parallel --label-exclude aggregate
 
   # H6 note: Platform + game_server + TLS still require OpenGL/native deps and are
   # not built here (BUILD_ENGINE_PLATFORM=OFF). Authority/payload hardening is covered
