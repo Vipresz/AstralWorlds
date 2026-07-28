@@ -8,7 +8,7 @@ on:
   workflow_dispatch:
 
 concurrency:
-  group: game-ci-${{ github.workflow }}-${{ github.ref }}
+  group: astral-worlds-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 jobs:
