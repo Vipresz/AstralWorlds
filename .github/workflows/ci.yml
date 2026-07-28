@@ -1,5 +1,8 @@
 name: AstralWorlds CI
 
+# Game/server build validation only. Engine unit tests + coverage run in
+# Vipresz/RenderingEngine (.github/workflows/ci.yml) — do not duplicate them here.
+
 on:
   push:
     branches: [main, master, rgrigorii/menu]
@@ -12,9 +15,9 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  engine-tests-windows:
+  build-game-windows:
     runs-on: windows-latest
-    timeout-minutes: 30
+    timeout-minutes: 90
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -26,18 +29,43 @@ jobs:
         with:
           token: ${{ secrets.REPO_PAT }}
 
+      - name: Cache game_libs
+        uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}/../game_libs
+          key: game-libs-windows-${{ runner.os }}-v1
+
+      - name: Bootstrap game_libs
+        shell: pwsh
+        run: ./tools/ci/bootstrap_game_libs.ps1
+
       - name: Configure
-        run: cmake -B build -DBUILD_GAME=OFF -DBUILD_SKELETON_EDITOR=OFF -DBUILD_ENGINE_TESTS=ON -DBUILD_ENGINE_PLATFORM=OFF
+        run: >
+          cmake -B build
+          -DBUILD_GAME=ON
+          -DBUILD_SKELETON_EDITOR=OFF
+          -DBUILD_ENGINE_TESTS=OFF
 
-      - name: Build tests
-        run: cmake --build build --config Release --target EngineTests --parallel
+      - name: Build game
+        run: cmake --build build --config Release --target Game GameServer --parallel
 
-      - name: Run tests
-        run: ctest --test-dir build -C Release --output-on-failure --label-exclude aggregate
+      - name: Verify binaries
+        shell: pwsh
+        run: |
+          if (-not (Test-Path "build/bin/Release/game.exe")) { throw "game.exe missing" }
+          if (-not (Test-Path "build/bin/Release/game_server.exe")) { throw "game_server.exe missing" }
+          Write-Host "Game and server binaries built successfully."
 
-  engine-tests-linux:
+      - name: Upload Windows game artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: astral-worlds-windows-${{ github.sha }}
+          path: build/bin/Release/
+          if-no-files-found: error
+
+  build-game-server-linux:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -50,16 +78,25 @@ jobs:
           token: ${{ secrets.REPO_PAT }}
 
       - name: Install dependencies
-        run: sudo apt-get update && sudo apt-get install -y build-essential cmake
+        run: bash ./tools/ci/install_linux_game_deps.sh
 
       - name: Configure
-        run: cmake -B build -DCMAKE_BUILD_TYPE=Release -DBUILD_GAME=OFF -DBUILD_SKELETON_EDITOR=OFF -DBUILD_ENGINE_TESTS=ON -DBUILD_ENGINE_PLATFORM=OFF
+        run: >
+          cmake -B build
+          -DCMAKE_BUILD_TYPE=Release
+          -DBUILD_GAME=ON
+          -DBUILD_SKELETON_EDITOR=OFF
+          -DBUILD_ENGINE_TESTS=OFF
 
-      - name: Build tests
-        run: cmake --build build --target EngineTests --parallel
+      - name: Build game server
+        run: cmake --build build --target GameServer --parallel
 
-      - name: Run tests
-        run: ctest --test-dir build --output-on-failure -j 1 --label-exclude aggregate
+      - name: Verify binary
+        run: test -x build/bin/game_server
 
-  # Game + server build validation lives in game-ci.yml.
-  # Release packaging lives in cd.yml (tag push v*).
+      - name: Upload Linux server artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: astral-worlds-linux-server-${{ github.sha }}
+          path: build/bin/game_server
+          if-no-files-found: error
