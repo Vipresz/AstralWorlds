@@ -639,8 +639,8 @@ int main(int argc, char* argv[]) {
             mainMenu->SetReady();
             // Draw one ready frame so PLAY appears before the first game-loop tick.
             pumpBootLoading(1.0f, "Ready");
-            if ((const char* autoPlay = std::getenv("AW_AUTO_PLAY");
-                 (autoPlay && autoPlay[0] == '1') || e2eMode)) {
+            if (const char* autoPlay = std::getenv("AW_AUTO_PLAY");
+                (autoPlay && autoPlay[0] == '1') || e2eMode) {
                 mainMenu->BeginEnterWorld();
             }
         } else if (uiSystem) {
@@ -694,7 +694,7 @@ int main(int argc, char* argv[]) {
             }
 
             if (networkRetryCooldown > 0.0f) {
-                networkRetryCooldown = std::max(0.0f, networkRetryCooldown - deltaTime);
+                networkRetryCooldown = (std::max)(0.0f, networkRetryCooldown - deltaTime);
             }
 
 #ifdef PLATFORM_HAS_NUKLEAR
