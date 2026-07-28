@@ -4,6 +4,8 @@
 #include "core/network/NetTypes.h"
 #include "core/network/MovementCommand.h"
 #include "core/network/ShardConfig.h"
+#include "core/network/ScalePolicyConfig.h"
+#include "core/network/ZoneScaleConfig.h"
 
 #include "network/AuthoritativeGameSimulator.h"
 
@@ -77,7 +79,11 @@ void PrintUsage(const char* program) {
               << "  " << program << " --tls-cert <cert.pem> --tls-key <key.pem>\n"
               << "  " << program << " --max-players <count>\n"
               << "  " << program << " --shard-id <id>\n"
-              << "  " << program << " --redirect-host <host> --redirect-port <port>\n\n"
+              << "  " << program << " --redirect-host <host> --redirect-port <port>\n"
+              << "  " << program << " --scale-config <zone.json>\n"
+              << "  " << program << " --shard-soft-cap <count>\n"
+              << "  " << program << " --layer-density-threshold <count>\n"
+              << "  " << program << " --overflow-policy <LayerFirst|ShardFirst|LayerThenShard>\n\n"
 
               << "Default: authoritative ECS simulation on port " << kDefaultPort << "\n";
 
@@ -294,6 +300,21 @@ int main(int argc, char* argv[]) {
 
 
     Engine::Net::ShardConfig shardConfig;
+    Engine::Net::ScalePolicyConfig scalePolicy;
+    const std::string scaleConfigPath = ParseArgValue(argc, argv, "--scale-config");
+    if (!scaleConfigPath.empty()) {
+        Engine::Net::ZoneScaleConfig zoneConfig;
+        if (!Engine::Net::ZoneScaleConfig::TryLoadFromFile(scaleConfigPath, zoneConfig)) {
+            LOG_ERROR_FMT("Server", "Failed to load scale config: %s", scaleConfigPath.c_str());
+            return 1;
+        }
+        shardConfig = zoneConfig.shard;
+        scalePolicy = zoneConfig.scalePolicy;
+        LOG_INFO_FMT("Server", "Loaded zone scale config '%s' for zone '%s'",
+                     scaleConfigPath.c_str(),
+                     zoneConfig.zoneId.c_str());
+    }
+
     const std::string maxPlayersArg = ParseArgValue(argc, argv, "--max-players");
     if (!maxPlayersArg.empty()) {
         shardConfig.maxPlayers = static_cast<uint32_t>(std::atoi(maxPlayersArg.c_str()));
@@ -310,7 +331,26 @@ int main(int argc, char* argv[]) {
     }
     server.SetShardConfig(shardConfig);
 
-
+    if (shardConfig.maxPlayers > 0) {
+        scalePolicy.shardHardCap = shardConfig.maxPlayers;
+    }
+    const std::string shardSoftCapArg = ParseArgValue(argc, argv, "--shard-soft-cap");
+    if (!shardSoftCapArg.empty()) {
+        scalePolicy.shardSoftCap = static_cast<uint32_t>(std::atoi(shardSoftCapArg.c_str()));
+    }
+    const std::string layerDensityArg = ParseArgValue(argc, argv, "--layer-density-threshold");
+    if (!layerDensityArg.empty()) {
+        scalePolicy.cellLayerDensityThreshold = static_cast<uint32_t>(std::atoi(layerDensityArg.c_str()));
+    }
+    const std::string overflowPolicyArg = ParseArgValue(argc, argv, "--overflow-policy");
+    if (overflowPolicyArg == "LayerFirst") {
+        scalePolicy.overflowPolicy = Engine::Net::OverflowPolicy::LayerFirst;
+    } else if (overflowPolicyArg == "ShardFirst") {
+        scalePolicy.overflowPolicy = Engine::Net::OverflowPolicy::ShardFirst;
+    } else if (overflowPolicyArg == "LayerThenShard") {
+        scalePolicy.overflowPolicy = Engine::Net::OverflowPolicy::LayerThenShard;
+    }
+    server.SetScalePolicyConfig(scalePolicy);
 
     if (!server.Start("0.0.0.0", port)) {
 
