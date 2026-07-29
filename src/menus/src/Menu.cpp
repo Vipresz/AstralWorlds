@@ -17,6 +17,7 @@
 #include <GLFW/glfw3.h>
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cctype>
 #include <cstdlib>
@@ -1265,6 +1266,7 @@ void DrawBagItemGrid(struct nk_context* ctx,
     const struct nk_color slotFill = nk_rgba(18, 22, 34, 170);
     const struct nk_color slotBorder = nk_rgba(95, 110, 145, 200);
     const struct nk_color dropHighlight = nk_rgba(120, 200, 255, 220);
+    const struct nk_color useSelectedHighlight = nk_rgba(255, 204, 77, 255);
     const struct nk_color textColor = nk_rgba(225, 232, 245, 255);
     const struct nk_color qtyColor = nk_rgba(170, 190, 230, 255);
     const struct nk_color transparent = nk_rgba(0, 0, 0, 0);
@@ -1351,6 +1353,10 @@ void DrawBagItemGrid(struct nk_context* ctx,
                          transparent,
                          qtyColor);
         }
+
+        if (!dragState.active && menu.IsBagUseSlotSelected(slotIndex)) {
+            nk_stroke_rect(canvas, slotBounds, 4.0f, 3.0f, useSelectedHighlight);
+        }
     }
 
     if (dragState.active && dragState.item.quantity > 0) {
@@ -1384,7 +1390,8 @@ void DrawBagItemGrid(struct nk_context* ctx,
         }
     }
 
-    if (!dragState.active && inventory && font && screenWidth > 0 && screenHeight > 0) {
+    if (!dragState.active && inventory && font && screenWidth > 0 && screenHeight > 0 &&
+        !menu.IsBagItemActionPanelOpen()) {
         const float mouseX = ctx->input.mouse.pos.x;
         const float mouseY = ctx->input.mouse.pos.y;
         for (int slotIndex = 0; slotIndex < layout.slotCount; ++slotIndex) {
@@ -1440,16 +1447,22 @@ void CharacterMenu::SetInventoryMutationCallback(std::function<void()> callback)
     m_inventoryMutationCallback = std::move(callback);
 }
 
+void CharacterMenu::SetInventoryActionCallback(
+    std::function<void(BagItemAction action, int slotIndex)> callback) {
+    m_inventoryActionCallback = std::move(callback);
+}
+
+void CharacterMenu::SetInventoryCombinedUseCallback(
+    std::function<void(int primarySlot, int secondarySlot)> callback) {
+    m_inventoryCombinedUseCallback = std::move(callback);
+}
+
 void CharacterMenu::RequestInventorySync() {
     m_inventorySyncPending = true;
 }
 
 void CharacterMenu::CancelBagDrag() {
-    if (!m_bagDrag.active) {
-        return;
-    }
-
-    if (m_inventoryRegistry && m_inventoryEntity != Engine::INVALID_ENTITY &&
+    if (m_bagDrag.active && m_inventoryRegistry && m_inventoryEntity != Engine::INVALID_ENTITY &&
         m_bagDrag.sourceSlot >= 0 && m_bagDrag.item.quantity > 0) {
         auto* inventory =
             m_inventoryRegistry->GetComponent<Engine::Systems::Inventory::InventoryComponent>(
@@ -1462,6 +1475,11 @@ void CharacterMenu::CancelBagDrag() {
     }
 
     m_bagDrag = BagDragState{};
+    m_bagClickPending = false;
+    m_bagPendingClickSlot = -1;
+    ClearBagUseSelection();
+    m_bagActionPanelOpen = false;
+    m_bagActionPanelSlot = -1;
 }
 
 bool CharacterMenu::UpdateBagItemDrag(struct nk_context* ctx,
@@ -1483,13 +1501,46 @@ bool CharacterMenu::UpdateBagItemDrag(struct nk_context* ctx,
         return false;
     }
 
+    if (m_bagSelectedUseSlot >= 0 &&
+        !CanUseItemAtSlot(static_cast<size_t>(m_bagSelectedUseSlot))) {
+        ClearBagUseSelection();
+    }
+
     const BagGridLayout layout = ComputeBagGridLayout(panelBounds, grid);
     const float mouseX = ctx->input.mouse.pos.x;
     const float mouseY = ctx->input.mouse.pos.y;
     const bool mousePressed = nk_input_is_mouse_pressed(&ctx->input, NK_BUTTON_LEFT);
     const bool mouseReleased = nk_input_is_mouse_released(&ctx->input, NK_BUTTON_LEFT);
+    const bool rightPressed = nk_input_is_mouse_pressed(&ctx->input, NK_BUTTON_RIGHT);
     const float snapRadius =
         layout.slotSize * std::clamp(grid.dropSnapFraction, 0.15f, 1.0f);
+    constexpr float kDragStartPixels = 6.0f;
+
+    if (rightPressed) {
+        bool openedPanel = false;
+        for (size_t slotIndex = 0; slotIndex < layout.slotBounds.size(); ++slotIndex) {
+            if (!PointInRect(layout.slotBounds[slotIndex], mouseX, mouseY)) {
+                continue;
+            }
+            if (slotIndex >= inventory->slots.size() || inventory->slots[slotIndex].isEmpty) {
+                continue;
+            }
+            m_bagActionPanelSlot = static_cast<int>(slotIndex);
+            m_bagActionPanelAnchorX = layout.slotBounds[slotIndex].x;
+            m_bagActionPanelAnchorY = layout.slotBounds[slotIndex].y;
+            m_bagActionPanelAnchorW = layout.slotBounds[slotIndex].w;
+            m_bagActionPanelAnchorH = layout.slotBounds[slotIndex].h;
+            m_bagActionPanelOpen = true;
+            ClearBagUseSelection();
+            openedPanel = true;
+            break;
+        }
+        if (!openedPanel) {
+            m_bagActionPanelOpen = false;
+            m_bagActionPanelSlot = -1;
+        }
+        return true;
+    }
 
     bool pointerOverGrid = PointInRect(layout.contentBounds, mouseX, mouseY);
     if (!pointerOverGrid) {
@@ -1525,25 +1576,229 @@ bool CharacterMenu::UpdateBagItemDrag(struct nk_context* ctx,
         return true;
     }
 
-    if (mousePressed) {
+    if (m_bagClickPending && nk_input_is_mouse_down(&ctx->input, NK_BUTTON_LEFT)) {
+        const float dragDx = mouseX - m_bagPendingClickMouseX;
+        const float dragDy = mouseY - m_bagPendingClickMouseY;
+        if (dragDx * dragDx + dragDy * dragDy >= kDragStartPixels * kDragStartPixels &&
+            m_bagPendingClickSlot >= 0) {
+            const size_t slotIndex = static_cast<size_t>(m_bagPendingClickSlot);
+            if (slotIndex < inventory->slots.size() && !inventory->slots[slotIndex].isEmpty &&
+                inventory->TakeItemFromSlot(slotIndex, m_bagDrag.item)) {
+                m_bagDrag.active = true;
+                m_bagDrag.sourceSlot = m_bagPendingClickSlot;
+                m_bagDrag.hoverDropSlot = -1;
+                ClearBagUseSelection();
+            }
+            m_bagClickPending = false;
+            m_bagPendingClickSlot = -1;
+            return true;
+        }
+    }
+
+    if (mousePressed && pointerOverGrid) {
+        m_bagClickPending = true;
+        m_bagPendingClickSlot = -1;
+        m_bagPendingClickMouseX = mouseX;
+        m_bagPendingClickMouseY = mouseY;
+
         for (size_t slotIndex = 0; slotIndex < layout.slotBounds.size(); ++slotIndex) {
             if (!PointInRect(layout.slotBounds[slotIndex], mouseX, mouseY)) {
                 continue;
             }
-            if (slotIndex >= inventory->slots.size() || inventory->slots[slotIndex].isEmpty) {
-                continue;
+            if (slotIndex < inventory->slots.size() && !inventory->slots[slotIndex].isEmpty) {
+                m_bagPendingClickSlot = static_cast<int>(slotIndex);
             }
-
-            if (inventory->TakeItemFromSlot(slotIndex, m_bagDrag.item)) {
-                m_bagDrag.active = true;
-                m_bagDrag.sourceSlot = static_cast<int>(slotIndex);
-                m_bagDrag.hoverDropSlot = -1;
-                return true;
-            }
+            return true;
         }
     }
 
+    if (mouseReleased && m_bagClickPending) {
+        m_bagClickPending = false;
+        if (m_bagPendingClickSlot >= 0) {
+            HandleBagUseSlotClick(m_bagPendingClickSlot);
+        } else {
+            ClearBagUseSelection();
+        }
+        m_bagPendingClickSlot = -1;
+        return true;
+    }
+
     return pointerOverGrid;
+}
+
+bool CharacterMenu::CanUseItemAtSlot(size_t slotIndex) const {
+    if (!m_inventoryRegistry || m_inventoryEntity == Engine::INVALID_ENTITY || !m_gameItemCatalog) {
+        return false;
+    }
+
+    const auto* inventory =
+        m_inventoryRegistry->GetComponent<Engine::Systems::Inventory::InventoryComponent>(
+            m_inventoryEntity);
+    if (!inventory || slotIndex >= inventory->slots.size() || inventory->slots[slotIndex].isEmpty) {
+        return false;
+    }
+
+    return m_gameItemCatalog->CanUseItem(inventory->slots[slotIndex].item.id);
+}
+
+void CharacterMenu::ClearBagUseSelection() {
+    m_bagSelectedUseSlot = -1;
+}
+
+void CharacterMenu::HandleBagUseSlotClick(int slotIndex) {
+    if (slotIndex < 0 || !CanUseItemAtSlot(static_cast<size_t>(slotIndex))) {
+        ClearBagUseSelection();
+        return;
+    }
+
+    if (m_bagSelectedUseSlot == slotIndex) {
+        ClearBagUseSelection();
+        return;
+    }
+
+    if (m_bagSelectedUseSlot >= 0) {
+        const int primarySlot = m_bagSelectedUseSlot;
+        const int secondarySlot = slotIndex;
+        ClearBagUseSelection();
+        PerformCombinedBagItemUse(primarySlot, secondarySlot);
+        return;
+    }
+
+    m_bagSelectedUseSlot = slotIndex;
+}
+
+void CharacterMenu::PerformCombinedBagItemUse(int primarySlot, int secondarySlot) {
+    if (primarySlot < 0 || secondarySlot < 0 || !m_inventoryCombinedUseCallback) {
+        return;
+    }
+
+    CancelBagDrag();
+    m_inventoryCombinedUseCallback(primarySlot, secondarySlot);
+    m_lastBagLogSnapshot.clear();
+}
+
+void CharacterMenu::PerformBagItemAction(BagItemAction action, int slotIndex) {
+    if (slotIndex < 0 || !m_inventoryActionCallback) {
+        return;
+    }
+
+    CancelBagDrag();
+    m_inventoryActionCallback(action, slotIndex);
+    m_lastBagLogSnapshot.clear();
+    if (action == BagItemAction::Drop) {
+        ClearBagUseSelection();
+    }
+}
+
+void CharacterMenu::DrawBagItemActionPanel(struct nk_context* ctx,
+                                           struct nk_command_buffer* canvas,
+                                           int screenWidth,
+                                           int screenHeight) {
+    if (!ctx || !canvas || !m_bagActionPanelOpen || m_bagActionPanelSlot < 0 ||
+        !m_inventoryRegistry || m_inventoryEntity == Engine::INVALID_ENTITY) {
+        return;
+    }
+
+    const auto* inventory =
+        m_inventoryRegistry->GetComponent<Engine::Systems::Inventory::InventoryComponent>(
+            m_inventoryEntity);
+    if (!inventory) {
+        m_bagActionPanelOpen = false;
+        m_bagActionPanelSlot = -1;
+        return;
+    }
+
+    const size_t slotIndex = static_cast<size_t>(m_bagActionPanelSlot);
+    if (slotIndex >= inventory->slots.size() || inventory->slots[slotIndex].isEmpty) {
+        m_bagActionPanelOpen = false;
+        m_bagActionPanelSlot = -1;
+        return;
+    }
+
+    const Engine::Systems::Inventory::Item& item = inventory->slots[slotIndex].item;
+    const Engine::Platform::UI::ItemTooltipContent content = BuildItemTooltipContent(item);
+    if (content.name.empty()) {
+        m_bagActionPanelOpen = false;
+        m_bagActionPanelSlot = -1;
+        return;
+    }
+
+    const struct nk_user_font* font = ctx->style.font;
+    if (!font) {
+        return;
+    }
+
+    const bool showUse = CanUseItemAtSlot(slotIndex);
+    const struct nk_rect anchor =
+        nk_rect(m_bagActionPanelAnchorX,
+                m_bagActionPanelAnchorY,
+                m_bagActionPanelAnchorW,
+                m_bagActionPanelAnchorH);
+    const Engine::Platform::UI::ItemActionPanelLayout panelLayout =
+        Engine::Platform::UI::LayoutItemActionPanel(
+            anchor,
+            screenWidth,
+            screenHeight,
+            content,
+            showUse,
+            font);
+
+    if (panelLayout.panelBounds.w <= 0.0f || panelLayout.panelBounds.h <= 0.0f) {
+        m_bagActionPanelOpen = false;
+        m_bagActionPanelSlot = -1;
+        return;
+    }
+
+    const struct nk_rect panelBoundsNk =
+        nk_rect(panelLayout.panelBounds.x,
+                panelLayout.panelBounds.y,
+                panelLayout.panelBounds.w,
+                panelLayout.panelBounds.h);
+    const struct nk_rect useButtonBoundsNk =
+        nk_rect(panelLayout.useButtonBounds.x,
+                panelLayout.useButtonBounds.y,
+                panelLayout.useButtonBounds.w,
+                panelLayout.useButtonBounds.h);
+    const struct nk_rect dropButtonBoundsNk =
+        nk_rect(panelLayout.dropButtonBounds.x,
+                panelLayout.dropButtonBounds.y,
+                panelLayout.dropButtonBounds.w,
+                panelLayout.dropButtonBounds.h);
+
+    const bool hoverUse =
+        showUse && nk_input_is_mouse_hovering_rect(&ctx->input, useButtonBoundsNk);
+    const bool hoverDrop =
+        nk_input_is_mouse_hovering_rect(&ctx->input, dropButtonBoundsNk);
+
+    Engine::Platform::UI::DrawItemActionPanel(
+        canvas,
+        panelLayout,
+        content,
+        showUse,
+        font,
+        hoverUse,
+        hoverDrop);
+
+    if (nk_input_is_mouse_released(&ctx->input, NK_BUTTON_LEFT)) {
+        const float clickX = ctx->input.mouse.pos.x;
+        const float clickY = ctx->input.mouse.pos.y;
+        if (showUse && PointInRect(useButtonBoundsNk, clickX, clickY)) {
+            m_bagActionPanelOpen = false;
+            m_bagActionPanelSlot = -1;
+            HandleBagUseSlotClick(static_cast<int>(slotIndex));
+            return;
+        }
+        if (PointInRect(dropButtonBoundsNk, clickX, clickY)) {
+            m_bagActionPanelOpen = false;
+            m_bagActionPanelSlot = -1;
+            PerformBagItemAction(BagItemAction::Drop, static_cast<int>(slotIndex));
+            return;
+        }
+        if (!PointInRect(panelBoundsNk, clickX, clickY)) {
+            m_bagActionPanelOpen = false;
+            m_bagActionPanelSlot = -1;
+        }
+    }
 }
 
 void CharacterMenu::SetGameItemCatalog(const Game::Character::GameItemCatalog* catalog) {
@@ -1904,7 +2159,8 @@ void CharacterMenu::Build(struct nk_context* ctx,
                                         panelBounds.w,
                                         panelBounds.h,
                                         panel.config.itemGrid) ||
-                m_bagDrag.active) {
+                m_bagDrag.active ||
+                m_bagActionPanelOpen) {
                 m_pointerOverPanelUi = true;
             }
 
@@ -1920,6 +2176,7 @@ void CharacterMenu::Build(struct nk_context* ctx,
                             m_bagDrag,
                             screenWidth,
                             screenHeight);
+            DrawBagItemActionPanel(ctx, canvas, screenWidth, screenHeight);
         }
 
         if (panel.config.hasCharacterPreview && m_paperdollRenderer && m_paperdollRegistry &&

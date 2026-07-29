@@ -306,5 +306,31 @@ GameItemTooltipInfo GameItemCatalog::BuildTooltipInfo(const std::string& itemId)
     return BuildTooltipInfoFromDefinition(Find(itemId));
 }
 
+bool GameItemCatalog::CanUseItem(const std::string& itemId) const {
+    const GameItemDefinition* definition = Find(itemId);
+    if (!definition) {
+        return false;
+    }
+    switch (definition->itemType) {
+        case Engine::Systems::Inventory::ItemType::Consumable:
+        case Engine::Systems::Inventory::ItemType::Resource:
+            return true;
+        case Engine::Systems::Inventory::ItemType::Tool:
+        case Engine::Systems::Inventory::ItemType::Weapon:
+        case Engine::Systems::Inventory::ItemType::Armor:
+        case Engine::Systems::Inventory::ItemType::Building:
+        default:
+            return false;
+    }
+}
+
+bool GameItemCatalog::CanUseItem(uint32_t numericId) const {
+    const GameItemDefinition* definition = FindByNumericId(numericId);
+    if (!definition) {
+        return false;
+    }
+    return CanUseItem(definition->id);
+}
+
 } // namespace Character
 } // namespace Game

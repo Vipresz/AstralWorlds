@@ -198,6 +198,11 @@ struct CharacterMenuConfig {
 // Bottom HUD overlay on the character screen (after main menu PLAY).
 class CharacterMenu {
 public:
+    enum class BagItemAction {
+        Use,
+        Drop,
+    };
+
     struct BagDragState {
         bool active = false;
         int sourceSlot = -1;
@@ -228,9 +233,21 @@ public:
 
     void SetInventoryMutationCallback(std::function<void()> callback);
 
+    void SetInventoryActionCallback(
+        std::function<void(BagItemAction action, int slotIndex)> callback);
+
+    void SetInventoryCombinedUseCallback(
+        std::function<void(int primarySlot, int secondarySlot)> callback);
+
     void RequestInventorySync();
 
     void CancelBagDrag();
+
+    bool IsBagItemActionPanelOpen() const { return m_bagActionPanelOpen; }
+
+    bool IsBagUseSlotSelected(int slotIndex) const {
+        return slotIndex >= 0 && slotIndex == m_bagSelectedUseSlot;
+    }
 
     void SetGameItemCatalog(const Game::Character::GameItemCatalog* catalog);
 
@@ -266,6 +283,15 @@ private:
                            float panelW,
                            float panelH,
                            const BagItemGridConfig& grid);
+    void DrawBagItemActionPanel(struct nk_context* ctx,
+                                struct nk_command_buffer* canvas,
+                                int screenWidth,
+                                int screenHeight);
+    bool CanUseItemAtSlot(size_t slotIndex) const;
+    void ClearBagUseSelection();
+    void HandleBagUseSlotClick(int slotIndex);
+    void PerformCombinedBagItemUse(int primarySlot, int secondarySlot);
+    void PerformBagItemAction(BagItemAction action, int slotIndex);
     void ToggleBarButton(const std::string& id);
     bool KeyPressed(Engine::Platform::Window& window, int key, bool& wasDown) const;
     CloseButtonConfig ResolvePanelCloseButton(const OverlayPanelConfig& panel) const;
@@ -304,8 +330,21 @@ private:
     std::string m_lastBagLogSnapshot;
     std::function<void()> m_inventorySyncCallback;
     std::function<void()> m_inventoryMutationCallback;
+    std::function<void(BagItemAction, int)> m_inventoryActionCallback;
+    std::function<void(int, int)> m_inventoryCombinedUseCallback;
     bool m_inventorySyncPending = false;
     BagDragState m_bagDrag;
+    bool m_bagClickPending = false;
+    int m_bagPendingClickSlot = -1;
+    float m_bagPendingClickMouseX = 0.0f;
+    float m_bagPendingClickMouseY = 0.0f;
+    int m_bagSelectedUseSlot = -1;
+    bool m_bagActionPanelOpen = false;
+    int m_bagActionPanelSlot = -1;
+    float m_bagActionPanelAnchorX = 0.0f;
+    float m_bagActionPanelAnchorY = 0.0f;
+    float m_bagActionPanelAnchorW = 0.0f;
+    float m_bagActionPanelAnchorH = 0.0f;
     float m_paperdollYawDegrees = 0.0f;
     bool m_bKeyWasDown = false;
     bool m_hasPaperdollRotateClock = false;

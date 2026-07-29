@@ -54,6 +54,9 @@ public:
     GameItemTooltipInfo BuildTooltipInfo(uint32_t numericId) const;
     GameItemTooltipInfo BuildTooltipInfo(const std::string& itemId) const;
 
+    bool CanUseItem(const std::string& itemId) const;
+    bool CanUseItem(uint32_t numericId) const;
+
     static std::string ItemTypeDisplayName(Engine::Systems::Inventory::ItemType type);
     static std::string ItemTypeDisplayName(const std::string& typeKey);
 

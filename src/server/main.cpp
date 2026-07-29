@@ -229,6 +229,14 @@ int main(int argc, char* argv[]) {
             [catalog = gameItemCatalog.get()](const std::string& itemId) {
                 return catalog->GetStackCap(itemId);
             });
+        simulator->SetInventoryActionValidator(
+            [catalog = gameItemCatalog.get()](Engine::Net::InventoryActionType action,
+                                              const std::string& itemId) {
+                if (action == Engine::Net::InventoryActionType::Drop) {
+                    return !itemId.empty();
+                }
+                return catalog->CanUseItem(itemId);
+            });
 
         simulator->SetSpawnPosition(glm::vec3(5.0f, 0.0f, 5.0f));
         Game::Character::CharacterStats characterStats;

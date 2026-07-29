@@ -24,7 +24,9 @@
 #include "systems/inventory/InventoryOwnershipSync.h"
 #include "core/ecs/components/PlayerItemOwnershipComponent.h"
 #include "core/network/MovementCommand.h"
+#include "core/network/InventoryAction.h"
 #include "core/network/NetworkPayloads.h"
+#include "systems/inventory/InventoryInteraction.h"
 #include "core/ecs/Registry.h"
 #include "core/System.h"
 #include "render/Window.h"
@@ -133,6 +135,25 @@ void PushBagOwnershipToServer(Engine::ECS::Registry& registry,
     payload.tick = 0;
     payload.channel = Engine::Net::kItemOwnershipChannel;
     payload.data = replicated.Serialize().Data();
+    networkSystem->GetClient().SendGenericData(payload);
+}
+
+void SendInventoryActionToServer(const std::shared_ptr<NetworkSystem>& networkSystem,
+                                 Engine::Net::InventoryActionType action,
+                                 uint16_t slotIndex) {
+    if (!networkSystem) {
+        return;
+    }
+
+    Engine::Net::InventoryActionCommand command;
+    command.action = action;
+    command.slotIndex = slotIndex;
+
+    Engine::Net::GenericDataPayload payload;
+    payload.userId = networkSystem->GetLocalUserId();
+    payload.tick = 0;
+    payload.channel = Engine::Net::kInventoryActionChannel;
+    payload.data = Engine::Net::SerializeInventoryAction(command).Data();
     networkSystem->GetClient().SendGenericData(payload);
 }
 
@@ -676,6 +697,92 @@ int main(int argc, char* argv[]) {
             characterMenu->SetInventoryMutationCallback([&]() {
                 PushBagOwnershipToServer(
                     registry, character.id, gameItemCatalog, networkSystem, networkConnected);
+            });
+            characterMenu->SetInventoryActionCallback([&](Game::UI::CharacterMenu::BagItemAction action,
+                                                          int slotIndex) {
+                if (slotIndex < 0) {
+                    return;
+                }
+
+                if (networkConnected && networkSystem) {
+                    if (action != Game::UI::CharacterMenu::BagItemAction::Drop) {
+                        return;
+                    }
+                    SendInventoryActionToServer(
+                        networkSystem,
+                        Engine::Net::InventoryActionType::Drop,
+                        static_cast<uint16_t>(slotIndex));
+                    return;
+                }
+
+                auto* inventory =
+                    registry.GetComponent<Engine::Systems::Inventory::InventoryComponent>(
+                        character.id);
+                auto* ownership =
+                    registry.GetComponent<Engine::ECS::PlayerItemOwnershipComponent>(
+                        character.id);
+                if (!inventory || !ownership) {
+                    return;
+                }
+
+                const Engine::Net::UserId ownerUserId =
+                    ownership->ownerUserId != Engine::Net::kInvalidUserId
+                        ? ownership->ownerUserId
+                        : static_cast<Engine::Net::UserId>(1);
+
+                const bool success = Game::Inventory::ApplyDropAtSlot(
+                    *inventory, *ownership, gameItemCatalog,
+                    static_cast<size_t>(slotIndex), ownerUserId);
+                if (!success) {
+                    LOG_WARNING_FMT("Main", "Bag drop failed for slot %d", slotIndex);
+                }
+            });
+            characterMenu->SetInventoryCombinedUseCallback([&](int primarySlot, int secondarySlot) {
+                if (primarySlot < 0 || secondarySlot < 0) {
+                    return;
+                }
+
+                if (networkConnected && networkSystem) {
+                    SendInventoryActionToServer(
+                        networkSystem,
+                        Engine::Net::InventoryActionType::Use,
+                        static_cast<uint16_t>(primarySlot));
+                    SendInventoryActionToServer(
+                        networkSystem,
+                        Engine::Net::InventoryActionType::Use,
+                        static_cast<uint16_t>(secondarySlot));
+                    return;
+                }
+
+                auto* inventory =
+                    registry.GetComponent<Engine::Systems::Inventory::InventoryComponent>(
+                        character.id);
+                auto* ownership =
+                    registry.GetComponent<Engine::ECS::PlayerItemOwnershipComponent>(
+                        character.id);
+                if (!inventory || !ownership) {
+                    return;
+                }
+
+                const Engine::Net::UserId ownerUserId =
+                    ownership->ownerUserId != Engine::Net::kInvalidUserId
+                        ? ownership->ownerUserId
+                        : static_cast<Engine::Net::UserId>(1);
+
+                const bool success = Game::Inventory::ApplyCombinedUseAtSlots(
+                    *inventory,
+                    *ownership,
+                    gameItemCatalog,
+                    static_cast<size_t>(primarySlot),
+                    static_cast<size_t>(secondarySlot),
+                    ownerUserId);
+                if (!success) {
+                    LOG_WARNING_FMT(
+                        "Main",
+                        "Combined bag item use failed for slots %d and %d",
+                        primarySlot,
+                        secondarySlot);
+                }
             });
             characterMenu->RequestInventorySync();
             characterMenu->SetGameItemCatalog(&gameItemCatalog);

@@ -230,6 +230,29 @@ struct InventoryComponent {
         std::swap(from.item, to.item);
         return true;
     }
+
+    bool RemoveQuantityFromSlot(size_t slotIndex, uint32_t quantity) {
+        if (slotIndex >= slots.size() || slots[slotIndex].isEmpty || quantity == 0) {
+            return false;
+        }
+
+        ItemSlot& slot = slots[slotIndex];
+        if (slot.item.quantity <= quantity) {
+            slots[slotIndex] = ItemSlot{};
+            return true;
+        }
+
+        slot.item.quantity -= quantity;
+        return true;
+    }
+
+    bool ClearSlot(size_t slotIndex) {
+        if (slotIndex >= slots.size() || slots[slotIndex].isEmpty) {
+            return false;
+        }
+        slots[slotIndex] = ItemSlot{};
+        return true;
+    }
 };
 
 } // namespace Inventory
