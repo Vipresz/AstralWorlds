@@ -148,6 +148,88 @@ struct InventoryComponent {
         }
         return count;
     }
+
+    bool TakeItemFromSlot(size_t slotIndex, Item& outItem) {
+        if (slotIndex >= slots.size() || slots[slotIndex].isEmpty) {
+            return false;
+        }
+        outItem = slots[slotIndex].item;
+        slots[slotIndex] = ItemSlot{};
+        return true;
+    }
+
+  // Place into target slot (merge, move into empty, or swap displaced item into fallback).
+    bool PlaceItemAtSlot(size_t targetIndex, const Item& item, size_t fallbackIndex) {
+        if (targetIndex >= slots.size() || item.quantity == 0) {
+            return false;
+        }
+
+        ItemSlot& target = slots[targetIndex];
+        if (target.isEmpty) {
+            target.item = item;
+            target.isEmpty = false;
+            return true;
+        }
+
+        if (target.item.CanStackWith(item)) {
+            const uint32_t space = target.item.stackSize - target.item.quantity;
+            if (space > 0) {
+                const uint32_t transfer = std::min(space, item.quantity);
+                target.item.quantity += transfer;
+                Item remainder = item;
+                remainder.quantity -= transfer;
+                if (remainder.quantity > 0 && fallbackIndex < slots.size() &&
+                    slots[fallbackIndex].isEmpty) {
+                    slots[fallbackIndex].item = remainder;
+                    slots[fallbackIndex].isEmpty = false;
+                }
+                return remainder.quantity == 0;
+            }
+        }
+
+        if (fallbackIndex >= slots.size()) {
+            return false;
+        }
+
+        slots[fallbackIndex] = target;
+        target.item = item;
+        target.isEmpty = false;
+        return true;
+    }
+
+    bool MoveItemBetweenSlots(size_t fromIndex, size_t toIndex) {
+        if (fromIndex == toIndex || fromIndex >= slots.size() || toIndex >= slots.size()) {
+            return false;
+        }
+
+        ItemSlot& from = slots[fromIndex];
+        ItemSlot& to = slots[toIndex];
+        if (from.isEmpty) {
+            return false;
+        }
+
+        if (to.isEmpty) {
+            to = from;
+            from = ItemSlot{};
+            return true;
+        }
+
+        if (from.item.CanStackWith(to.item)) {
+            const uint32_t space = to.item.stackSize - to.item.quantity;
+            if (space > 0) {
+                const uint32_t transfer = std::min(space, from.item.quantity);
+                to.item.quantity += transfer;
+                from.item.quantity -= transfer;
+                if (from.item.quantity == 0) {
+                    from.isEmpty = true;
+                }
+                return true;
+            }
+        }
+
+        std::swap(from.item, to.item);
+        return true;
+    }
 };
 
 } // namespace Inventory

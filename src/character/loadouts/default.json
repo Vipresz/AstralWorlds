@@ -1,4 +1,7 @@
 {
   "body_item_id": "body_male_default",
-  "equipment": []
+  "equipment": [],
+  "inventory": [
+    { "item_id": "maple", "quantity": 10 }
+  ]
 }

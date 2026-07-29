@@ -1,0 +1,244 @@
+{
+  "items": [
+    {
+      "id": "ember_copper_bar",
+      "numeric_id": 1001,
+      "name": "Ember Copper Bar",
+      "type": "resource",
+      "category": "bar",
+      "description": "Warm copper alloy used in basic forging recipes.",
+      "icon": "items/bars/ember_copper_bar.png",
+      "stack_size": 64
+    },
+    {
+      "id": "dusk_iron_bar",
+      "numeric_id": 1002,
+      "name": "Dusk Iron Bar",
+      "type": "resource",
+      "category": "bar",
+      "description": "Dark iron ingot favored by armorers.",
+      "icon": "items/bars/dusk_iron_bar.png",
+      "stack_size": 64
+    },
+    {
+      "id": "moonsteel_bar",
+      "numeric_id": 1003,
+      "name": "Moonsteel Bar",
+      "type": "resource",
+      "category": "bar",
+      "description": "Pale steel that holds a lunar temper.",
+      "icon": "items/bars/moonsteel_bar.png",
+      "stack_size": 64
+    },
+    {
+      "id": "gold_bar",
+      "numeric_id": 1004,
+      "name": "Gold Bar",
+      "type": "resource",
+      "category": "bar",
+      "description": "Refined gold bar for trade and ornament.",
+      "icon": "items/bars/gold_bar.png",
+      "stack_size": 64
+    },
+    {
+      "id": "frost_crystal_bar",
+      "numeric_id": 1005,
+      "name": "Frost Crystal Bar",
+      "type": "resource",
+      "category": "bar",
+      "description": "Crystalline bar chilled to an unnatural stillness.",
+      "icon": "items/bars/frost_crystal_bar.png",
+      "stack_size": 64
+    },
+    {
+      "id": "verdandite",
+      "numeric_id": 1006,
+      "name": "Verdandite Bar",
+      "type": "resource",
+      "category": "bar",
+      "description": "Green-veined ore bar prized by enchanters.",
+      "icon": "items/bars/verdandite.png",
+      "stack_size": 64
+    },
+    {
+      "id": "amethyst_bar",
+      "numeric_id": 1007,
+      "name": "Amethyst Bar",
+      "type": "resource",
+      "category": "bar",
+      "description": "Violet crystal bar that resonates with arcane work.",
+      "icon": "items/bars/amethyst_bar.png",
+      "stack_size": 64
+    },
+    {
+      "id": "cinderstone_bar",
+      "numeric_id": 1008,
+      "name": "Cinderstone Bar",
+      "type": "resource",
+      "category": "bar",
+      "description": "Heat-hardened stone bar for heavy crafts.",
+      "icon": "items/bars/cinderstone_bar.png",
+      "stack_size": 64
+    },
+    {
+      "id": "void_obsidian_bar",
+      "numeric_id": 1009,
+      "name": "Void Obsidian Bar",
+      "type": "resource",
+      "category": "bar",
+      "description": "Obsidian bar drawn from shadowed depths.",
+      "icon": "items/bars/void_obsidian_bar.png",
+      "stack_size": 64
+    },
+    {
+      "id": "starlacite_bar",
+      "numeric_id": 1010,
+      "name": "Starlacite Bar",
+      "type": "resource",
+      "category": "bar",
+      "description": "Stellar mineral bar that gleams like distant light.",
+      "icon": "items/bars/starlacite_bar.png",
+      "stack_size": 64
+    },
+    {
+      "id": "stormglass_bar",
+      "numeric_id": 1011,
+      "name": "Stormglass Bar",
+      "type": "resource",
+      "category": "bar",
+      "description": "Glass-like bar forged from captured lightning.",
+      "icon": "items/bars/stormglass_bar.png",
+      "stack_size": 64
+    },
+    {
+      "id": "astral_ether_bar",
+      "numeric_id": 1012,
+      "name": "Astral Ether Bar",
+      "type": "resource",
+      "category": "bar",
+      "description": "Ethereal bar condensed from astral currents.",
+      "icon": "items/bars/astral_ether_bar.png",
+      "stack_size": 64
+    },
+    {
+      "id": "maple",
+      "numeric_id": 2001,
+      "name": "Maple",
+      "type": "resource",
+      "category": "wood",
+      "description": "Common softwood logs cut from maple trees.",
+      "icon": "items/wood/maple.png",
+      "stack_size": 64
+    },
+    {
+      "id": "silver_birch",
+      "numeric_id": 2002,
+      "name": "Silver Birch",
+      "type": "resource",
+      "category": "wood",
+      "description": "Pale birch wood with a silvery grain.",
+      "icon": "items/wood/silver_birch.png",
+      "stack_size": 64
+    },
+    {
+      "id": "stormpine",
+      "numeric_id": 2003,
+      "name": "Stormpine",
+      "type": "resource",
+      "category": "wood",
+      "description": "Resilient pine toughened by coastal storms.",
+      "icon": "items/wood/stormpine.png",
+      "stack_size": 64
+    },
+    {
+      "id": "verdant_willow",
+      "numeric_id": 2004,
+      "name": "Verdant Willow",
+      "type": "resource",
+      "category": "wood",
+      "description": "Flexible willow branches rich with sap.",
+      "icon": "items/wood/verdant_willow.png",
+      "stack_size": 64
+    },
+    {
+      "id": "ember_oak",
+      "numeric_id": 2005,
+      "name": "Ember Oak",
+      "type": "resource",
+      "category": "wood",
+      "description": "Oak timber warm with lingering ember hues.",
+      "icon": "items/wood/ember_oak.png",
+      "stack_size": 64
+    },
+    {
+      "id": "blood_cedar",
+      "numeric_id": 2006,
+      "name": "Blood Cedar",
+      "type": "resource",
+      "category": "wood",
+      "description": "Deep red cedar with a sharp aromatic bite.",
+      "icon": "items/wood/blood_cedar.png",
+      "stack_size": 64
+    },
+    {
+      "id": "thorn_yew",
+      "numeric_id": 2007,
+      "name": "Thorn Yew",
+      "type": "resource",
+      "category": "wood",
+      "description": "Dense yew wood guarded by thorned groves.",
+      "icon": "items/wood/thorn_yew.png",
+      "stack_size": 64
+    },
+    {
+      "id": "rosewood",
+      "numeric_id": 2008,
+      "name": "Rosewood",
+      "type": "resource",
+      "category": "wood",
+      "description": "Fine rosewood prized for delicate craftsmanship.",
+      "icon": "items/wood/rosewood.png",
+      "stack_size": 64
+    },
+    {
+      "id": "umber_walnut",
+      "numeric_id": 2009,
+      "name": "Umber Walnut",
+      "type": "resource",
+      "category": "wood",
+      "description": "Rich walnut planks with umber undertones.",
+      "icon": "items/wood/umber_walnut.png",
+      "stack_size": 64
+    },
+    {
+      "id": "ghost_bark",
+      "numeric_id": 2010,
+      "name": "Ghost Bark",
+      "type": "resource",
+      "category": "wood",
+      "description": "Pale bark wood said to whisper in moonlight.",
+      "icon": "items/wood/ghost_bark.png",
+      "stack_size": 64
+    },
+    {
+      "id": "cinder_mahagony",
+      "numeric_id": 2011,
+      "name": "Cinder Mahogany",
+      "type": "resource",
+      "category": "wood",
+      "description": "Dark mahogany tempered near cinder forges.",
+      "icon": "items/wood/cinder_mahagony.png",
+      "stack_size": 64
+    },
+    {
+      "id": "void_ebony",
+      "numeric_id": 2012,
+      "name": "Void Ebony",
+      "type": "resource",
+      "category": "wood",
+      "description": "Rare ebony blackened by void-touched growth.",
+      "icon": "items/wood/void_ebony.png",
+      "stack_size": 64
+    }
+  ]
+}

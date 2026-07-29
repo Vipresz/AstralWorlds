@@ -1,6 +1,16 @@
 # Dedicated multiplayer relay server (no rendering window)
 
-add_executable(GameServer main.cpp)
+include("${CMAKE_SOURCE_DIR}/cmake/Sqlite3Amalgamation.cmake")
+add_sqlite3_amalgamation()
+
+add_executable(GameServer
+    main.cpp
+    ../AppPaths.cpp
+    ../character/CharacterDatabase.cpp
+    ../character/CharacterInventoryDatabase.cpp
+    ../character/CharacterTypes.cpp
+    ../character/GameItemCatalog.cpp
+)
 
 target_include_directories(GameServer PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/..
@@ -9,6 +19,7 @@ target_include_directories(GameServer PRIVATE
 target_link_libraries(GameServer PRIVATE
     Engine
     Platform
+    sqlite3
 )
 
 set_target_properties(GameServer PROPERTIES

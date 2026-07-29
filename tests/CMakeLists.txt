@@ -1,5 +1,8 @@
 include(FetchContent)
 
+include("${CMAKE_SOURCE_DIR}/cmake/Sqlite3Amalgamation.cmake")
+add_sqlite3_amalgamation()
+
 FetchContent_Declare(
     googletest
     URL https://github.com/google/googletest/archive/refs/tags/v1.15.2.zip
@@ -11,13 +14,14 @@ FetchContent_MakeAvailable(googletest)
 file(GLOB GAME_CHARACTER_SOURCES
     "${CMAKE_SOURCE_DIR}/src/character/*.cpp"
 )
-list(FILTER GAME_CHARACTER_SOURCES EXCLUDE REGEX ".*/Character(Nameplate|Paperdoll)Renderer\\.cpp$")
+list(FILTER GAME_CHARACTER_SOURCES EXCLUDE REGEX ".*/Character(Nameplate|Paperdoll|SpeechBubble)Renderer\\.cpp$")
 file(GLOB GAME_CHARACTER_SYSTEM_SOURCES
     "${CMAKE_SOURCE_DIR}/src/systems/character/*.cpp"
 )
 
 set(GAME_TEST_SOURCES
     CharacterBodyAssetCacheTest.cpp
+    CharacterInventoryDatabaseTest.cpp
     CharacterLoadE2ETest.cpp
     GameNetworkE2ETest.cpp
     GameTestMain.cpp
@@ -42,6 +46,7 @@ target_compile_definitions(GameTests PRIVATE
 target_link_libraries(GameTests PRIVATE
     Engine
     Platform
+    sqlite3
     GTest::gtest
 )
 

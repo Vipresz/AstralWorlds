@@ -29,6 +29,8 @@ if(NOT GAME_SOURCES)
     set(GAME_SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/main.cpp")
 endif()
 
+list(FILTER GAME_SOURCES EXCLUDE REGEX ".*/CharacterInventoryDatabase\\.cpp$")
+
 # Create game executable
 add_executable(Game ${GAME_SOURCES})
 

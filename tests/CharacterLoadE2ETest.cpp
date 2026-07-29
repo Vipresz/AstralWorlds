@@ -96,3 +96,25 @@ TEST_F(CharacterLoadE2ETest, LoadsSkinnedBodyAndObjEquipment) {
     EXPECT_NE(mesh->model, nullptr);
     EXPECT_EQ(mesh->model, instance.GetBodyModel());
 }
+
+TEST(ServerLoadoutDatabaseTest, FetchUserLoadoutIncludesMapleStarterInventory) {
+    EngineLogging::Logger::GetInstance().Initialize("server_loadout_test.log");
+    ASSERT_TRUE(Game::Tests::SetWorkingDirectoryToTestRuntime());
+
+    const std::string loadoutPath = Game::Tests::RequireAsset("character/loadouts/1.json");
+    if (!Game::Tests::FileExists(loadoutPath)) {
+        GTEST_SKIP() << "character/loadouts/1.json missing from test runtime";
+    }
+
+    Game::Character::ServerLoadoutDatabase database("character/loadouts");
+    Game::Character::CharacterLoginContext login;
+    login.userId = 1;
+    login.displayName = "test";
+
+    Game::Character::CharacterLoadout loadout;
+    ASSERT_TRUE(database.FetchLoadout(login, loadout));
+    EXPECT_EQ(loadout.bodyItemId, "body_male_default");
+    EXPECT_FALSE(loadout.inventory.empty());
+    EXPECT_EQ(loadout.inventory.front().itemId, "maple");
+    EXPECT_EQ(loadout.inventory.front().quantity, 10u);
+}

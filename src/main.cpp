@@ -7,6 +7,7 @@
 #include "character/CharacterEquipmentSystem.h"
 #include "character/CharacterStats.h"
 #include "character/ItemCatalog.h"
+#include "character/GameItemCatalog.h"
 #include "character/EquipmentRules.h"
 #include "character/NameplateComponent.h"
 #include "character/CharacterNameplateRenderer.h"
@@ -19,6 +20,11 @@
 #include "character/CharacterReplicationComponent.h"
 #include "audio/CharacterWalkAudioSystem.h"
 #include "systems/character/RemoteLoadoutApplySystem.h"
+#include "systems/inventory/InventoryComponent.h"
+#include "systems/inventory/InventoryOwnershipSync.h"
+#include "core/ecs/components/PlayerItemOwnershipComponent.h"
+#include "core/network/MovementCommand.h"
+#include "core/network/NetworkPayloads.h"
 #include "core/ecs/Registry.h"
 #include "core/System.h"
 #include "render/Window.h"
@@ -81,6 +87,56 @@ using namespace Game::Audio;
 using namespace Engine::Platform::UI;
 using namespace Game::UI;
 #endif
+
+namespace {
+
+
+void SyncBagFromOwnership(Engine::ECS::Registry& registry,
+                          Engine::EntityID entityId,
+                          const GameItemCatalog& catalog) {
+    auto* inventory =
+        registry.GetComponent<Engine::Systems::Inventory::InventoryComponent>(entityId);
+    const auto* ownership =
+        registry.GetComponent<Engine::ECS::PlayerItemOwnershipComponent>(entityId);
+    if (!inventory || !ownership) {
+        return;
+    }
+    Game::Inventory::SyncInventoryFromOwnership(*inventory, *ownership, catalog);
+}
+
+void PushBagOwnershipToServer(Engine::ECS::Registry& registry,
+                              Engine::EntityID entityId,
+                              const Game::Character::GameItemCatalog& catalog,
+                              const std::shared_ptr<NetworkSystem>& networkSystem,
+                              bool networkConnected) {
+    if (!networkSystem || !networkConnected) {
+        return;
+    }
+
+    auto* inventory =
+        registry.GetComponent<Engine::Systems::Inventory::InventoryComponent>(entityId);
+    auto* ownership =
+        registry.GetComponent<Engine::ECS::PlayerItemOwnershipComponent>(entityId);
+    if (!inventory || !ownership) {
+        return;
+    }
+
+    const Engine::Net::UserId ownerUserId = networkSystem->GetLocalUserId();
+    Game::Inventory::BuildOwnershipFromInventory(
+        *ownership, *inventory, catalog, ownerUserId);
+
+    const Engine::Net::ReplicatedItemOwnership replicated =
+        Game::Inventory::BuildReplicatedOwnership(*ownership);
+
+    Engine::Net::GenericDataPayload payload;
+    payload.userId = ownerUserId;
+    payload.tick = 0;
+    payload.channel = Engine::Net::kItemOwnershipChannel;
+    payload.data = replicated.Serialize().Data();
+    networkSystem->GetClient().SendGenericData(payload);
+}
+
+} // namespace
 
 int main(int argc, char* argv[]) {
     if (!Game::SetWorkingDirectoryToExecutable()) {
@@ -206,9 +262,13 @@ int main(int argc, char* argv[]) {
         Registry registry;
 
         ItemCatalog itemCatalog;
+        GameItemCatalog gameItemCatalog;
         EquipmentRules equipmentRules;
         ServerLoadoutDatabase characterDatabase;
         itemCatalog.Load();
+        if (!gameItemCatalog.Load()) {
+            LOG_WARNING("Main", "Game item catalog failed to load");
+        }
         equipmentRules.Load();
         const ItemDefinition* defaultBody = itemCatalog.DefaultBody();
         if (defaultBody && !defaultBody->modelPath.empty()) {
@@ -321,6 +381,36 @@ int main(int argc, char* argv[]) {
             if (AnimationComponent* anim = registry.GetComponent<AnimationComponent>(character.id)) {
                 anim->groundLevel = terrainHeight;
             }
+            if (!registry.HasComponent<Engine::Systems::Inventory::InventoryComponent>(character.id)) {
+                auto& inventory = registry.AddComponent<Engine::Systems::Inventory::InventoryComponent>(
+                    character.id);
+                inventory = Engine::Systems::Inventory::InventoryComponent(24);
+            }
+
+            Engine::ECS::PlayerItemOwnershipComponent* ownership =
+                registry.GetComponent<Engine::ECS::PlayerItemOwnershipComponent>(character.id);
+            if (!ownership) {
+                ownership = &registry.AddComponent<Engine::ECS::PlayerItemOwnershipComponent>(
+                    character.id);
+            }
+
+            const Engine::Net::UserId ownerUserId =
+                loginContext.userId != Engine::Net::kInvalidUserId
+                    ? loginContext.userId
+                    : (networkSystem ? networkSystem->GetLocalUserId()
+                                     : static_cast<Engine::Net::UserId>(1));
+
+            CharacterLoadout loginLoadout;
+            if (characterLoader.FetchLoginLoadout(loginContext, loginLoadout)) {
+                if (ownership->ownedItems.empty() && !loginContext.isOnlineLogin) {
+                    Game::Inventory::ApplyLoadoutOwnership(
+                        *ownership, loginLoadout, gameItemCatalog, ownerUserId);
+                }
+            }
+            if (ownership->ownerUserId == Engine::Net::kInvalidUserId) {
+                ownership->ownerUserId = ownerUserId;
+            }
+            SyncBagFromOwnership(registry, character.id, gameItemCatalog);
             if (networkSystem) {
                 networkSystem->SetRemotePlayerModel(
                     characterInstance.GetBodyModel(), characterInstance.scale);
@@ -364,7 +454,12 @@ int main(int argc, char* argv[]) {
             // Local transform comes from prediction + TransformState reconcile; applying
             // server EntitySnapshot transforms would stomp scale and fight prediction.
             auto applyReplicationSnapshot =
-                [networkSystem, replicationSystem, &registry](const Engine::Net::EntitySnapshot& snapshot) {
+                [networkSystem,
+                 replicationSystem,
+                 &registry,
+                 &gameItemCatalog,
+                 localCharacterId = character.id,
+                 characterMenu = characterMenu.get()](const Engine::Net::EntitySnapshot& snapshot) {
                     if (snapshot.entityId == networkSystem->GetLocalUserId()) {
                         Engine::Net::EntitySnapshot filtered = snapshot;
                         filtered.components.erase(
@@ -379,6 +474,10 @@ int main(int argc, char* argv[]) {
                                 }),
                             filtered.components.end());
                         replicationSystem->ApplyEntitySnapshot(filtered, registry);
+                        if (characterMenu) {
+                            characterMenu->CancelBagDrag();
+                        }
+                        SyncBagFromOwnership(registry, localCharacterId, gameItemCatalog);
                         return;
                     }
                     replicationSystem->ApplyEntitySnapshot(snapshot, registry);
@@ -570,6 +669,16 @@ int main(int argc, char* argv[]) {
                 LOG_WARNING("Main", "Character menu bottom bar failed to load");
             }
             characterMenu->SetPaperdollCharacter(&registry, character.id, &shader, &characterInstance);
+            characterMenu->SetInventoryEntity(&registry, character.id);
+            characterMenu->SetInventorySyncCallback([&]() {
+                SyncBagFromOwnership(registry, character.id, gameItemCatalog);
+            });
+            characterMenu->SetInventoryMutationCallback([&]() {
+                PushBagOwnershipToServer(
+                    registry, character.id, gameItemCatalog, networkSystem, networkConnected);
+            });
+            characterMenu->RequestInventorySync();
+            characterMenu->SetGameItemCatalog(&gameItemCatalog);
             pumpBootLoading(0.94f, "Loading HUD...");
             if (!minimap.Initialize(heightmapPath.c_str(),
                                     groundModel.get(),
@@ -773,6 +882,7 @@ int main(int argc, char* argv[]) {
                 mainMenu->Update(deltaTime);
             }
             if (mainMenu && mainMenu->IsGameStarted()) {
+                characterMenu->Update(mainWindow);
                 chatWindow.Update(mainWindow);
                 UpdateSpeechBubbles(registry, deltaTime);
             }

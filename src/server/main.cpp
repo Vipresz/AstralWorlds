@@ -1,6 +1,12 @@
 #include "Logger.h"
 
+#include "AppPaths.h"
+#include "character/CharacterInventoryDatabase.h"
+#include "character/CharacterDatabase.h"
 #include "character/CharacterStats.h"
+#include "character/CharacterTypes.h"
+#include "character/GameItemCatalog.h"
+#include "core/ecs/components/PlayerItemOwnershipComponent.h"
 #include "core/network/NetTypes.h"
 #include "core/network/MovementCommand.h"
 #include "core/network/ShardConfig.h"
@@ -175,6 +181,10 @@ int main(int argc, char* argv[]) {
 
     logger.SetMinLevel(EngineLogging::LogLevel::LevelInfo);
 
+    if (!Game::SetWorkingDirectoryToExecutable()) {
+        LOG_WARNING("Server", "Could not set working directory to executable folder");
+    }
+
 
 
     const uint16_t port = ParsePort(argc, argv);
@@ -202,10 +212,23 @@ int main(int argc, char* argv[]) {
     NetServer server;
 
     std::unique_ptr<AuthoritativeGameSimulator> simulator;
+    std::unique_ptr<Game::Character::ServerLoadoutDatabase> loadoutDatabase;
+    std::unique_ptr<Game::Character::CharacterInventoryDatabase> inventoryDatabase;
+    std::unique_ptr<Game::Character::GameItemCatalog> gameItemCatalog;
 
     if (!relayOnly) {
 
         simulator = std::make_unique<AuthoritativeGameSimulator>(server);
+
+        gameItemCatalog = std::make_unique<Game::Character::GameItemCatalog>();
+        if (!gameItemCatalog->Load("character/game_items.json")) {
+            LOG_WARNING("Server", "Game item catalog failed to load — using default stack caps");
+        }
+        simulator->SetBagCapacity(Engine::ECS::kDefaultBagCapacity);
+        simulator->SetItemStackCapResolver(
+            [catalog = gameItemCatalog.get()](const std::string& itemId) {
+                return catalog->GetStackCap(itemId);
+            });
 
         simulator->SetSpawnPosition(glm::vec3(5.0f, 0.0f, 5.0f));
         Game::Character::CharacterStats characterStats;
@@ -226,24 +249,70 @@ int main(int argc, char* argv[]) {
 
         server.SetAuthoritativeMode(true);
 
-        server.SetClientLoggedInCallback([&simulator](Engine::Net::UserId userId, const std::string& displayName) {
+        loadoutDatabase = std::make_unique<Game::Character::ServerLoadoutDatabase>("character/loadouts");
+        LOG_INFO_FMT("Server", "Using loadout directory %s", loadoutDatabase->GetLoadoutsDirectory().c_str());
+        inventoryDatabase = std::make_unique<Game::Character::CharacterInventoryDatabase>("character/astral_worlds.db");
+        if (!inventoryDatabase->Open()) {
+            LOG_WARNING("Server", "Inventory database failed to open — persistence disabled");
+        }
 
-            if (simulator) {
-
-                simulator->OnClientLoggedIn(userId, displayName);
-
+        server.SetClientLoggedInCallback([&simulator, &loadoutDatabase, &inventoryDatabase](
+                                             Engine::Net::UserId userId,
+                                             const std::string& displayName) {
+            if (!simulator || !loadoutDatabase || !inventoryDatabase) {
+                return;
             }
 
+            Game::Character::CharacterLoginContext loginContext;
+            loginContext.userId = userId;
+            loginContext.displayName = displayName;
+
+            Engine::Net::ReplicatedItemOwnership restoredOwnership;
+            const bool hasSavedInventory =
+                inventoryDatabase->LoadOwnership(userId, restoredOwnership) &&
+                !restoredOwnership.items.empty();
+            if (hasSavedInventory) {
+                simulator->OnClientLoggedIn(userId, displayName, {}, &restoredOwnership);
+                return;
+            }
+
+            Game::Character::CharacterLoadout loadout;
+            loadoutDatabase->FetchLoadout(loginContext, loadout);
+
+            std::vector<std::pair<std::string, uint32_t>> starterInventory;
+            starterInventory.reserve(loadout.inventory.size());
+            for (const Game::Character::LoadoutInventoryEntry& entry : loadout.inventory) {
+                starterInventory.emplace_back(entry.itemId, entry.quantity);
+            }
+
+            if (!starterInventory.empty()) {
+                LOG_INFO_FMT(
+                    "Server",
+                    "Granting %zu starter inventory stack(s) to new account %u",
+                    starterInventory.size(),
+                    userId);
+            } else {
+                LOG_WARNING_FMT(
+                    "Server",
+                    "No starter inventory configured for account %u",
+                    userId);
+            }
+
+            simulator->OnClientLoggedIn(userId, displayName, starterInventory);
         });
 
-        server.SetClientDisconnectedCallback([&simulator](Engine::Net::UserId userId) {
-
-            if (simulator) {
-
-                simulator->OnClientDisconnected(userId);
-
+        server.SetClientDisconnectedCallback([&simulator, &inventoryDatabase](
+                                                 Engine::Net::UserId userId) {
+            if (!simulator || !inventoryDatabase) {
+                return;
             }
 
+            const Engine::Net::ReplicatedItemOwnership* ownership = simulator->GetOwnedItems(userId);
+            if (ownership) {
+                inventoryDatabase->SaveOwnership(userId, *ownership);
+            }
+
+            simulator->OnClientDisconnected(userId);
         });
 
         server.SetGenericDataInterceptor([&simulator](Engine::Net::UserId userId,

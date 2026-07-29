@@ -8,3 +8,4 @@
 #include "character/EquipmentAttachmentComponent.h"
 #include "character/EquipmentRules.h"
 #include "character/ItemCatalog.h"
+#include "character/GameItemCatalog.h"

@@ -3,15 +3,20 @@
 #ifdef PLATFORM_HAS_NUKLEAR
 
 #include "ui/MenuStyle.h"
+#include "ui/ItemTooltip.h"
 #include "ui/UISystem.h"
 #include "render/Texture.h"
 #include "MenuLayout.h"
 #include "character/CharacterPaperdollRenderer.h"
+#include "character/GameItemCatalog.h"
 #include "core/Types.h"
+#include "systems/inventory/InventoryComponent.h"
 
 #include <chrono>
+#include <functional>
 #include <memory>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 struct nk_context;
@@ -21,6 +26,7 @@ namespace ECS {
 class Registry;
 }
 namespace Platform {
+class Window;
 namespace Render {
 class Shader;
 }
@@ -99,6 +105,21 @@ struct ChatHudConfig {
     float idleAlpha = 0.5f;
 };
 
+struct BagItemGridConfig {
+    std::string slotTexturePath;
+    int columns = 4;
+    int rows = 6;
+    // Maximum grid region as fractions of the panel; always centered in the panel.
+    float widthFraction = 0.80f;
+    float heightFraction = 0.80f;
+    float gapXFraction = 0.028f;
+    float gapYFraction = 0.018f;
+    // Slot icon opacity: 0 = invisible, 1 = fully opaque.
+    float slotAlpha = 1.0f;
+    // Max distance from slot center (fraction of slot size) to snap a dragged item.
+    float dropSnapFraction = 0.45f;
+};
+
 struct OverlayPanelConfig {
     std::string buttonId;
     std::string texturePath;
@@ -115,6 +136,11 @@ struct OverlayPanelConfig {
     float characterPreviewSizeFraction = 0.5f;
     float characterPreviewXFraction = 0.5f;
     float characterPreviewYFraction = 0.4f;
+    bool hasItemGrid = false;
+    BagItemGridConfig itemGrid;
+    // When true, panel drag starts only from a border ring (inventory panels default this on).
+    bool dragFromEdgesOnly = false;
+    float dragEdgeFraction = 0.10f;
 };
 
 struct CloseButtonConfig {
@@ -172,6 +198,13 @@ struct CharacterMenuConfig {
 // Bottom HUD overlay on the character screen (after main menu PLAY).
 class CharacterMenu {
 public:
+    struct BagDragState {
+        bool active = false;
+        int sourceSlot = -1;
+        int hoverDropSlot = -1;
+        Engine::Systems::Inventory::Item item;
+    };
+
     static bool LoadConfig(CharacterMenuConfig& out, const char* manifestPath = CharacterMenuConfig::kManifestPath);
 
     bool Initialize(const CharacterMenuConfig* config = nullptr);
@@ -188,6 +221,25 @@ public:
                                Engine::EntityID characterEntity,
                                Engine::Platform::Render::Shader* shader,
                                Game::Character::CharacterInstance* characterInstance);
+
+    void SetInventoryEntity(Engine::ECS::Registry* registry, Engine::EntityID entity);
+
+    void SetInventorySyncCallback(std::function<void()> callback);
+
+    void SetInventoryMutationCallback(std::function<void()> callback);
+
+    void RequestInventorySync();
+
+    void CancelBagDrag();
+
+    void SetGameItemCatalog(const Game::Character::GameItemCatalog* catalog);
+
+    const Engine::Platform::Render::Texture* GetItemIconTexture(uint32_t numericItemId);
+
+    Engine::Platform::UI::ItemTooltipContent BuildItemTooltipContent(
+        const Engine::Systems::Inventory::Item& item) const;
+
+    void Update(Engine::Platform::Window& window);
 
     void Build(struct nk_context* ctx,
                const Engine::Platform::UI::MenuStyle& style,
@@ -207,11 +259,21 @@ private:
     };
 
     LoadedBarButton* FindBarButton(const std::string& id);
+    void LogBagContentsIfChanged();
+    bool UpdateBagItemDrag(struct nk_context* ctx,
+                           float panelX,
+                           float panelY,
+                           float panelW,
+                           float panelH,
+                           const BagItemGridConfig& grid);
+    void ToggleBarButton(const std::string& id);
+    bool KeyPressed(Engine::Platform::Window& window, int key, bool& wasDown) const;
     CloseButtonConfig ResolvePanelCloseButton(const OverlayPanelConfig& panel) const;
 
     struct LoadedOverlayPanel {
         OverlayPanelConfig config;
         std::unique_ptr<Engine::Platform::Render::Texture> texture;
+        std::unique_ptr<Engine::Platform::Render::Texture> slotTexture;
         bool positionInitialized = false;
         bool dragging = false;
         float centerX = 0.0f;
@@ -235,7 +297,17 @@ private:
     Engine::EntityID m_paperdollCharacterEntity = Engine::INVALID_ENTITY;
     Engine::Platform::Render::Shader* m_paperdollShader = nullptr;
     Game::Character::CharacterInstance* m_paperdollCharacterInstance = nullptr;
+    Engine::ECS::Registry* m_inventoryRegistry = nullptr;
+    Engine::EntityID m_inventoryEntity = Engine::INVALID_ENTITY;
+    const Game::Character::GameItemCatalog* m_gameItemCatalog = nullptr;
+    std::unordered_map<uint32_t, std::unique_ptr<Engine::Platform::Render::Texture>> m_itemIconTextures;
+    std::string m_lastBagLogSnapshot;
+    std::function<void()> m_inventorySyncCallback;
+    std::function<void()> m_inventoryMutationCallback;
+    bool m_inventorySyncPending = false;
+    BagDragState m_bagDrag;
     float m_paperdollYawDegrees = 0.0f;
+    bool m_bKeyWasDown = false;
     bool m_hasPaperdollRotateClock = false;
     std::chrono::steady_clock::time_point m_lastPaperdollRotateTime{};
     bool m_visible = false;
