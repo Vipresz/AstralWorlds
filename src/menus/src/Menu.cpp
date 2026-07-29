@@ -530,6 +530,32 @@ bool CharacterMenu::LoadConfig(CharacterMenuConfig& out, const char* manifestPat
         }
     }
 
+    const std::string chatJson = JsonExtractObject(json, "chat");
+    if (!chatJson.empty()) {
+        std::string chatRelative;
+        if (JsonTryGetString(chatJson, "texture", chatRelative)) {
+            out.chat.texturePath = JoinPath(CharacterMenuConfig::kRoot, chatRelative);
+        }
+        JsonTryGetInt(chatJson, "width", out.chat.width);
+        JsonTryGetInt(chatJson, "height", out.chat.height);
+        JsonTryGetFloat(chatJson, "x_fraction", out.chat.xFraction);
+        JsonTryGetFloat(chatJson, "y_fraction", out.chat.yFraction);
+        JsonTryGetString(chatJson, "anchor", out.chat.anchor);
+        JsonTryGetFloat(chatJson, "padding_pixels", out.chat.paddingPixels);
+        JsonTryGetFloat(chatJson, "input_row_height", out.chat.inputRowHeight);
+        JsonTryGetFloat(chatJson, "log_row_height", out.chat.logRowHeight);
+        JsonTryGetFloat(chatJson, "scroll_lines_per_wheel", out.chat.scrollLinesPerWheel);
+        JsonTryGetFloat(chatJson, "idle_alpha", out.chat.idleAlpha);
+        const std::string contentJson = JsonExtractObject(chatJson, "content");
+        if (!contentJson.empty()) {
+            JsonTryGetFloat(contentJson, "x_fraction", out.chat.content.xFraction);
+            JsonTryGetFloat(contentJson, "y_fraction", out.chat.content.yFraction);
+            JsonTryGetFloat(contentJson, "width_fraction", out.chat.content.widthFraction);
+            JsonTryGetFloat(contentJson, "height_fraction", out.chat.content.heightFraction);
+            JsonTryGetFloat(contentJson, "input_height_fraction", out.chat.content.inputHeightFraction);
+        }
+    }
+
     const std::string paperdollJson = JsonExtractObject(json, "paperdoll");
     out.panels.clear();
     for (const std::string& panelJson : JsonExtractArrayObjects(json, "panels")) {

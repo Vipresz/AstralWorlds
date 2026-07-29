@@ -4,6 +4,7 @@
 #include "core/Types.h"
 #include "core/ecs/Registry.h"
 #include "render/Model.h"
+#include "render/Skeleton.h"
 
 #include <memory>
 #include <vector>
@@ -38,6 +39,7 @@ private:
     void SetBodyAssets(std::shared_ptr<const CharacterBodyAssets> assets);
 
     std::shared_ptr<const CharacterBodyAssets> m_bodyAssets;
+    std::unique_ptr<Engine::Platform::Render::Skeleton> m_instanceSkeleton;
     std::vector<std::unique_ptr<Engine::Platform::Render::Model>> m_itemModels;
     std::vector<Engine::EntityID> m_equipmentEntities;
 };

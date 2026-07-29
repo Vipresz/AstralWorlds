@@ -47,6 +47,13 @@ void CharacterInstance::SetBodyAssets(std::shared_ptr<const CharacterBodyAssets>
     height = m_bodyAssets->height;
     bottomY = m_bodyAssets->bottomY;
     scale = m_bodyAssets->scale;
+
+    if (m_bodyAssets->skeleton && m_bodyAssets->skeleton->IsLoaded()) {
+        m_instanceSkeleton = std::make_unique<Engine::Platform::Render::Skeleton>(
+            m_bodyAssets->skeleton->Clone());
+    } else {
+        m_instanceSkeleton.reset();
+    }
 }
 
 void CharacterInstance::WireAnimationComponent(Registry& registry) {
@@ -59,7 +66,7 @@ void CharacterInstance::WireAnimationComponent(Registry& registry) {
         animComp = &registry.AddComponent<AnimationComponent>(rootEntity);
     }
 
-    animComp->skeleton = m_bodyAssets->skeleton.get();
+    animComp->skeleton = m_instanceSkeleton ? m_instanceSkeleton.get() : nullptr;
     animComp->idleAnimation = m_bodyAssets->idleAnimation.get();
     animComp->walkingAnimation = m_bodyAssets->walkingAnimation.get();
     animComp->runningAnimation = m_bodyAssets->runningAnimation.get();
@@ -112,6 +119,7 @@ void CharacterInstance::Clear(Registry& registry) {
     }
 
     m_bodyAssets.reset();
+    m_instanceSkeleton.reset();
     scale = 1.0f;
     height = 0.0f;
     bottomY = 0.0f;

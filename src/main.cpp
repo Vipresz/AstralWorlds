@@ -10,7 +10,11 @@
 #include "character/EquipmentRules.h"
 #include "character/NameplateComponent.h"
 #include "character/CharacterNameplateRenderer.h"
+#include "character/CharacterSpeechBubbleRenderer.h"
+#include "character/SpeechBubbleComponent.h"
 #include "ui/CharacterHud.h"
+#include "ui/ChatWindow.h"
+#include "ui/GameChatBridge.h"
 #include "character/CharacterReplication.h"
 #include "character/CharacterReplicationComponent.h"
 #include "audio/CharacterWalkAudioSystem.h"
@@ -36,6 +40,8 @@
 #include "core/network/NetworkPayloads.h"
 #include "network/systems/NetworkSystem.h"
 #include "network/systems/ReplicationSystem.h"
+#include "network/ItemOwnershipReplicationBinding.h"
+#include "network/TradeReplicationBinding.h"
 #ifdef ENGINE_ENABLE_AUDIO
 #include "audio/MiniaudioBackend.h"
 #endif
@@ -132,6 +138,8 @@ int main(int argc, char* argv[]) {
         std::unique_ptr<CharacterMenu> characterMenu = std::make_unique<CharacterMenu>();
         Engine::Platform::UI::Minimap minimap;
         Game::UI::CharacterHud characterHud;
+        Game::UI::ChatWindow chatWindow;
+        Game::UI::GameChatBridge chatBridge;
         const bool menuBlocksStart = true;
         bool bootUiReady = false;
         if (uiSystem->Initialize(&mainWindow, menuStyle)) {
@@ -341,6 +349,8 @@ int main(int argc, char* argv[]) {
         if (networkConfig.enabled) {
             replicationSystem = std::make_shared<ReplicationSystem>();
             RegisterLoadoutReplication(*replicationSystem);
+            Engine::Platform::Networking::RegisterItemOwnershipReplication(*replicationSystem);
+            Engine::Platform::Networking::RegisterTradeReplication(*replicationSystem);
             systemManager.RegisterSystem(replicationSystem);
             LOG_INFO("Main", "  ReplicationSystem registered");
 
@@ -398,6 +408,11 @@ int main(int argc, char* argv[]) {
                     AttachNameplate(reg, entityId, displayName.c_str(), remoteNameplateHeight);
                 });
             systemManager.RegisterSystem(networkSystem);
+
+#ifdef PLATFORM_HAS_NUKLEAR
+            chatBridge.Attach(chatWindow, networkSystem, registry, networkConfig.displayName);
+            LOG_INFO("Main", "  Chat wired to network");
+#endif
 
             auto remoteLoadoutSystem = std::make_shared<RemoteLoadoutApplySystem>(
                 characterLoader, networkSystem.get(), character.id);
@@ -513,6 +528,9 @@ int main(int argc, char* argv[]) {
                     e2eConnectRecorded = true;
                 }
                 LOG_INFO_FMT("Main", "Connected to server as user %u", networkSystem->GetLocalUserId());
+#ifdef PLATFORM_HAS_NUKLEAR
+                chatBridge.SetOnline(true);
+#endif
                 pumpEnterLoading(0.55f, "Loading character...");
                 if (replicationSystem) {
                     replicationSystem->RegisterReplicatedEntity(networkSystem->GetLocalUserId(), character.id);
@@ -573,12 +591,19 @@ int main(int argc, char* argv[]) {
             } else {
                 LOG_INFO("Main", "  Character HUD initialized (top-left)");
             }
+            if (!chatWindow.Initialize(characterMenuConfig.chat, characterMenuConfig.ReferenceScreen())) {
+                LOG_WARNING("Main", "Chat window failed to load background");
+            } else {
+                LOG_INFO("Main", "  Chat window initialized (bottom-left HUD)");
+            }
             uiSystem->SetUIBuilder([menu = mainMenu.get(),
                                     characterMenu = characterMenu.get(),
                                     minimap = &minimap,
                                     characterHud = &characterHud,
+                                    chat = &chatWindow,
                                     network = networkSystem.get(),
                                     uiSys = uiSystem.get(),
+                                    gameWindow = &mainWindow,
                                     &registry,
                                     &cameraRig,
                                     &projection](struct nk_context* ctx,
@@ -596,6 +621,7 @@ int main(int argc, char* argv[]) {
                     }
                     if (menu->IsGameStarted()) {
                         characterHud->Draw(ctx, screenW, screenH);
+                        chat->Draw(ctx, uiSys->GetFontLibrary(), *gameWindow, screenW, screenH);
                         static thread_local std::vector<EntityID> minimapRemotePlayers;
                         minimapRemotePlayers.clear();
                         if (network) {
@@ -617,22 +643,45 @@ int main(int argc, char* argv[]) {
                                                          screenW,
                                                          screenH,
                                                          true);
+                        CharacterSpeechBubbleRenderer::Draw(ctx,
+                                                            registry,
+                                                            uiSys->GetFontLibrary(),
+                                                            *cameraRig.source,
+                                                            projection,
+                                                            screenW,
+                                                            screenH,
+                                                            true);
                     }
                 }
-                const bool blockInput =
-                    menu->BlocksGameInput() || characterMenu->BlocksGameInput();
+                const bool blockInput = menu->BlocksGameInput() || characterMenu->BlocksGameInput() ||
+                                        chat->BlocksGameInput();
                 uiSys->SetBlockingGameInput(blockInput);
             });
-            inputSystem->SetInputBlockQuery([menu = mainMenu.get(), characterMenu = characterMenu.get()]() {
-                return menu->BlocksGameInput() || characterMenu->BlocksGameInput();
+            inputSystem->SetInputBlockQuery([menu = mainMenu.get(),
+                                             characterMenu = characterMenu.get(),
+                                             chat = &chatWindow]() {
+                return menu->BlocksGameInput() || characterMenu->BlocksGameInput() ||
+                       chat->BlocksGameInput();
             });
-            gameCameraInput->SetInputBlockQuery([menu = mainMenu.get(), characterMenu = characterMenu.get()]() {
-                return menu->BlocksGameInput() || characterMenu->BlocksGameInput();
+            gameCameraInput->SetInputBlockQuery([menu = mainMenu.get(),
+                                                 characterMenu = characterMenu.get(),
+                                                 chat = &chatWindow]() {
+                return menu->BlocksGameInput() || characterMenu->BlocksGameInput() ||
+                       chat->BlocksGameInput();
             });
             cameraRig.obstruction.SetInputBlockedQuery(
-                [menu = mainMenu.get(), characterMenu = characterMenu.get()]() {
-                    return menu->BlocksGameInput() || characterMenu->BlocksGameInput();
+                [menu = mainMenu.get(), characterMenu = characterMenu.get(), chat = &chatWindow]() {
+                    return menu->BlocksGameInput() || characterMenu->BlocksGameInput() ||
+                           chat->BlocksGameInput();
                 });
+            mainWindow.SetEscapeHandler([&chatWindow, &mainWindow]() {
+                if (chatWindow.IsInputFocused()) {
+                    chatWindow.CancelInput();
+                    mainWindow.SetCharInputHandler(nullptr);
+                    return true;
+                }
+                return false;
+            });
             systemManager.RegisterSystem(uiSystem);
             LOG_INFO("Main", "  UISystem registered (main menu)");
             pumpBootLoading(1.0f, "Ready");
@@ -722,6 +771,10 @@ int main(int argc, char* argv[]) {
                     }
                 }
                 mainMenu->Update(deltaTime);
+            }
+            if (mainMenu && mainMenu->IsGameStarted()) {
+                chatWindow.Update(mainWindow);
+                UpdateSpeechBubbles(registry, deltaTime);
             }
 #endif
             

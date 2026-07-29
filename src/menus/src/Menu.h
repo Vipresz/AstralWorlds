@@ -72,6 +72,33 @@ struct CharacterHudConfig {
     std::vector<CharacterHudBarConfig> bars;
 };
 
+// Text/input region inside the background image (fractions of panel width/height).
+struct ChatContentLayoutConfig {
+    float xFraction = 0.03f;
+    float yFraction = 0.10f;
+    float widthFraction = 0.94f;
+    float heightFraction = 0.82f;
+    float inputHeightFraction = 0.15f;
+};
+
+struct ChatHudConfig {
+    std::string texturePath = "menus/chat/chatbackground.png";
+    // On-screen size in design pixels (1280x720 reference). Texture scales to fit.
+    int width = 420;
+    int height = 145;
+    float xFraction = 0.012f;
+    float yFraction = 0.18f;
+    std::string anchor = "bottom_left";
+    // Extra inset inside the content region (design pixels).
+    float paddingPixels = 2.0f;
+    ChatContentLayoutConfig content;
+    float inputRowHeight = 14.0f;
+    float logRowHeight = 11.0f;
+    float scrollLinesPerWheel = 1.0f;
+    // Opacity when the mouse is not over the chat (0 = invisible, 1 = opaque).
+    float idleAlpha = 0.5f;
+};
+
 struct OverlayPanelConfig {
     std::string buttonId;
     std::string texturePath;
@@ -130,6 +157,7 @@ struct CharacterMenuConfig {
     std::vector<BarButtonConfig> barButtons;
     MinimapHudConfig minimap;
     CharacterHudConfig characterHud;
+    ChatHudConfig chat;
     std::vector<OverlayPanelConfig> panels;
     CloseButtonConfig closeButton;
     PaperdollRotateButtonConfig paperdollRotate;

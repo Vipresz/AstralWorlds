@@ -40,6 +40,26 @@
       }
     ]
   },
+  "chat": {
+    "texture": "chat/chatbackground.png",
+    "width": 420,
+    "height": 145,
+    "x_fraction": 0.012,
+    "y_fraction": 0.18,
+    "anchor": "bottom_left",
+    "padding_pixels": 2,
+    "content": {
+      "x_fraction": 0.03,
+      "y_fraction": 0.04,
+      "width_fraction": 0.94,
+      "height_fraction": 0.92,
+      "input_height_fraction": 0.12
+    },
+    "input_row_height": 11,
+    "log_row_height": 10,
+    "scroll_lines_per_wheel": 1.0,
+    "idle_alpha": 0.5
+  },
   "paperdoll": {
     "texture": "paperdoll/paperdoll_2.png",
     "width_fraction": 0.25,

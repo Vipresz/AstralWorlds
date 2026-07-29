@@ -45,7 +45,7 @@ std::uint64_t FileWriteTimeToken(const char* path) {
 
 // Prefer the editable src manifest when launching from build/bin/<Config>.
 constexpr const char* kRuntimeManifestPath = "menus/manifest.json";
-constexpr const char* kDevSrcManifestPath = "../../../../src/menus/manifest.json";
+constexpr const char* kDevSrcManifestPath = "../../../src/menus/manifest.json";
 
 struct ManifestWatch {
     const char* path = kRuntimeManifestPath;

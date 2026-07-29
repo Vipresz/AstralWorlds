@@ -24,6 +24,7 @@
 #include "character/ItemCatalog.h"
 #include "core/ecs/Registry.h"
 #include "core/network/JoinAdmission.h"
+#include "core/network/ChatMessage.h"
 #include "core/network/MovementCommand.h"
 #include "core/network/NetworkPayloads.h"
 #include "core/network/ScalePolicyConfig.h"
@@ -32,6 +33,8 @@
 #include "network/NetServer.h"
 #include "network/systems/NetworkSystem.h"
 #include "network/systems/ReplicationSystem.h"
+#include "network/ItemOwnershipReplicationBinding.h"
+#include "network/TradeReplicationBinding.h"
 #include "render/components/TransformComponent.h"
 
 #include <algorithm>
@@ -319,6 +322,8 @@ void SetupStressClientNetworkStack(StressClientHandle& handle) {
 
     handle.replicationSystem = std::make_shared<ReplicationSystem>();
     RegisterLoadoutReplication(*handle.replicationSystem);
+    Engine::Platform::Networking::RegisterItemOwnershipReplication(*handle.replicationSystem);
+    Engine::Platform::Networking::RegisterTradeReplication(*handle.replicationSystem);
 
     handle.networkSystem = std::make_shared<NetworkSystem>();
     handle.networkSystem->SetAuthoritativeClient(true);
@@ -506,6 +511,59 @@ TEST_F(GameNetworkE2ETest, ConnectLoadCharacterAndMeasureMovementAck) {
               << Engine::Tests::FormatLatencyStats(movementStats) << std::endl;
 
     EXPECT_LT(movementStats.p95Ms, 2000.0) << "movement ack p95 should stay under 2s in local e2e";
+}
+
+TEST_F(GameNetworkE2ETest, BroadcastsChatBetweenPlayers) {
+    AuthoritativeGameServerFixture server;
+
+    StressClientHandle sender;
+    StressClientHandle receiver;
+    SetupStressClientNetworkStack(sender);
+    SetupStressClientNetworkStack(receiver);
+
+    ASSERT_TRUE(ConnectAndLoginWithRetries(
+        *sender.networkSystem, server.TcpPort(), server.UdpPort(), "chat_sender", 3, 0, 2));
+    ASSERT_TRUE(ConnectAndLoginWithRetries(
+        *receiver.networkSystem, server.TcpPort(), server.UdpPort(), "chat_receiver", 3, 1, 2));
+
+    std::mutex chatMutex;
+    std::vector<Engine::Net::ChatMessage> received;
+    receiver.networkSystem->SetGenericDataHandler([&](const Engine::Net::GenericDataPayload& payload) {
+        if (payload.channel != Engine::Net::kChatChannel) {
+            return;
+        }
+        Engine::Net::ChatMessage message;
+        if (!Engine::Net::DeserializeChatMessage(Engine::Net::NetBuffer(payload.data), message)) {
+            return;
+        }
+        std::lock_guard<std::mutex> lock(chatMutex);
+        received.push_back(std::move(message));
+    });
+
+    Engine::Net::ChatCommand command;
+    command.text = "hello from sender";
+    Engine::Net::GenericDataPayload payload;
+    payload.channel = Engine::Net::kChatChannel;
+    payload.data = Engine::Net::SerializeChatCommand(command).Data();
+    ASSERT_TRUE(sender.networkSystem->GetClient().SendGenericData(payload));
+
+    uint64_t tick = 0;
+    ASSERT_TRUE(Engine::Tests::WaitUntil(
+        [&]() {
+            sender.networkSystem->Update(1.0f / 60.0f, sender.registry, tick);
+            receiver.networkSystem->Update(1.0f / 60.0f, receiver.registry, tick + 1);
+            ++tick;
+            std::lock_guard<std::mutex> lock(chatMutex);
+            return !received.empty();
+        },
+        std::chrono::seconds(2)));
+
+    ASSERT_EQ(received.size(), 1u);
+    EXPECT_EQ(received.front().text, "hello from sender");
+    EXPECT_EQ(received.front().displayName, "chat_sender");
+
+    sender.networkSystem->Disconnect();
+    receiver.networkSystem->Disconnect();
 }
 
 TEST_F(GameNetworkE2ETest, MultiClientLatencyStress) {

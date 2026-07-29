@@ -1,4 +1,5 @@
 #include "character/NameplateComponent.h"
+#include "character/SpeechBubbleComponent.h"
 
 namespace Game {
 namespace Character {
@@ -31,6 +32,7 @@ void AttachNameplate(Engine::ECS::Registry& registry,
         nameplate->SetDisplayName(displayName);
         nameplate->worldHeightOffset = worldHeightOffset;
     }
+    EnsureSpeechBubble(registry, entityId);
 }
 
 } // namespace Character
