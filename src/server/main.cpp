@@ -6,6 +6,7 @@
 #include "character/CharacterStats.h"
 #include "character/CharacterTypes.h"
 #include "character/GameItemCatalog.h"
+#include "ManifestTradeConfig.h"
 #include "core/ecs/components/PlayerItemOwnershipComponent.h"
 #include "core/network/NetTypes.h"
 #include "core/network/MovementCommand.h"
@@ -242,6 +243,13 @@ int main(int argc, char* argv[]) {
         Game::Character::CharacterStats characterStats;
         Game::Character::LoadCharacterStats(characterStats);
         simulator->SetMovementSpeeds(characterStats.walkSpeed, characterStats.runSpeed);
+        Game::UI::ManifestTradeConfig tradeConfig;
+        if (Game::UI::LoadManifestTradeConfig(tradeConfig)) {
+            simulator->SetTradeMaxDistance(tradeConfig.maxDistance);
+            LOG_INFO_FMT("Server",
+                         "Trade max distance set to %.1f from menus/manifest.json",
+                         tradeConfig.maxDistance);
+        }
         const std::string heightmapPath =
             ParseArgValue(argc, argv, "--heightmap").empty()
                 ? std::string("terrain/barren_scar/00.png")

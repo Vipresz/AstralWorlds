@@ -40,6 +40,9 @@
       }
     ]
   },
+  "trade": {
+    "max_distance": 8.0
+  },
   "chat": {
     "texture": "chat/chatbackground.png",
     "width": 420,
@@ -105,6 +108,46 @@
         "rows": 6,
         "width_fraction": 0.80,
         "height_fraction": 0.80,
+        "gap_x_fraction": 0.028,
+        "gap_y_fraction": 0.018,
+        "slot_alpha": 1.0
+      },
+      "drag_from_edges_only": true,
+      "drag_edge_fraction": 0.10
+    },
+    {
+      "button_id": "trade",
+      "texture": "trade/trade_window_circle.png",
+      "width_fraction": 0.38,
+      "x_fraction": 0.5,
+      "y_fraction": 0.45,
+      "close_button": {
+        "size_fraction": 0.08,
+        "x_anchor_fraction": 0.995,
+        "y_anchor_fraction": 0.0205,
+        "margin_fraction": 0.0,
+        "placement": "center_on_corner"
+      },
+      "self_item_grid": {
+        "slot_texture": "bag/slot_circle.png",
+        "columns": 4,
+        "rows": 3,
+        "width_fraction": 0.36,
+        "height_fraction": 0.55,
+        "center_x_fraction": 0.28,
+        "center_y_fraction": 0.52,
+        "gap_x_fraction": 0.028,
+        "gap_y_fraction": 0.018,
+        "slot_alpha": 1.0
+      },
+      "partner_item_grid": {
+        "slot_texture": "bag/slot_circle.png",
+        "columns": 4,
+        "rows": 3,
+        "width_fraction": 0.36,
+        "height_fraction": 0.55,
+        "center_x_fraction": 0.72,
+        "center_y_fraction": 0.52,
         "gap_x_fraction": 0.028,
         "gap_y_fraction": 0.018,
         "slot_alpha": 1.0

@@ -16,6 +16,7 @@
 #include "ui/CharacterHud.h"
 #include "ui/ChatWindow.h"
 #include "ui/GameChatBridge.h"
+#include "ui/TradeRequestPrompt.h"
 #include "character/CharacterReplication.h"
 #include "character/CharacterReplicationComponent.h"
 #include "audio/CharacterWalkAudioSystem.h"
@@ -23,8 +24,10 @@
 #include "systems/inventory/InventoryComponent.h"
 #include "systems/inventory/InventoryOwnershipSync.h"
 #include "core/ecs/components/PlayerItemOwnershipComponent.h"
+#include "core/ecs/components/PlayerTradeComponent.h"
 #include "core/network/MovementCommand.h"
 #include "core/network/InventoryAction.h"
+#include "core/network/TradeSession.h"
 #include "core/network/NetworkPayloads.h"
 #include "systems/inventory/InventoryInteraction.h"
 #include "core/ecs/Registry.h"
@@ -88,6 +91,8 @@ using namespace Game::Audio;
 #ifdef PLATFORM_HAS_NUKLEAR
 using namespace Engine::Platform::UI;
 using namespace Game::UI;
+#include "ui/PlayerContextMenu.h"
+#include "ui/PlayerTargeting.h"
 #endif
 
 namespace {
@@ -157,6 +162,20 @@ void SendInventoryActionToServer(const std::shared_ptr<NetworkSystem>& networkSy
     networkSystem->GetClient().SendGenericData(payload);
 }
 
+void SendTradeCommandToServer(const std::shared_ptr<NetworkSystem>& networkSystem,
+                              const Engine::Net::TradeCommand& command) {
+    if (!networkSystem) {
+        return;
+    }
+
+    Engine::Net::GenericDataPayload payload;
+    payload.userId = networkSystem->GetLocalUserId();
+    payload.tick = 0;
+    payload.channel = Engine::Net::kTradeChannel;
+    payload.data = Engine::Net::SerializeTradeCommand(command).Data();
+    networkSystem->GetClient().SendGenericData(payload);
+}
+
 } // namespace
 
 int main(int argc, char* argv[]) {
@@ -213,10 +232,12 @@ int main(int argc, char* argv[]) {
         menuStyle.metrics.hudFontSize = menuConfig.textSize;
         std::unique_ptr<MainMenu> mainMenu = std::make_unique<MainMenu>();
         std::unique_ptr<CharacterMenu> characterMenu = std::make_unique<CharacterMenu>();
+        std::unique_ptr<PlayerContextMenu> playerContextMenu = CreatePlayerContextMenu();
         Engine::Platform::UI::Minimap minimap;
         Game::UI::CharacterHud characterHud;
         Game::UI::ChatWindow chatWindow;
         Game::UI::GameChatBridge chatBridge;
+        Game::UI::TradeRequestPrompt tradeRequestPrompt;
         const bool menuBlocksStart = true;
         bool bootUiReady = false;
         if (uiSystem->Initialize(&mainWindow, menuStyle)) {
@@ -786,6 +807,63 @@ int main(int argc, char* argv[]) {
             });
             characterMenu->RequestInventorySync();
             characterMenu->SetGameItemCatalog(&gameItemCatalog);
+            characterMenu->SetTradeCommandCallback([&](const Engine::Net::TradeCommand& command) {
+                if (networkConnected && networkSystem) {
+                    SendTradeCommandToServer(networkSystem, command);
+                }
+            });
+            tradeRequestPrompt.SetTradeCommandCallback([&](const Engine::Net::TradeCommand& command) {
+                if (networkConnected && networkSystem) {
+                    SendTradeCommandToServer(networkSystem, command);
+                }
+            });
+            playerContextMenu->SetActionCallback([&](PlayerContextAction action,
+                                                     const PlayerPickResult& target) {
+                switch (action) {
+                    case PlayerContextAction::Inspect:
+                        LOG_INFO_FMT("Main",
+                                     "Inspect player '%s' (user %u)",
+                                     target.displayName.c_str(),
+                                     target.userId);
+                        break;
+                    case PlayerContextAction::Follow:
+                        if (target.entity != Engine::INVALID_ENTITY) {
+                            cameraRig.followCamera.SetTarget(target.entity, &registry);
+                            cameraRig.source = &cameraRig.followCamera;
+                            LOG_INFO_FMT("Main", "Following player '%s'", target.displayName.c_str());
+                        }
+                        break;
+                    case PlayerContextAction::Trade:
+                        if (networkConnected && networkSystem &&
+                            target.userId != Engine::Net::kInvalidUserId) {
+                            float tradeDistance = 0.0f;
+                            if (!TryGetHorizontalDistanceBetweenEntities(
+                                    registry, character.id, target.entity, tradeDistance) ||
+                                (characterMenuConfig.tradeMaxDistance > 0.0f &&
+                                 tradeDistance > characterMenuConfig.tradeMaxDistance)) {
+                                LOG_WARNING_FMT(
+                                    "Main",
+                                    "Too far to trade with '%s' (%.1f > %.1f)",
+                                    target.displayName.c_str(),
+                                    tradeDistance,
+                                    characterMenuConfig.tradeMaxDistance);
+                                break;
+                            }
+                            Engine::Net::TradeCommand command;
+                            command.action = Engine::Net::TradeAction::Request;
+                            command.targetUserId = target.userId;
+                            SendTradeCommandToServer(networkSystem, command);
+                            characterMenu->SetTradeDisplayNames(networkConfig.displayName,
+                                                                target.displayName);
+                            LOG_INFO_FMT("Main",
+                                         "Trade requested with '%s'",
+                                         target.displayName.c_str());
+                        } else {
+                            LOG_WARNING("Main", "Trade requires an online connection");
+                        }
+                        break;
+                }
+            });
             pumpBootLoading(0.94f, "Loading HUD...");
             if (!minimap.Initialize(heightmapPath.c_str(),
                                     groundModel.get(),
@@ -812,83 +890,186 @@ int main(int argc, char* argv[]) {
             } else {
                 LOG_INFO("Main", "  Chat window initialized (bottom-left HUD)");
             }
-            uiSystem->SetUIBuilder([menu = mainMenu.get(),
-                                    characterMenu = characterMenu.get(),
-                                    minimap = &minimap,
-                                    characterHud = &characterHud,
-                                    chat = &chatWindow,
-                                    network = networkSystem.get(),
-                                    uiSys = uiSystem.get(),
-                                    gameWindow = &mainWindow,
-                                    &registry,
-                                    &cameraRig,
-                                    &projection](struct nk_context* ctx,
-                                                  const MenuStyle& style,
-                                                  int screenW,
-                                                  int screenH) {
-                if (menu->IsVisible()) {
+            uiSystem->ClearLayers();
+            uiSystem->RegisterLayer(
+                Engine::Platform::UI::UILayerId::Modal,
+                [menu = mainMenu.get(), uiSys = uiSystem.get()](struct nk_context* ctx,
+                                                                  const MenuStyle& style,
+                                                                  int screenW,
+                                                                  int screenH) {
+                    if (!menu->IsVisible()) {
+                        return;
+                    }
                     menu->Build(ctx, style, *uiSys, screenW, screenH);
-                } else {
+                },
+                "MainMenu");
+            uiSystem->RegisterLayer(
+                Engine::Platform::UI::UILayerId::WorldLabels,
+                [menu = mainMenu.get(),
+                 uiSys = uiSystem.get(),
+                 &registry,
+                 &cameraRig,
+                 &projection](struct nk_context* ctx,
+                              const MenuStyle& /*style*/,
+                              int screenW,
+                              int screenH) {
+                    if (menu->IsVisible() || !menu->IsGameStarted() || !cameraRig.source) {
+                        return;
+                    }
+                    CharacterNameplateRenderer::Draw(ctx,
+                                                     registry,
+                                                     uiSys->GetFontLibrary(),
+                                                     *cameraRig.source,
+                                                     projection,
+                                                     screenW,
+                                                     screenH,
+                                                     true);
+                    CharacterSpeechBubbleRenderer::Draw(ctx,
+                                                        registry,
+                                                        uiSys->GetFontLibrary(),
+                                                        *cameraRig.source,
+                                                        projection,
+                                                        screenW,
+                                                        screenH,
+                                                        true);
+                },
+                "WorldLabels");
+            uiSystem->RegisterLayer(
+                Engine::Platform::UI::UILayerId::Hud,
+                [menu = mainMenu.get(),
+                 minimap = &minimap,
+                 characterHud = &characterHud,
+                 chat = &chatWindow,
+                 characterMenu = characterMenu.get(),
+                 gameWindow = &mainWindow,
+                 uiSys = uiSystem.get(),
+                 network = networkSystem.get(),
+                 &registry](struct nk_context* ctx,
+                            const MenuStyle& /*style*/,
+                            int screenW,
+                            int screenH) {
+                    if (menu->IsVisible() || !menu->IsGameStarted()) {
+                        return;
+                    }
                     if (menu->IsGameStarted() && !characterMenu->IsVisible()) {
                         characterMenu->Show();
                     }
+                    characterHud->Draw(ctx, screenW, screenH);
+                    chat->Draw(ctx, uiSys->GetFontLibrary(), *gameWindow, screenW, screenH);
+                    static thread_local std::vector<EntityID> minimapRemotePlayers;
+                    minimapRemotePlayers.clear();
+                    if (network) {
+                        network->CollectRemotePlayerEntities(minimapRemotePlayers);
+                    }
+                    minimap->Draw(ctx,
+                                  registry,
+                                  screenW,
+                                  screenH,
+                                  minimapRemotePlayers.data(),
+                                  minimapRemotePlayers.size());
                     if (characterMenu->IsVisible()) {
-                        characterMenu->Build(ctx, style, *uiSys, screenW, screenH);
+                        characterMenu->BuildHudChrome(ctx, screenW, screenH);
                     }
-                    if (menu->IsGameStarted()) {
-                        characterHud->Draw(ctx, screenW, screenH);
-                        chat->Draw(ctx, uiSys->GetFontLibrary(), *gameWindow, screenW, screenH);
-                        static thread_local std::vector<EntityID> minimapRemotePlayers;
-                        minimapRemotePlayers.clear();
-                        if (network) {
-                            network->CollectRemotePlayerEntities(minimapRemotePlayers);
-                        }
-                        minimap->Draw(ctx,
-                                      registry,
-                                      screenW,
-                                      screenH,
-                                      minimapRemotePlayers.data(),
-                                      minimapRemotePlayers.size());
+                },
+                "Hud");
+            uiSystem->RegisterLayer(
+                Engine::Platform::UI::UILayerId::Prompts,
+                [menu = mainMenu.get(),
+                 tradePrompt = &tradeRequestPrompt](struct nk_context* ctx,
+                                                    const MenuStyle& /*style*/,
+                                                    int screenW,
+                                                    int screenH) {
+                    if (menu->IsVisible()) {
+                        return;
                     }
-                    if (cameraRig.source) {
-                        CharacterNameplateRenderer::Draw(ctx,
-                                                         registry,
-                                                         uiSys->GetFontLibrary(),
-                                                         *cameraRig.source,
-                                                         projection,
-                                                         screenW,
-                                                         screenH,
-                                                         true);
-                        CharacterSpeechBubbleRenderer::Draw(ctx,
-                                                            registry,
-                                                            uiSys->GetFontLibrary(),
-                                                            *cameraRig.source,
-                                                            projection,
-                                                            screenW,
-                                                            screenH,
-                                                            true);
+                    tradePrompt->Draw(ctx, screenW, screenH);
+                },
+                "TradeRequestPrompt");
+            uiSystem->RegisterLayer(
+                Engine::Platform::UI::UILayerId::Panels,
+                [menu = mainMenu.get(),
+                 characterMenu = characterMenu.get(),
+                 uiSys = uiSystem.get()](struct nk_context* ctx,
+                                         const MenuStyle& style,
+                                         int screenW,
+                                         int screenH) {
+                    if (menu->IsVisible() || !characterMenu->IsVisible()) {
+                        return;
                     }
-                }
-                const bool blockInput = menu->BlocksGameInput() || characterMenu->BlocksGameInput() ||
-                                        chat->BlocksGameInput();
-                uiSys->SetBlockingGameInput(blockInput);
-            });
+                    characterMenu->BuildOpenPanels(ctx, style, *uiSys, screenW, screenH);
+                },
+                "CharacterPanels");
+            uiSystem->RegisterLayer(
+                Engine::Platform::UI::UILayerId::Popups,
+                [menu = mainMenu.get(),
+                 characterMenu = characterMenu.get()](struct nk_context* ctx,
+                                                      const MenuStyle& /*style*/,
+                                                      int screenW,
+                                                      int screenH) {
+                    if (menu->IsVisible()) {
+                        return;
+                    }
+                    characterMenu->BuildPopups(ctx, screenW, screenH);
+                },
+                "CharacterMenuPopups");
+            uiSystem->RegisterLayer(
+                Engine::Platform::UI::UILayerId::ContextMenu,
+                [menu = mainMenu.get(),
+                 playerContextMenu = playerContextMenu.get()](struct nk_context* ctx,
+                                                              const MenuStyle& /*style*/,
+                                                              int screenW,
+                                                              int screenH) {
+                    if (menu->IsVisible() || !playerContextMenu) {
+                        return;
+                    }
+                    playerContextMenu->Build(ctx, screenW, screenH);
+                },
+                "PlayerContextMenu");
+            uiSystem->RegisterLayer(
+                Engine::Platform::UI::UILayerId::Debug,
+                [menu = mainMenu.get(),
+                 characterMenu = characterMenu.get(),
+                 chat = &chatWindow,
+                 tradePrompt = &tradeRequestPrompt,
+                 playerContextMenu = playerContextMenu.get(),
+                 uiSys = uiSystem.get()](struct nk_context* /*ctx*/,
+                                         const MenuStyle& /*style*/,
+                                         int /*screenW*/,
+                                         int /*screenH*/) {
+                    const bool blockInput =
+                        menu->BlocksGameInput() || characterMenu->BlocksGameInput() ||
+                        chat->BlocksGameInput() || tradePrompt->BlocksGameInput() ||
+                        (playerContextMenu && playerContextMenu->BlocksGameInput());
+                    uiSys->SetBlockingGameInput(blockInput);
+                },
+                "InputBlocking");
             inputSystem->SetInputBlockQuery([menu = mainMenu.get(),
                                              characterMenu = characterMenu.get(),
-                                             chat = &chatWindow]() {
+                                             chat = &chatWindow,
+                                             tradePrompt = &tradeRequestPrompt,
+                                             playerContextMenu = playerContextMenu.get()]() {
                 return menu->BlocksGameInput() || characterMenu->BlocksGameInput() ||
-                       chat->BlocksGameInput();
+                       chat->BlocksGameInput() || tradePrompt->BlocksGameInput() ||
+                       (playerContextMenu && playerContextMenu->BlocksGameInput());
             });
             gameCameraInput->SetInputBlockQuery([menu = mainMenu.get(),
                                                  characterMenu = characterMenu.get(),
-                                                 chat = &chatWindow]() {
+                                                 chat = &chatWindow,
+                                                 tradePrompt = &tradeRequestPrompt,
+                                                 playerContextMenu = playerContextMenu.get()]() {
                 return menu->BlocksGameInput() || characterMenu->BlocksGameInput() ||
-                       chat->BlocksGameInput();
+                       chat->BlocksGameInput() || tradePrompt->BlocksGameInput() ||
+                       (playerContextMenu && playerContextMenu->BlocksGameInput());
             });
             cameraRig.obstruction.SetInputBlockedQuery(
-                [menu = mainMenu.get(), characterMenu = characterMenu.get(), chat = &chatWindow]() {
+                [menu = mainMenu.get(),
+                 characterMenu = characterMenu.get(),
+                 chat = &chatWindow,
+                 tradePrompt = &tradeRequestPrompt,
+                 playerContextMenu = playerContextMenu.get()]() {
                     return menu->BlocksGameInput() || characterMenu->BlocksGameInput() ||
-                           chat->BlocksGameInput();
+                           chat->BlocksGameInput() || tradePrompt->BlocksGameInput() ||
+                           (playerContextMenu && playerContextMenu->BlocksGameInput());
                 });
             mainWindow.SetEscapeHandler([&chatWindow, &mainWindow]() {
                 if (chatWindow.IsInputFocused()) {
@@ -990,6 +1171,33 @@ int main(int argc, char* argv[]) {
             }
             if (mainMenu && mainMenu->IsGameStarted()) {
                 characterMenu->Update(mainWindow);
+                characterMenu->SyncTradeState(&registry, character.id);
+                std::string tradePartnerName;
+                const auto* trade =
+                    registry.GetComponent<Engine::ECS::PlayerTradeComponent>(character.id);
+                if (trade && trade->IsActive() && networkSystem) {
+                    tradePartnerName = networkSystem->GetPeerDisplayName(trade->partnerUserId);
+                }
+                const Engine::Net::UserId localUserId =
+                    networkSystem ? networkSystem->GetLocalUserId() : Engine::Net::kInvalidUserId;
+                tradeRequestPrompt.Sync(trade, localUserId, tradePartnerName);
+                if (characterMenu->IsTradePanelOpen()) {
+                    if (trade && trade->IsActive()) {
+                        characterMenu->SetTradeDisplayNames(networkConfig.displayName, tradePartnerName);
+                    }
+                }
+                const bool uiBlocksPlayerMenu =
+                    (mainMenu && mainMenu->BlocksGameInput()) ||
+                    (characterMenu->BlocksGameInput() && !playerContextMenu->IsOpen()) ||
+                    (chatWindow.BlocksGameInput() && !playerContextMenu->IsOpen());
+                playerContextMenu->Update(mainWindow,
+                                          registry,
+                                          networkSystem.get(),
+                                          cameraRig.source,
+                                          projection,
+                                          framebufferWidth,
+                                          framebufferHeight,
+                                          uiBlocksPlayerMenu);
                 chatWindow.Update(mainWindow);
                 UpdateSpeechBubbles(registry, deltaTime);
             }

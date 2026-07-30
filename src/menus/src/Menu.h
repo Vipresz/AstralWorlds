@@ -19,11 +19,14 @@
 #include <unordered_map>
 #include <vector>
 
-struct nk_context;
-
 namespace Engine {
+namespace Net {
+struct TradeCommand;
+}
 namespace ECS {
 class Registry;
+struct PlayerTradeComponent;
+struct TradeOfferItem;
 }
 namespace Platform {
 class Window;
@@ -109,14 +112,15 @@ struct BagItemGridConfig {
     std::string slotTexturePath;
     int columns = 4;
     int rows = 6;
-    // Maximum grid region as fractions of the panel; always centered in the panel.
+    // Maximum grid region as fractions of the panel.
     float widthFraction = 0.80f;
     float heightFraction = 0.80f;
+    // Grid center within the panel (0.5 = centered).
+    float centerXFraction = 0.5f;
+    float centerYFraction = 0.5f;
     float gapXFraction = 0.028f;
     float gapYFraction = 0.018f;
-    // Slot icon opacity: 0 = invisible, 1 = fully opaque.
     float slotAlpha = 1.0f;
-    // Max distance from slot center (fraction of slot size) to snap a dragged item.
     float dropSnapFraction = 0.45f;
 };
 
@@ -138,7 +142,9 @@ struct OverlayPanelConfig {
     float characterPreviewYFraction = 0.4f;
     bool hasItemGrid = false;
     BagItemGridConfig itemGrid;
-    // When true, panel drag starts only from a border ring (inventory panels default this on).
+    bool hasTradeGrids = false;
+    BagItemGridConfig selfTradeGrid;
+    BagItemGridConfig partnerTradeGrid;
     bool dragFromEdgesOnly = false;
     float dragEdgeFraction = 0.10f;
 };
@@ -189,6 +195,7 @@ struct CharacterMenuConfig {
     PaperdollRotateButtonConfig paperdollRotate;
     int minScreenWidth = 1280;
     int minScreenHeight = 720;
+    float tradeMaxDistance = 8.0f;
 
     MenuReferenceScreen ReferenceScreen() const {
         return MenuReferenceScreen{minScreenWidth, minScreenHeight};
@@ -218,7 +225,10 @@ public:
     void Show() { m_visible = true; }
     void Hide() { m_visible = false; }
     bool IsVisible() const { return m_visible; }
-    bool BlocksGameInput() const { return m_visible && (m_pointerOverBarUi || m_pointerOverPanelUi); }
+    bool BlocksGameInput() const {
+        return m_visible &&
+               (m_pointerOverBarUi || m_pointerOverPanelUi || m_tradePanelOpen);
+    }
 
     const CharacterMenuConfig& GetConfig() const { return m_config; }
 
@@ -243,13 +253,25 @@ public:
 
     void CancelBagDrag();
 
-    bool IsBagItemActionPanelOpen() const { return m_bagActionPanelOpen; }
+    bool IsBagItemActionPanelOpen() const {
+        return m_bagActionPanelOpen || m_tradeQuantityPanelOpen;
+    }
 
     bool IsBagUseSlotSelected(int slotIndex) const {
         return slotIndex >= 0 && slotIndex == m_bagSelectedUseSlot;
     }
 
     void SetGameItemCatalog(const Game::Character::GameItemCatalog* catalog);
+
+    void SetTradeCommandCallback(std::function<void(const Engine::Net::TradeCommand&)> callback);
+
+    void OpenTradePanel();
+    void CloseTradePanel();
+    bool IsTradePanelOpen() const { return m_tradePanelOpen; }
+
+    void SyncTradeState(Engine::ECS::Registry* registry, Engine::EntityID entity);
+
+    void SetTradeDisplayNames(const std::string& selfName, const std::string& partnerName);
 
     const Engine::Platform::Render::Texture* GetItemIconTexture(uint32_t numericItemId);
 
@@ -264,6 +286,19 @@ public:
                int screenWidth,
                int screenHeight);
 
+    // UILayerId::Hud — bottom action bar and bar buttons (always visible in-game).
+    void BuildHudChrome(struct nk_context* ctx, int screenWidth, int screenHeight);
+
+    // UILayerId::Panels — opened manifest panels (paperdoll, bag, trade) and settings.
+    void BuildOpenPanels(struct nk_context* ctx,
+                         const Engine::Platform::UI::MenuStyle& style,
+                         Engine::Platform::UI::UISystem& uiSystem,
+                         int screenWidth,
+                         int screenHeight);
+
+    // UILayerId::Popups — bag/trade item action menus above opened panels.
+    void BuildPopups(struct nk_context* ctx, int screenWidth, int screenHeight);
+
 private:
     struct LoadedBarButton {
         std::string id;
@@ -276,6 +311,14 @@ private:
     };
 
     LoadedBarButton* FindBarButton(const std::string& id);
+    bool TryGetBottomBarLayout(int screenWidth,
+                               int screenHeight,
+                               MenuScreenLayout& outLayout,
+                               struct nk_rect& outBarBounds,
+                               float& outDrawW,
+                               float& outDrawH,
+                               float& outBarX,
+                               float& outBarY) const;
     void LogBagContentsIfChanged();
     bool UpdateBagItemDrag(struct nk_context* ctx,
                            float panelX,
@@ -283,16 +326,58 @@ private:
                            float panelW,
                            float panelH,
                            const BagItemGridConfig& grid);
+    bool UpdateBagItemActionPanel(struct nk_context* ctx, int screenWidth, int screenHeight);
     void DrawBagItemActionPanel(struct nk_context* ctx,
                                 struct nk_command_buffer* canvas,
                                 int screenWidth,
                                 int screenHeight);
+    bool UpdateTradeQuantityPanel(struct nk_context* ctx, int screenWidth, int screenHeight);
+    void DrawTradeQuantityPanel(struct nk_context* ctx,
+                                struct nk_command_buffer* canvas,
+                                int screenWidth,
+                                int screenHeight);
+    bool BuildBagActionPanelLayout(int screenWidth,
+                                   int screenHeight,
+                                   const struct nk_user_font* font,
+                                   Engine::Platform::UI::ItemActionPanelLayout& outLayout,
+                                   Engine::Platform::UI::ItemTooltipContent& outContent,
+                                   bool& outShowUse,
+                                   bool& outShowTrade,
+                                   bool& outShowTradeX) const;
+    void DrawSettingsMenu(struct nk_context* ctx,
+                          const Engine::Platform::UI::MenuStyle& style,
+                          Engine::Platform::UI::UISystem& uiSystem,
+                          int screenWidth,
+                          int screenHeight);
     bool CanUseItemAtSlot(size_t slotIndex) const;
     void ClearBagUseSelection();
     void HandleBagUseSlotClick(int slotIndex);
     void PerformCombinedBagItemUse(int primarySlot, int secondarySlot);
     void PerformBagItemAction(BagItemAction action, int slotIndex);
     void ToggleBarButton(const std::string& id);
+    void OpenBagPanel();
+    bool CanModifyTradeOffer() const;
+    bool CanShowTradeItemActions() const;
+    bool TryAddBagItemToTradeOffer(int bagSlotIndex, uint32_t quantity = 0);
+    void OpenTradeQuantityPanel(int bagSlotIndex);
+    void CloseTradeQuantityPanel();
+    void DeclineAndCloseTradePanel();
+    bool TryRemoveTradeOfferAtSlot(int tradeSlotIndex);
+    void SendTradeOfferUpdate(const Engine::ECS::PlayerTradeComponent* trade,
+                              std::vector<Engine::ECS::TradeOfferItem> offer);
+    void UpdateTradeInteractions(struct nk_context* ctx,
+                                 const struct nk_rect& panelBounds,
+                                 const BagItemGridConfig& selfGrid,
+                                 const Engine::ECS::PlayerTradeComponent* trade);
+    void DrawTradeGrids(struct nk_context* ctx,
+                        struct nk_command_buffer* canvas,
+                        const struct nk_rect& panelBounds,
+                        const BagItemGridConfig& selfGrid,
+                        const BagItemGridConfig& partnerGrid,
+                        const Engine::Platform::Render::Texture* slotTexture,
+                        const Engine::ECS::PlayerTradeComponent* trade,
+                        int screenWidth,
+                        int screenHeight);
     bool KeyPressed(Engine::Platform::Window& window, int key, bool& wasDown) const;
     CloseButtonConfig ResolvePanelCloseButton(const OverlayPanelConfig& panel) const;
 
@@ -307,6 +392,8 @@ private:
         float dragGrabX = 0.0f;
         float dragGrabY = 0.0f;
     };
+
+    LoadedOverlayPanel* FindOverlayPanel(const std::string& buttonId);
 
     CharacterMenuConfig m_config;
     std::unique_ptr<Engine::Platform::Render::Texture> m_bottomBarTexture;
@@ -332,6 +419,7 @@ private:
     std::function<void()> m_inventoryMutationCallback;
     std::function<void(BagItemAction, int)> m_inventoryActionCallback;
     std::function<void(int, int)> m_inventoryCombinedUseCallback;
+    std::function<void(const Engine::Net::TradeCommand&)> m_tradeCommandCallback;
     bool m_inventorySyncPending = false;
     BagDragState m_bagDrag;
     bool m_bagClickPending = false;
@@ -345,8 +433,33 @@ private:
     float m_bagActionPanelAnchorY = 0.0f;
     float m_bagActionPanelAnchorW = 0.0f;
     float m_bagActionPanelAnchorH = 0.0f;
+    bool m_tradeQuantityPanelOpen = false;
+    int m_tradeQuantitySlot = -1;
+    int m_tradeQuantityValue = 1;
+    int m_tradeQuantityMax = 1;
+    float m_tradeQuantityAnchorX = 0.0f;
+    float m_tradeQuantityAnchorY = 0.0f;
+    float m_tradeQuantityAnchorW = 0.0f;
+    float m_tradeQuantityAnchorH = 0.0f;
     float m_paperdollYawDegrees = 0.0f;
     bool m_bKeyWasDown = false;
+    bool m_tradePanelOpen = false;
+    bool m_tradePanelDismissedByUser = false;
+    Engine::ECS::Registry* m_tradeRegistry = nullptr;
+    Engine::EntityID m_tradeEntity = Engine::INVALID_ENTITY;
+    struct TradeSlotRect {
+        float x = 0.0f;
+        float y = 0.0f;
+        float w = 0.0f;
+        float h = 0.0f;
+    };
+    std::vector<TradeSlotRect> m_selfTradeSlotBounds;
+    float m_tradePanelX = 0.0f;
+    float m_tradePanelY = 0.0f;
+    float m_tradePanelW = 0.0f;
+    float m_tradePanelH = 0.0f;
+    std::string m_tradeSelfDisplayName;
+    std::string m_tradePartnerDisplayName;
     bool m_hasPaperdollRotateClock = false;
     std::chrono::steady_clock::time_point m_lastPaperdollRotateTime{};
     bool m_visible = false;
