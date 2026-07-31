@@ -71,7 +71,7 @@ jobs:
         shell: pwsh
         working-directory: build/bin/Release
         run: |
-          ./GameTests.exe --gtest_filter=GameNetworkE2ETest.ConnectLoadCharacterAndMeasureMovementAck:CharacterLoadE2ETest.*
+          ./GameTests.exe --gtest_filter=GameNetworkE2ETest.ConnectLoadCharacterAndMeasureMovementAck:GameNetworkE2ETest.BroadcastsChatBetweenPlayers:CharacterLoadE2ETest.*:ChatInputFocusTest.*:GameMenusManifestTest.*
           if ($LASTEXITCODE -ne 0) { throw "GameTests e2e failed with exit code $LASTEXITCODE" }
 
       - name: Upload Windows game artifact

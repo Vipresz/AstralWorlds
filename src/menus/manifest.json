@@ -58,7 +58,7 @@
       "height_fraction": 0.92,
       "input_height_fraction": 0.12
     },
-    "input_row_height": 11,
+    "input_row_height": 16,
     "log_row_height": 10,
     "scroll_lines_per_wheel": 1.0,
     "idle_alpha": 0.5

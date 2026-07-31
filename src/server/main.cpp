@@ -10,13 +10,15 @@
 #include "core/ecs/components/PlayerItemOwnershipComponent.h"
 #include "core/network/NetTypes.h"
 #include "core/network/MovementCommand.h"
+#include "core/network/ItemCombineRecipe.h"
 #include "core/network/ShardConfig.h"
 #include "core/network/ScalePolicyConfig.h"
-#include "core/network/ZoneScaleConfig.h"
+#include "core/network/ServerSecurityPolicy.h"
 
 #include "network/AuthoritativeGameSimulator.h"
 
 #include "network/NetServer.h"
+#include "network/ShardPopulationReporter.h"
 
 #include "network/TlsSession.h"
 
@@ -34,6 +36,7 @@
 #include <memory>
 #include <string>
 #include <thread>
+#include <unordered_set>
 
 #include <glm/glm.hpp>
 
@@ -44,6 +47,8 @@ using Engine::Net::kDefaultPort;
 using Engine::Platform::Networking::AuthoritativeGameSimulator;
 
 using Engine::Platform::Networking::NetServer;
+
+using Engine::Platform::Networking::ShardPopulationReporter;
 
 using Engine::Platform::Networking::TlsConfig;
 
@@ -83,6 +88,8 @@ void PrintUsage(const char* program) {
 
               << "  " << program << " --heightmap <terrain.png>\n"
 
+              << "  " << program << " --auth-token <token>\n"
+              << "  " << program << " --dev-open-login\n"
               << "  " << program << " --tls-cert <cert.pem> --tls-key <key.pem>\n"
               << "  " << program << " --max-players <count>\n"
               << "  " << program << " --shard-id <id>\n"
@@ -90,7 +97,8 @@ void PrintUsage(const char* program) {
               << "  " << program << " --scale-config <zone.json>\n"
               << "  " << program << " --shard-soft-cap <count>\n"
               << "  " << program << " --layer-density-threshold <count>\n"
-              << "  " << program << " --overflow-policy <LayerFirst|ShardFirst|LayerThenShard>\n\n"
+              << "  " << program << " --overflow-policy <LayerFirst|ShardFirst|LayerThenShard>\n"
+              << "  " << program << " --gateway-host <host> --gateway-port <port>\n\n"
 
               << "Default: authoritative ECS simulation on port " << kDefaultPort << "\n";
 
@@ -195,8 +203,14 @@ int main(int argc, char* argv[]) {
     const std::string tlsCertPath = ParseArgValue(argc, argv, "--tls-cert");
 
     const std::string tlsKeyPath = ParseArgValue(argc, argv, "--tls-key");
-
     const bool relayOnly = HasFlag(argc, argv, "--relay-only");
+    const bool devOpenLogin = HasFlag(argc, argv, "--dev-open-login");
+    std::string authToken = ParseArgValue(argc, argv, "--auth-token");
+    if (authToken.empty()) {
+        if (const char* envToken = std::getenv("ASTRAL_AUTH_TOKEN")) {
+            authToken = envToken;
+        }
+    }
 
 
 
@@ -212,10 +226,25 @@ int main(int argc, char* argv[]) {
 
     NetServer server;
 
+    Engine::Net::ServerSecurityPolicy securityPolicy;
+    securityPolicy.enforceAuthentication = !devOpenLogin;
+    securityPolicy.encryptUdpPayloads = !devOpenLogin;
+    securityPolicy.allowOpenLogin = devOpenLogin;
+    server.SetSecurityPolicy(securityPolicy);
+    if (!authToken.empty()) {
+        server.SetRequiredAuthToken(authToken);
+    } else if (!devOpenLogin) {
+        LOG_ERROR("Server", "Missing --auth-token or ASTRAL_AUTH_TOKEN (use --dev-open-login for local testing)");
+        return 1;
+    }
+
     std::unique_ptr<AuthoritativeGameSimulator> simulator;
     std::unique_ptr<Game::Character::ServerLoadoutDatabase> loadoutDatabase;
     std::unique_ptr<Game::Character::CharacterInventoryDatabase> inventoryDatabase;
     std::unique_ptr<Game::Character::GameItemCatalog> gameItemCatalog;
+    ShardPopulationReporter populationReporter;
+    float persistenceAccumulatorSeconds = 0.0f;
+    std::unordered_set<Engine::Net::UserId> persistedUsers;
 
     if (!relayOnly) {
 
@@ -236,8 +265,15 @@ int main(int argc, char* argv[]) {
                 if (action == Engine::Net::InventoryActionType::Drop) {
                     return !itemId.empty();
                 }
+                if (action == Engine::Net::InventoryActionType::Combine ||
+                    action == Engine::Net::InventoryActionType::Pickup) {
+                    return true;
+                }
                 return catalog->CanUseItem(itemId);
             });
+        simulator->SetItemCombineRecipes({
+            {"maple", "silver_birch", "ember_oak", 1},
+        });
 
         simulator->SetSpawnPosition(glm::vec3(5.0f, 0.0f, 5.0f));
         Game::Character::CharacterStats characterStats;
@@ -272,12 +308,13 @@ int main(int argc, char* argv[]) {
             LOG_WARNING("Server", "Inventory database failed to open — persistence disabled");
         }
 
-        server.SetClientLoggedInCallback([&simulator, &loadoutDatabase, &inventoryDatabase](
+        server.SetClientLoggedInCallback([&simulator, &loadoutDatabase, &inventoryDatabase, &persistedUsers](
                                              Engine::Net::UserId userId,
                                              const std::string& displayName) {
             if (!simulator || !loadoutDatabase || !inventoryDatabase) {
                 return;
             }
+            persistedUsers.insert(userId);
 
             Game::Character::CharacterLoginContext loginContext;
             loginContext.userId = userId;
@@ -317,7 +354,7 @@ int main(int argc, char* argv[]) {
             simulator->OnClientLoggedIn(userId, displayName, starterInventory);
         });
 
-        server.SetClientDisconnectedCallback([&simulator, &inventoryDatabase](
+        server.SetClientDisconnectedCallback([&simulator, &inventoryDatabase, &persistedUsers](
                                                  Engine::Net::UserId userId) {
             if (!simulator || !inventoryDatabase) {
                 return;
@@ -327,6 +364,7 @@ int main(int argc, char* argv[]) {
             if (ownership) {
                 inventoryDatabase->SaveOwnership(userId, *ownership);
             }
+            persistedUsers.erase(userId);
 
             simulator->OnClientDisconnected(userId);
         });
@@ -437,6 +475,25 @@ int main(int argc, char* argv[]) {
     }
     server.SetScalePolicyConfig(scalePolicy);
 
+    const std::string gatewayHost = ParseArgValue(argc, argv, "--gateway-host");
+    const std::string gatewayPortArg = ParseArgValue(argc, argv, "--gateway-port");
+    if (!gatewayHost.empty() && !gatewayPortArg.empty()) {
+        populationReporter.Configure(shardConfig.shardId,
+                                     shardConfig.maxPlayers,
+                                     shardConfig.overflowShardId,
+                                     nullptr);
+        populationReporter.SetGatewayEndpoint(gatewayHost, static_cast<uint16_t>(std::atoi(gatewayPortArg.c_str())));
+        LOG_INFO_FMT("Server",
+                     "Gateway population sync enabled via %s:%s",
+                     gatewayHost.c_str(),
+                     gatewayPortArg.c_str());
+    } else if (shardConfig.overflowShardId != 0) {
+        populationReporter.Configure(shardConfig.shardId,
+                                     shardConfig.maxPlayers,
+                                     shardConfig.overflowShardId,
+                                     nullptr);
+    }
+
     if (!server.Start("0.0.0.0", port)) {
 
         LOG_ERROR_FMT("Server", "Failed to start on port %u", port);
@@ -493,6 +550,18 @@ int main(int argc, char* argv[]) {
 
         simulator->Update(elapsed);
 
+        populationReporter.Tick(server, static_cast<uint32_t>(server.GetLoggedInClientCount()));
+
+        persistenceAccumulatorSeconds += elapsed;
+        if (inventoryDatabase && persistenceAccumulatorSeconds >= 60.0f) {
+            persistenceAccumulatorSeconds = 0.0f;
+            for (Engine::Net::UserId userId : persistedUsers) {
+                const Engine::Net::ReplicatedItemOwnership* ownership = simulator->GetOwnedItems(userId);
+                if (ownership && !ownership->items.empty()) {
+                    inventoryDatabase->SaveOwnership(userId, *ownership);
+                }
+            }
+        }
     }
 
 

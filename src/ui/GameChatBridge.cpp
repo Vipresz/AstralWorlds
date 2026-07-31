@@ -52,7 +52,7 @@ void GameChatBridge::SetOnline(bool online) {
 
     m_chatWindow->SetEnabled(online);
     if (online) {
-        AppendLocalMessage("System", "Connected to world chat. Press Enter to type.");
+        AppendLocalMessage("System", "Connected to world chat. Press Ctrl+L or Enter over chat to type.");
     }
 }
 

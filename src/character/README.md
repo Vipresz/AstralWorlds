@@ -47,6 +47,19 @@ Add matching equipment entries to `items.json` with model paths under `graphics/
 
 Inventory materials use string ids in `game_items.json` (e.g. `gold_bar`). Those ids are the canonical network key for `PlayerItemOwnership` replication; `numeric_id` is the compact key for bag UI and crafting.
 
+## Inventory authority (online)
+
+Two engine generic-data channels — do not mix them:
+
+| Channel | When | Server rule |
+|---------|------|-------------|
+| `item_ownership` | Bag drag rearrange | Multiset must match; rejects forged totals |
+| `inventory_action` | Use / Drop from action panel | Server removes items; `CanUseItem` validator for Use |
+
+Bag UX (`src/menus/src/Menu.cpp`): left-click selects usable items; right-click opens action panel; **Use** in the panel selects only (does not consume online). Drop sends `inventory_action`. Combined use of two selected items is a local stub until recipe validation exists on the server.
+
+Wiring: `main.cpp` sets `SetInventoryActionCallback` and `SetInventoryCombinedUseCallback` on `NetworkSystem`.
+
 ## Code map
 
 | File | Role |

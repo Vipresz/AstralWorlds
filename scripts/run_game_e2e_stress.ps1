@@ -50,7 +50,8 @@ $overallExit = 0
 try {
     Write-Host "Running GameTests game network e2e..."
     Push-Location $BinDir
-    & $GameTests --gtest_filter=GameNetworkE2ETest.ConnectLoadCharacterAndMeasureMovementAck
+    $ciFilter = "GameNetworkE2ETest.ConnectLoadCharacterAndMeasureMovementAck:GameNetworkE2ETest.BroadcastsChatBetweenPlayers:CharacterLoadE2ETest.*:ChatInputFocusTest.*:GameMenusManifestTest.*"
+    & $GameTests --gtest_filter=$ciFilter
     if ($LASTEXITCODE -ne 0) { $overallExit = $LASTEXITCODE }
 
     if ($StressClients -gt 0) {

@@ -1,4 +1,5 @@
 #include "ui/ChatWindow.h"
+#include "ui/ChatInputFocus.h"
 
 #ifdef PLATFORM_HAS_NUKLEAR
 
@@ -17,6 +18,8 @@
 #include <algorithm>
 #include <cctype>
 #include <filesystem>
+
+#include <GLFW/glfw3.h>
 
 using Engine::Platform::Render::Texture;
 using Engine::Platform::UI::DrawTexture;
@@ -403,6 +406,16 @@ void ChatWindow::Update(Engine::Platform::Window& window) {
         return;
     }
 
+    const bool ctrlDown = glfwGetKey(glfwWindow, GLFW_KEY_LEFT_CONTROL) == GLFW_PRESS ||
+                          glfwGetKey(glfwWindow, GLFW_KEY_RIGHT_CONTROL) == GLFW_PRESS;
+    const bool lDown = glfwGetKey(glfwWindow, GLFW_KEY_L) == GLFW_PRESS;
+    if (IsChatFocusChord(ctrlDown, lDown, m_ctrlLWasDown)) {
+        m_inputFocused = true;
+        SyncCharInputHandler(window);
+        return;
+    }
+    m_ctrlLWasDown = lDown;
+
     if (KeyPressed(window, GLFW_KEY_ENTER, m_enterWasDown) ||
         KeyPressed(window, GLFW_KEY_KP_ENTER, m_kpEnterWasDown)) {
         if (!m_inputFocused) {
@@ -573,11 +586,11 @@ void ChatWindow::Draw(struct nk_context* ctx,
         nk_label(ctx, prompt.c_str(), NK_TEXT_LEFT);
     } else if (lineCount == 0) {
         nk_style_push_color(ctx, &ctx->style.text.color, hintColor);
-        nk_label(ctx, "Click to type", NK_TEXT_LEFT);
+        nk_label(ctx, "Ctrl+L or Enter to type", NK_TEXT_LEFT);
         nk_style_pop_color(ctx);
     } else {
         nk_style_push_color(ctx, &ctx->style.text.color, hintColor);
-        nk_label(ctx, "Click to type...", NK_TEXT_LEFT);
+        nk_label(ctx, "Ctrl+L or Enter to type...", NK_TEXT_LEFT);
         nk_style_pop_color(ctx);
     }
 

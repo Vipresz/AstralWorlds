@@ -50,6 +50,7 @@
 #include "core/network/LoadoutReplication.h"
 #include "core/network/NetworkPayloads.h"
 #include "network/systems/NetworkSystem.h"
+#include "WorldSceneBootstrap.h"
 #include "network/systems/ReplicationSystem.h"
 #include "network/ItemOwnershipReplicationBinding.h"
 #include "network/TradeReplicationBinding.h"
@@ -59,9 +60,15 @@
 #ifdef PLATFORM_HAS_NUKLEAR
 #include "ui/UISystem.h"
 #include "ui/MenuStyle.h"
+#include "ui/UILayer.h"
 #include "MainMenu.h"
 #include "Menu.h"
 #include "ui/Minimap.h"
+#define NK_INCLUDE_FIXED_TYPES
+#define NK_INCLUDE_STANDARD_IO
+#define NK_INCLUDE_STANDARD_VARARGS
+#define NK_INCLUDE_DEFAULT_ALLOCATOR
+#include "nuklear.h"
 #include <GLFW/glfw3.h>
 #endif
 #include <memory>
@@ -144,15 +151,10 @@ void PushBagOwnershipToServer(Engine::ECS::Registry& registry,
 }
 
 void SendInventoryActionToServer(const std::shared_ptr<NetworkSystem>& networkSystem,
-                                 Engine::Net::InventoryActionType action,
-                                 uint16_t slotIndex) {
+                                 const Engine::Net::InventoryActionCommand& command) {
     if (!networkSystem) {
         return;
     }
-
-    Engine::Net::InventoryActionCommand command;
-    command.action = action;
-    command.slotIndex = slotIndex;
 
     Engine::Net::GenericDataPayload payload;
     payload.userId = networkSystem->GetLocalUserId();
@@ -160,6 +162,15 @@ void SendInventoryActionToServer(const std::shared_ptr<NetworkSystem>& networkSy
     payload.channel = Engine::Net::kInventoryActionChannel;
     payload.data = Engine::Net::SerializeInventoryAction(command).Data();
     networkSystem->GetClient().SendGenericData(payload);
+}
+
+void SendInventoryActionToServer(const std::shared_ptr<NetworkSystem>& networkSystem,
+                                 Engine::Net::InventoryActionType action,
+                                 uint16_t slotIndex) {
+    Engine::Net::InventoryActionCommand command;
+    command.action = action;
+    command.slotIndex = slotIndex;
+    SendInventoryActionToServer(networkSystem, command);
 }
 
 void SendTradeCommandToServer(const std::shared_ptr<NetworkSystem>& networkSystem,
@@ -196,6 +207,29 @@ int main(int argc, char* argv[]) {
             fprintf(stderr, "Smoke test failed: window init\n");
             return 1;
         }
+#ifdef PLATFORM_HAS_NUKLEAR
+        UISystem uiSystem;
+        MainMenuConfig menuConfig;
+        if (!MainMenu::LoadConfig(menuConfig)) {
+            fprintf(stderr, "Smoke test failed: could not load menus/manifest.json\n");
+            return 1;
+        }
+        if (!uiSystem.Initialize(&smokeWindow, MenuStyle::Astral())) {
+            fprintf(stderr, "Smoke test failed: UISystem init\n");
+            return 1;
+        }
+        uiSystem.RegisterLayer(UILayerId::Hud, [](struct nk_context* ctx, const MenuStyle&, int, int) {
+            if (nk_begin(ctx,
+                         "smoke",
+                         nk_rect(4.0f, 4.0f, 56.0f, 20.0f),
+                         NK_WINDOW_NO_SCROLLBAR | NK_WINDOW_BACKGROUND)) {
+                nk_label(ctx, "ok", NK_TEXT_LEFT);
+            }
+            nk_end(ctx);
+        });
+        uiSystem.PresentFrame();
+        uiSystem.Shutdown();
+#endif
         smokeWindow.swapBuffers();
         LOG_INFO("Main", "Smoke test passed");
         return 0;
@@ -341,6 +375,10 @@ int main(int argc, char* argv[]) {
             groundModel->CreatePlane(100.0f, 100.0f);
         }
         pumpBootLoading(0.55f, "Loading world...");
+
+        if (!Game::BootstrapWorldScene(registry)) {
+            LOG_WARNING("Main", "World scene bootstrap skipped (missing or invalid scenes/world.scene.json)");
+        }
         
         auto& groundTransform = registry.AddComponent<TransformComponent>(ground.id);
         groundTransform.SetPosition(0.0f, 0.0f, 0.0f);
@@ -591,6 +629,9 @@ int main(int argc, char* argv[]) {
                 tls.enabled = true;
                 tls.caCertificatePath = networkConfig.tlsCaPath;
                 tls.insecureSkipVerify = networkConfig.tlsInsecure;
+                if (!networkConfig.tlsInsecure) {
+                    tls.serverName = networkConfig.ResolveTlsServerName();
+                }
                 networkSystem->SetTlsConfig(tls);
             }
         }
@@ -764,14 +805,11 @@ int main(int argc, char* argv[]) {
                 }
 
                 if (networkConnected && networkSystem) {
-                    SendInventoryActionToServer(
-                        networkSystem,
-                        Engine::Net::InventoryActionType::Use,
-                        static_cast<uint16_t>(primarySlot));
-                    SendInventoryActionToServer(
-                        networkSystem,
-                        Engine::Net::InventoryActionType::Use,
-                        static_cast<uint16_t>(secondarySlot));
+                    Engine::Net::InventoryActionCommand command;
+                    command.action = Engine::Net::InventoryActionType::Combine;
+                    command.slotIndex = static_cast<uint16_t>(primarySlot);
+                    command.secondarySlotIndex = static_cast<uint16_t>(secondarySlot);
+                    SendInventoryActionToServer(networkSystem, command);
                     return;
                 }
 
@@ -973,7 +1011,7 @@ int main(int argc, char* argv[]) {
                 },
                 "Hud");
             uiSystem->RegisterLayer(
-                Engine::Platform::UI::UILayerId::Prompts,
+                Engine::Platform::UI::UILayerId::Modal,
                 [menu = mainMenu.get(),
                  tradePrompt = &tradeRequestPrompt](struct nk_context* ctx,
                                                     const MenuStyle& /*style*/,

@@ -40,7 +40,7 @@ private:
 
     std::shared_ptr<const CharacterBodyAssets> m_bodyAssets;
     std::unique_ptr<Engine::Platform::Render::Skeleton> m_instanceSkeleton;
-    std::vector<std::unique_ptr<Engine::Platform::Render::Model>> m_itemModels;
+    std::vector<std::shared_ptr<Engine::Platform::Render::Model>> m_itemModels;
     std::vector<Engine::EntityID> m_equipmentEntities;
 };
 

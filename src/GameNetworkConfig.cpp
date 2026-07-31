@@ -69,6 +69,13 @@ GameNetworkConfig GameNetworkConfig::ParseCommandLine(int argc, char* argv[]) {
                 config.useTls = true;
                 ++i;
             }
+        } else if (arg == "--tls-server-name") {
+            const std::string value = ArgValue(argc, argv, i);
+            if (!value.empty()) {
+                config.tlsServerName = value;
+                config.useTls = true;
+                ++i;
+            }
         } else if (arg == "--offline" || arg == "--no-network") {
             config.enabled = false;
         } else if (arg == "--smoke-test") {
@@ -99,6 +106,16 @@ GameNetworkConfig GameNetworkConfig::ParseCommandLine(int argc, char* argv[]) {
     }
 
     return config;
+}
+
+std::string GameNetworkConfig::ResolveTlsServerName() const {
+    if (!tlsServerName.empty()) {
+        return tlsServerName;
+    }
+    if (serverHost == "127.0.0.1" || serverHost == "::1") {
+        return "localhost";
+    }
+    return serverHost;
 }
 
 } // namespace Game

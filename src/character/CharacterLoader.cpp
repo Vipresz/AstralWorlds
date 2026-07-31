@@ -6,6 +6,7 @@
 #include "core/ecs/Registry.h"
 #include "character/CharacterDatabase.h"
 #include "character/EquipmentAttachmentComponent.h"
+#include "render/AssetManager.h"
 #include "render/Model.h"
 #include "render/components/TransformComponent.h"
 #include "render/components/MeshComponent.h"
@@ -40,21 +41,21 @@ bool CharacterLoader::FetchLoginLoadout(const CharacterLoginContext& context, Ch
 }
 
 bool CharacterLoader::LoadModelForItem(const ItemDefinition& item,
-                                       std::unique_ptr<Engine::Platform::Render::Model>& outModel) {
+                                       std::shared_ptr<Engine::Platform::Render::Model>& outModel) {
     if (item.modelPath.empty() || !FileExists(item.modelPath)) {
         LOG_WARNING_FMT("CharacterLoader", "Model missing for item '%s' at %s",
                         item.id.c_str(), item.modelPath.c_str());
         return false;
     }
 
-    outModel = std::make_unique<Engine::Platform::Render::Model>();
-    try {
-        outModel->LoadModel(item.modelPath);
-    } catch (const std::exception& e) {
-        LOG_ERROR_FMT("CharacterLoader", "Failed to load %s: %s", item.modelPath.c_str(), e.what());
-        outModel.reset();
+    std::shared_ptr<Engine::Platform::Render::Model> cached =
+        Engine::Platform::Render::AssetManager::Instance().LoadModel(item.modelPath);
+    if (!cached) {
+        LOG_ERROR_FMT("CharacterLoader", "Failed to load %s via AssetManager", item.modelPath.c_str());
         return false;
     }
+
+    outModel = cached;
     return true;
 }
 
@@ -130,7 +131,7 @@ bool CharacterLoader::AttachEquipment(Registry& registry,
             continue;
         }
 
-        std::unique_ptr<Engine::Platform::Render::Model> itemModel;
+        std::shared_ptr<Engine::Platform::Render::Model> itemModel;
         if (!LoadModelForItem(*item, itemModel)) {
             continue;
         }

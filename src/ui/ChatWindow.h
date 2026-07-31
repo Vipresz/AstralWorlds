@@ -33,7 +33,7 @@ struct ChatLine {
     std::string text;
 };
 
-// Bottom-left shared chat log. Press Enter to type; Enter again to send.
+// Bottom-left shared chat log. Press Ctrl+L or Enter (over panel) to type; Enter again to send.
 class ChatWindow {
 public:
     using SendHandler = std::function<void(const std::string& text)>;
@@ -102,6 +102,7 @@ private:
     bool m_kpEnterWasDown = false;
     bool m_escapeWasDown = false;
     bool m_backspaceWasDown = false;
+    bool m_ctrlLWasDown = false;
     bool m_charHandlerInstalled = false;
     bool m_positionInitialized = false;
     bool m_dragging = false;

@@ -5,11 +5,19 @@
 #include "character/EquipmentRules.h"
 #include "character/ItemCatalog.h"
 
+#include <memory>
+#include <vector>
+
 namespace Engine {
+namespace Platform {
+namespace Render {
+class Model;
+}
+}
 namespace ECS {
 class Registry;
 }
-} // namespace Engine
+}
 
 namespace Game {
 namespace Character {
@@ -46,7 +54,7 @@ private:
     bool AttachEquipment(Engine::ECS::Registry& registry,
                          CharacterInstance& instance,
                          const CharacterLoadout& loadout);
-    bool LoadModelForItem(const ItemDefinition& item, std::unique_ptr<Engine::Platform::Render::Model>& outModel);
+    bool LoadModelForItem(const ItemDefinition& item, std::shared_ptr<Engine::Platform::Render::Model>& outModel);
 
     ItemCatalog& m_catalog;
     EquipmentRules& m_rules;

@@ -23,6 +23,8 @@ set(GAME_TEST_SOURCES
     CharacterBodyAssetCacheTest.cpp
     CharacterInventoryDatabaseTest.cpp
     CharacterLoadE2ETest.cpp
+    ChatInputFocusTest.cpp
+    GameMenusManifestTest.cpp
     GameNetworkE2ETest.cpp
     GameTestMain.cpp
     "${CMAKE_SOURCE_DIR}/src/AppPaths.cpp"
@@ -34,6 +36,8 @@ add_executable(GameTests ${GAME_TEST_SOURCES})
 
 target_include_directories(GameTests PRIVATE
     ${CMAKE_SOURCE_DIR}/src
+    ${CMAKE_SOURCE_DIR}/src/menus/src
+    ${CMAKE_SOURCE_DIR}/src/menus/main_menu/src
     ${CMAKE_SOURCE_DIR}/RenderingEngine/tests
     ${CMAKE_SOURCE_DIR}/RenderingEngine
     ${CMAKE_SOURCE_DIR}/RenderingEngine/platform
@@ -49,6 +53,11 @@ target_link_libraries(GameTests PRIVATE
     sqlite3
     GTest::gtest
 )
+
+if(DEFINED NUKLEAR_DIR)
+    target_include_directories(GameTests PRIVATE ${NUKLEAR_DIR} ${NUKLEAR_DIR}/demo/glfw_opengl3)
+    target_compile_definitions(GameTests PRIVATE PLATFORM_HAS_NUKLEAR)
+endif()
 
 target_compile_features(GameTests PRIVATE cxx_std_17)
 
@@ -68,6 +77,7 @@ endfunction()
 
 game_tests_copy_tree(GameTests "${CMAKE_SOURCE_DIR}/graphics" "graphics")
 game_tests_copy_tree(GameTests "${CMAKE_SOURCE_DIR}/src/character" "character")
+game_tests_copy_tree(GameTests "${CMAKE_SOURCE_DIR}/src/menus" "menus")
 game_tests_copy_tree(GameTests "${CMAKE_SOURCE_DIR}/tests/fixtures" "tests/fixtures")
 
 if(EXISTS "${CMAKE_SOURCE_DIR}/RenderingEngine/config/join_load_stress_scale.json")
