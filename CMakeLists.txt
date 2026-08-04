@@ -1,10 +1,11 @@
 cmake_minimum_required(VERSION 3.22)
 
-# Enable OBJCXX on macOS for Objective-C++ support (needed for Gear 360 Bluetooth)
+# Enable OBJCXX on macOS for Objective-C++ support (needed for Gear 360 Bluetooth).
+# C is required for mbedTLS when Platform TLS is enabled (Linux game/server CI).
 if(APPLE)
-    project(GameEngine VERSION 0.1.1 LANGUAGES CXX OBJCXX)
+    project(GameEngine VERSION 0.1.1 LANGUAGES C CXX OBJCXX)
 else()
-    project(GameEngine VERSION 0.1.1 LANGUAGES CXX)
+    project(GameEngine VERSION 0.1.1 LANGUAGES C CXX)
 endif()
 
 # C++ Standard
