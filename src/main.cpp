@@ -19,8 +19,11 @@
 #include "ui/TradeRequestPrompt.h"
 #include "character/CharacterReplication.h"
 #include "character/CharacterReplicationComponent.h"
+#include "character/VitalsComponent.h"
+#include "character/VitalsReplication.h"
 #include "audio/CharacterWalkAudioSystem.h"
 #include "systems/character/RemoteLoadoutApplySystem.h"
+#include "systems/character/PlayerFollowController.h"
 #include "systems/inventory/InventoryComponent.h"
 #include "systems/inventory/InventoryOwnershipSync.h"
 #include "core/ecs/components/PlayerItemOwnershipComponent.h"
@@ -99,6 +102,7 @@ using namespace Game::Audio;
 using namespace Engine::Platform::UI;
 using namespace Game::UI;
 #include "ui/PlayerContextMenu.h"
+#include "ui/PlayerTargetHud.h"
 #include "ui/PlayerTargeting.h"
 #endif
 
@@ -116,6 +120,19 @@ void SyncBagFromOwnership(Engine::ECS::Registry& registry,
         return;
     }
     Game::Inventory::SyncInventoryFromOwnership(*inventory, *ownership, catalog);
+}
+
+void ApplyVitalsToHud(const VitalsComponent* vitals, Game::UI::CharacterHud& hud) {
+    if (!vitals || vitals->maxHealth <= 0.0f) {
+        hud.SetBarFill("health", 1.0f);
+    } else {
+        hud.SetBarFill("health", vitals->currentHealth / vitals->maxHealth);
+    }
+    if (!vitals || vitals->maxMana <= 0.0f) {
+        hud.SetBarFill("mana", 1.0f);
+    } else {
+        hud.SetBarFill("mana", vitals->currentMana / vitals->maxMana);
+    }
 }
 
 void PushBagOwnershipToServer(Engine::ECS::Registry& registry,
@@ -269,6 +286,8 @@ int main(int argc, char* argv[]) {
         std::unique_ptr<PlayerContextMenu> playerContextMenu = CreatePlayerContextMenu();
         Engine::Platform::UI::Minimap minimap;
         Game::UI::CharacterHud characterHud;
+        Game::UI::CharacterHud targetCharacterHud;
+        Game::UI::PlayerTargetHud playerTargetHud;
         Game::UI::ChatWindow chatWindow;
         Game::UI::GameChatBridge chatBridge;
         Game::UI::TradeRequestPrompt tradeRequestPrompt;
@@ -352,6 +371,7 @@ int main(int argc, char* argv[]) {
         }
         CharacterLoader characterLoader(itemCatalog, equipmentRules, characterDatabase);
         CharacterInstance characterInstance;
+        Game::Character::PlayerFollowController playerFollowController;
         
         LOG_INFO("Main", "Creating character entity...");
         Entity character = registry.CreateEntity();
@@ -408,6 +428,7 @@ int main(int argc, char* argv[]) {
 
         std::shared_ptr<NetworkSystem> networkSystem;
         std::shared_ptr<ReplicationSystem> replicationSystem;
+        std::shared_ptr<RemoteLoadoutApplySystem> remoteLoadoutSystem;
         bool characterLoaded = false;
         std::chrono::steady_clock::time_point e2eSessionStart = std::chrono::steady_clock::now();
         std::chrono::steady_clock::time_point e2eConnectDone{};
@@ -444,11 +465,32 @@ int main(int argc, char* argv[]) {
             if (characterLoaded) {
                 return true;
             }
-            if (!characterLoader.LoginAndBuild(registry, characterInstance, character.id, loginContext)) {
-                LOG_ERROR("Main", "Failed to build character from loadout");
+            if (mainWindow.getShouldClose()) {
+                LOG_WARNING("Main", "Character load aborted — window closed");
+                return false;
+            }
+            try {
+                if (!characterLoader.LoginAndBuild(registry, characterInstance, character.id, loginContext)) {
+                    LOG_ERROR("Main", "Failed to build character from loadout");
+                    return false;
+                }
+            } catch (const std::exception& ex) {
+                LOG_ERROR_FMT("Main", "Character load failed: %s", ex.what());
+                return false;
+            } catch (...) {
+                LOG_ERROR("Main", "Character load failed with unknown error");
                 return false;
             }
             characterInstance.WireAnimationComponent(registry);
+            if (!registry.HasComponent<VitalsComponent>(character.id)) {
+                registry.AddComponent<VitalsComponent>(character.id);
+            }
+            if (AnimationComponent* anim = registry.GetComponent<AnimationComponent>(character.id)) {
+                CharacterStats stats;
+                LoadCharacterStats(stats);
+                anim->walkAnimReferenceSpeed = stats.walkSpeed;
+                anim->runAnimReferenceSpeed = stats.runSpeed;
+            }
             characterLoader.PlaceOnTerrain(
                 registry, character.id, characterInstance, spawnX, spawnZ, terrainHeight);
             cameraRig.SetHeightOffset(characterInstance.GetHeadHeightOffset());
@@ -519,6 +561,7 @@ int main(int argc, char* argv[]) {
         if (networkConfig.enabled) {
             replicationSystem = std::make_shared<ReplicationSystem>();
             RegisterLoadoutReplication(*replicationSystem);
+            RegisterVitalsReplication(*replicationSystem);
             Engine::Platform::Networking::RegisterItemOwnershipReplication(*replicationSystem);
             Engine::Platform::Networking::RegisterTradeReplication(*replicationSystem);
             systemManager.RegisterSystem(replicationSystem);
@@ -593,7 +636,7 @@ int main(int argc, char* argv[]) {
             LOG_INFO("Main", "  Chat wired to network");
 #endif
 
-            auto remoteLoadoutSystem = std::make_shared<RemoteLoadoutApplySystem>(
+            remoteLoadoutSystem = std::make_shared<RemoteLoadoutApplySystem>(
                 characterLoader, networkSystem.get(), character.id);
             systemManager.RegisterSystem(remoteLoadoutSystem);
             LOG_INFO("Main", "  RemoteLoadoutApplySystem registered");
@@ -613,6 +656,18 @@ int main(int argc, char* argv[]) {
         inputSystem->SetMovementSpeeds(characterStats.walkSpeed, characterStats.runSpeed);
         inputSystem->SetCharacterEntity(character.id);
         inputSystem->SetTerrainModel(groundModel.get());
+        inputSystem->SetFollowCancelCallback([&playerFollowController]() {
+            playerFollowController.CancelFollow("manual input");
+        });
+        inputSystem->SetFollowAutoMoveQuery([&](glm::vec3& outDirection, bool& outRun) {
+            return playerFollowController.TryGetAutoMoveDirection(
+                registry, networkSystem.get(), character.id, outDirection, outRun);
+        });
+        inputSystem->SetEscapeCallback([&playerFollowController]() {
+            if (playerFollowController.IsFollowing()) {
+                playerFollowController.CancelFollow("escape");
+            }
+        });
         systemManager.RegisterSystem(inputSystem);
         LOG_INFO("Main", "  InputSystem registered");
 
@@ -859,16 +914,27 @@ int main(int argc, char* argv[]) {
                                                      const PlayerPickResult& target) {
                 switch (action) {
                     case PlayerContextAction::Inspect:
-                        LOG_INFO_FMT("Main",
-                                     "Inspect player '%s' (user %u)",
-                                     target.displayName.c_str(),
-                                     target.userId);
+                        if (target.entity != Engine::INVALID_ENTITY && remoteLoadoutSystem) {
+                            CharacterInstance* remoteInstance =
+                                remoteLoadoutSystem->TryGetRemoteInstance(target.entity);
+                            if (remoteInstance) {
+                                characterMenu->OpenInspectPaperdoll(&registry,
+                                                                  target.entity,
+                                                                  &shader,
+                                                                  remoteInstance,
+                                                                  target.displayName);
+                            } else {
+                                LOG_WARNING_FMT("Main",
+                                                "Inspect failed — no loadout for '%s'",
+                                                target.displayName.c_str());
+                            }
+                        }
                         break;
                     case PlayerContextAction::Follow:
-                        if (target.entity != Engine::INVALID_ENTITY) {
-                            cameraRig.followCamera.SetTarget(target.entity, &registry);
-                            cameraRig.source = &cameraRig.followCamera;
-                            LOG_INFO_FMT("Main", "Following player '%s'", target.displayName.c_str());
+                        if (target.userId != Engine::Net::kInvalidUserId) {
+                            playerFollowController.StartFollow(target.userId, target.displayName);
+                        } else {
+                            LOG_WARNING("Main", "Follow requires a valid remote player");
                         }
                         break;
                     case PlayerContextAction::Trade:
@@ -922,6 +988,13 @@ int main(int argc, char* argv[]) {
                 LOG_WARNING("Main", "Character HUD failed to load");
             } else {
                 LOG_INFO("Main", "  Character HUD initialized (top-left)");
+            }
+            if (!targetCharacterHud.Initialize(characterMenuConfig.characterHud)) {
+                LOG_WARNING("Main", "Target character HUD failed to load");
+            } else {
+                targetCharacterHud.SetOverlayWindowName("TargetCharacterHud");
+                targetCharacterHud.SetEnabled(false);
+                LOG_INFO("Main", "  Target character HUD initialized");
             }
             if (!chatWindow.Initialize(characterMenuConfig.chat, characterMenuConfig.ReferenceScreen())) {
                 LOG_WARNING("Main", "Chat window failed to load background");
@@ -977,11 +1050,14 @@ int main(int argc, char* argv[]) {
                 [menu = mainMenu.get(),
                  minimap = &minimap,
                  characterHud = &characterHud,
+                 targetCharacterHud = &targetCharacterHud,
+                 playerTargetHud = &playerTargetHud,
                  chat = &chatWindow,
                  characterMenu = characterMenu.get(),
                  gameWindow = &mainWindow,
                  uiSys = uiSystem.get(),
                  network = networkSystem.get(),
+                 localCharacterId = character.id,
                  &registry](struct nk_context* ctx,
                             const MenuStyle& /*style*/,
                             int screenW,
@@ -992,7 +1068,33 @@ int main(int argc, char* argv[]) {
                     if (menu->IsGameStarted() && !characterMenu->IsVisible()) {
                         characterMenu->Show();
                     }
+
+                    const VitalsComponent* localVitals =
+                        registry.GetComponent<VitalsComponent>(localCharacterId);
+                    ApplyVitalsToHud(localVitals, *characterHud);
+                    characterHud->ClearTitleLabel();
+                    characterHud->ClearPositionOverride();
                     characterHud->Draw(ctx, screenW, screenH);
+
+                    if (playerTargetHud->HasTarget()) {
+                        const PlayerPickResult& target = playerTargetHud->GetTarget();
+                        const VitalsComponent* targetVitals =
+                            registry.GetComponent<VitalsComponent>(target.entity);
+                        ApplyVitalsToHud(targetVitals, *targetCharacterHud);
+                        targetCharacterHud->SetTitleLabel(target.displayName);
+                        const CharacterHud::ScreenBounds localBounds =
+                            characterHud->ComputeScreenBounds(screenW, screenH);
+                        constexpr float kHudGap = 8.0f;
+                        targetCharacterHud->SetPositionOverride(
+                            localBounds.x + localBounds.w + kHudGap, localBounds.y);
+                        targetCharacterHud->SetEnabled(true);
+                        targetCharacterHud->Draw(ctx, screenW, screenH);
+                    } else {
+                        targetCharacterHud->SetEnabled(false);
+                        targetCharacterHud->ClearTitleLabel();
+                        targetCharacterHud->ClearPositionOverride();
+                    }
+
                     chat->Draw(ctx, uiSys->GetFontLibrary(), *gameWindow, screenW, screenH);
                     static thread_local std::vector<EntityID> minimapRemotePlayers;
                     minimapRemotePlayers.clear();
@@ -1109,10 +1211,14 @@ int main(int argc, char* argv[]) {
                            chat->BlocksGameInput() || tradePrompt->BlocksGameInput() ||
                            (playerContextMenu && playerContextMenu->BlocksGameInput());
                 });
-            mainWindow.SetEscapeHandler([&chatWindow, &mainWindow]() {
+            mainWindow.SetEscapeHandler([&chatWindow, &mainWindow, &playerFollowController]() {
                 if (chatWindow.IsInputFocused()) {
                     chatWindow.CancelInput();
                     mainWindow.SetCharInputHandler(nullptr);
+                    return true;
+                }
+                if (playerFollowController.IsFollowing()) {
+                    playerFollowController.CancelFollow("escape");
                     return true;
                 }
                 return false;
@@ -1228,6 +1334,18 @@ int main(int argc, char* argv[]) {
                     (mainMenu && mainMenu->BlocksGameInput()) ||
                     (characterMenu->BlocksGameInput() && !playerContextMenu->IsOpen()) ||
                     (chatWindow.BlocksGameInput() && !playerContextMenu->IsOpen());
+                PlayerHudContextHit targetHudContextHit{};
+                if (playerTargetHud.HasTarget() && targetCharacterHud.IsEnabled()) {
+                    const CharacterHud::ScreenBounds targetHudBounds =
+                        targetCharacterHud.ComputeInteractiveBounds(framebufferWidth,
+                                                                    framebufferHeight);
+                    targetHudContextHit.active = true;
+                    targetHudContextHit.target = playerTargetHud.GetTarget();
+                    targetHudContextHit.x = targetHudBounds.x;
+                    targetHudContextHit.y = targetHudBounds.y;
+                    targetHudContextHit.w = targetHudBounds.w;
+                    targetHudContextHit.h = targetHudBounds.h;
+                }
                 playerContextMenu->Update(mainWindow,
                                           registry,
                                           networkSystem.get(),
@@ -1235,7 +1353,17 @@ int main(int argc, char* argv[]) {
                                           projection,
                                           framebufferWidth,
                                           framebufferHeight,
-                                          uiBlocksPlayerMenu);
+                                          uiBlocksPlayerMenu,
+                                          targetHudContextHit);
+                playerTargetHud.Update(mainWindow,
+                                       registry,
+                                       networkSystem.get(),
+                                       cameraRig.source,
+                                       projection,
+                                       framebufferWidth,
+                                       framebufferHeight,
+                                       uiBlocksPlayerMenu,
+                                       playerContextMenu->IsOpen());
                 chatWindow.Update(mainWindow);
                 UpdateSpeechBubbles(registry, deltaTime);
             }

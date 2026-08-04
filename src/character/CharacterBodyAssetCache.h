@@ -45,7 +45,7 @@ private:
     CharacterBodyAssetCache() = default;
 
     mutable std::mutex m_mutex;
-    std::unordered_map<std::string, std::weak_ptr<const CharacterBodyAssets>> m_entries;
+    std::unordered_map<std::string, std::shared_ptr<const CharacterBodyAssets>> m_entries;
 };
 
 } // namespace Character

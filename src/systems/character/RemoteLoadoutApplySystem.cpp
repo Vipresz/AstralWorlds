@@ -1,9 +1,48 @@
 #include "systems/character/RemoteLoadoutApplySystem.h"
 
+#include "character/CharacterStats.h"
+#include "render/components/AnimationComponent.h"
+
 #include <vector>
+
+using Engine::Platform::Render::Components::AnimationComponent;
 
 namespace Game {
 namespace Character {
+
+namespace {
+
+bool IsRemoteAnimationWired(Engine::ECS::Registry& registry, Engine::EntityID entityId) {
+    const AnimationComponent* anim = registry.GetComponent<AnimationComponent>(entityId);
+    return anim && anim->skeleton && anim->skeleton->IsLoaded() && anim->walkingAnimation != nullptr;
+}
+
+void ApplyLocomotionReferenceSpeeds(Engine::ECS::Registry& registry, Engine::EntityID entityId) {
+    AnimationComponent* anim = registry.GetComponent<AnimationComponent>(entityId);
+    if (!anim) {
+        return;
+    }
+
+    CharacterStats stats;
+    LoadCharacterStats(stats);
+    anim->walkAnimReferenceSpeed = stats.walkSpeed;
+    anim->runAnimReferenceSpeed = stats.runSpeed;
+}
+
+bool LoadoutsMatch(const CharacterLoadout& a, const CharacterLoadout& b) {
+    if (a.bodyItemId != b.bodyItemId || a.equipment.size() != b.equipment.size()) {
+        return false;
+    }
+    for (size_t i = 0; i < a.equipment.size(); ++i) {
+        if (a.equipment[i].itemId != b.equipment[i].itemId ||
+            a.equipment[i].slot != b.equipment[i].slot) {
+            return false;
+        }
+    }
+    return true;
+}
+
+} // namespace
 
 RemoteLoadoutApplySystem::RemoteLoadoutApplySystem(
     CharacterLoader& loader,
@@ -11,6 +50,17 @@ RemoteLoadoutApplySystem::RemoteLoadoutApplySystem(
     Engine::EntityID localPlayerEntity)
     : m_loader(loader), m_networkSystem(networkSystem), m_localPlayerEntity(localPlayerEntity) {
     SetPriority(56);
+}
+
+CharacterInstance* RemoteLoadoutApplySystem::TryGetRemoteInstance(Engine::EntityID entityId) {
+    const auto it = m_remoteInstances.find(entityId);
+    return it != m_remoteInstances.end() ? &it->second : nullptr;
+}
+
+const CharacterInstance* RemoteLoadoutApplySystem::TryGetRemoteInstance(
+    Engine::EntityID entityId) const {
+    const auto it = m_remoteInstances.find(entityId);
+    return it != m_remoteInstances.end() ? &it->second : nullptr;
 }
 
 void RemoteLoadoutApplySystem::Update(float deltaTime,
@@ -29,34 +79,31 @@ void RemoteLoadoutApplySystem::Update(float deltaTime,
             continue;
         }
 
+        CharacterLoadout desiredLoadout;
         const CharacterReplicationComponent* replicationComp =
             registry.GetComponent<CharacterReplicationComponent>(entityId);
-        if (!replicationComp) {
+        if (replicationComp && !replicationComp->loadout.bodyItemId.empty()) {
+            desiredLoadout = replicationComp->loadout;
+        } else if (!m_loader.BuildDefaultLoadout(desiredLoadout)) {
             continue;
         }
 
         const auto lastIt = m_lastApplied.find(entityId);
-        if (lastIt != m_lastApplied.end() && lastIt->second.bodyItemId == replicationComp->loadout.bodyItemId &&
-            lastIt->second.equipment.size() == replicationComp->loadout.equipment.size()) {
-            bool same = true;
-            for (size_t i = 0; i < replicationComp->loadout.equipment.size(); ++i) {
-                if (lastIt->second.equipment[i].itemId != replicationComp->loadout.equipment[i].itemId ||
-                    lastIt->second.equipment[i].slot != replicationComp->loadout.equipment[i].slot) {
-                    same = false;
-                    break;
-                }
-            }
-            if (same) {
-                continue;
-            }
+        const bool loadoutUnchanged =
+            lastIt != m_lastApplied.end() && LoadoutsMatch(lastIt->second, desiredLoadout);
+        const bool animationWired = IsRemoteAnimationWired(registry, entityId);
+        if (loadoutUnchanged && animationWired) {
+            continue;
         }
 
         CharacterInstance& instance = m_remoteInstances[entityId];
-        if (m_loader.ApplyLoadout(registry, instance, entityId, replicationComp->loadout)) {
-            // ApplyLoadout clears anim pointers; re-wire skeleton/clips so AnimationSystem
-            // can play walk/run/jump driven by NetworkSystem remote transform state.
+        if (m_loader.ApplyLoadout(registry, instance, entityId, desiredLoadout)) {
             instance.WireAnimationComponent(registry);
-            m_lastApplied[entityId] = replicationComp->loadout;
+            ApplyLocomotionReferenceSpeeds(registry, entityId);
+            m_lastApplied[entityId] = desiredLoadout;
+        } else if (!animationWired) {
+            instance.WireAnimationComponent(registry);
+            ApplyLocomotionReferenceSpeeds(registry, entityId);
         }
     }
 }

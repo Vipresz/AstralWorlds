@@ -19,6 +19,7 @@
 #include "character/CharacterInstance.h"
 #include "character/CharacterLoader.h"
 #include "character/CharacterReplication.h"
+#include "character/VitalsReplication.h"
 #include "character/CharacterStats.h"
 #include "character/EquipmentRules.h"
 #include "character/ItemCatalog.h"
@@ -64,6 +65,7 @@ using Game::Character::EquipmentRules;
 using Game::Character::ItemCatalog;
 using Game::Character::ItemDefinition;
 using Game::Character::RegisterLoadoutReplication;
+using Game::Character::RegisterVitalsReplication;
 using Game::Character::ServerLoadoutDatabase;
 using Engine::Platform::Render::Components::TransformComponent;
 
@@ -322,6 +324,7 @@ void SetupStressClientNetworkStack(StressClientHandle& handle) {
 
     handle.replicationSystem = std::make_shared<ReplicationSystem>();
     RegisterLoadoutReplication(*handle.replicationSystem);
+    RegisterVitalsReplication(*handle.replicationSystem);
     Engine::Platform::Networking::RegisterItemOwnershipReplication(*handle.replicationSystem);
     Engine::Platform::Networking::RegisterTradeReplication(*handle.replicationSystem);
 

@@ -93,7 +93,8 @@ void PlayerContextMenu::Update(Engine::Platform::Window& window,
                                const glm::mat4& projection,
                                int screenWidth,
                                int screenHeight,
-                               bool gameInputBlocked) {
+                               bool gameInputBlocked,
+                               const PlayerHudContextHit& hudContextHit) {
     float mouseX = 0.0f;
     float mouseY = 0.0f;
     GetMousePosition(window, mouseX, mouseY);
@@ -149,20 +150,31 @@ void PlayerContextMenu::Update(Engine::Platform::Window& window,
         const float dy = mouseY - m_rmbDownY;
         const float travel = std::sqrt(dx * dx + dy * dy);
         if (travel <= kClickMoveThresholdPixels) {
-            PlayerPickResult picked{};
-            if (TryPickRemotePlayerAtScreen(registry,
-                                            *network,
-                                            *camera,
-                                            projection,
-                                            screenWidth,
-                                            screenHeight,
-                                            mouseX,
-                                            mouseY,
-                                            picked)) {
-                m_target = picked;
+            const struct nk_rect hudBounds =
+                nk_rect(hudContextHit.x, hudContextHit.y, hudContextHit.w, hudContextHit.h);
+            if (hudContextHit.active &&
+                hudContextHit.target.entity != Engine::INVALID_ENTITY &&
+                PointInRect(mouseX, mouseY, hudBounds)) {
+                m_target = hudContextHit.target;
                 m_anchorX = mouseX;
                 m_anchorY = mouseY;
                 m_open = true;
+            } else {
+                PlayerPickResult picked{};
+                if (TryPickRemotePlayerAtScreen(registry,
+                                                *network,
+                                                *camera,
+                                                projection,
+                                                screenWidth,
+                                                screenHeight,
+                                                mouseX,
+                                                mouseY,
+                                                picked)) {
+                    m_target = picked;
+                    m_anchorX = mouseX;
+                    m_anchorY = mouseY;
+                    m_open = true;
+                }
             }
         }
     }

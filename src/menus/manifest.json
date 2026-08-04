@@ -71,6 +71,25 @@
   },
     "panels": [
     {
+      "button_id": "inspect",
+      "texture": "paperdoll/paperdoll_2.png",
+      "width_fraction": 0.25,
+      "x_fraction": 0.55,
+      "y_fraction": 0.42,
+      "close_button": {
+        "size_fraction": 0.08,
+        "x_anchor_fraction": 0.995,
+        "y_anchor_fraction": 0.0205,
+        "margin_fraction": 0.0,
+        "placement": "center_on_corner"
+      },
+      "character_preview": {
+        "size_fraction": 0.65,
+        "x_fraction": 0.5,
+        "y_fraction": 0.5
+      }
+    },
+    {
       "button_id": "char",
       "texture": "paperdoll/paperdoll_2.png",
       "width_fraction": 0.25,

@@ -209,10 +209,8 @@ std::shared_ptr<const CharacterBodyAssets> CharacterBodyAssetCache::GetOrLoad(
     {
         std::lock_guard<std::mutex> lock(m_mutex);
         const auto existing = m_entries.find(cacheKey);
-        if (existing != m_entries.end()) {
-            if (auto cached = existing->second.lock()) {
-                return cached;
-            }
+        if (existing != m_entries.end() && existing->second) {
+            return existing->second;
         }
     }
 
@@ -222,8 +220,12 @@ std::shared_ptr<const CharacterBodyAssets> CharacterBodyAssetCache::GetOrLoad(
     }
 
     std::lock_guard<std::mutex> lock(m_mutex);
-    m_entries[cacheKey] = loaded;
-    return loaded;
+    auto& slot = m_entries[cacheKey];
+    if (slot) {
+        return slot;
+    }
+    slot = std::move(loaded);
+    return slot;
 }
 
 void CharacterBodyAssetCache::Clear() {

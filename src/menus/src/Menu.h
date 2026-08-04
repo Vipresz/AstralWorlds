@@ -227,7 +227,8 @@ public:
     bool IsVisible() const { return m_visible; }
     bool BlocksGameInput() const {
         return m_visible &&
-               (m_pointerOverBarUi || m_pointerOverPanelUi || m_tradePanelOpen);
+               (m_pointerOverBarUi || m_pointerOverPanelUi || m_tradePanelOpen ||
+                m_inspectPaperdollOpen);
     }
 
     const CharacterMenuConfig& GetConfig() const { return m_config; }
@@ -236,6 +237,14 @@ public:
                                Engine::EntityID characterEntity,
                                Engine::Platform::Render::Shader* shader,
                                Game::Character::CharacterInstance* characterInstance);
+
+    void OpenInspectPaperdoll(Engine::ECS::Registry* registry,
+                              Engine::EntityID characterEntity,
+                              Engine::Platform::Render::Shader* shader,
+                              Game::Character::CharacterInstance* characterInstance,
+                              const std::string& displayName);
+    void CloseInspectPaperdoll();
+    bool IsInspectPaperdollOpen() const { return m_inspectPaperdollOpen; }
 
     void SetInventoryEntity(Engine::ECS::Registry* registry, Engine::EntityID entity);
 
@@ -410,6 +419,16 @@ private:
     Engine::EntityID m_paperdollCharacterEntity = Engine::INVALID_ENTITY;
     Engine::Platform::Render::Shader* m_paperdollShader = nullptr;
     Game::Character::CharacterInstance* m_paperdollCharacterInstance = nullptr;
+    std::unique_ptr<Game::Character::CharacterPaperdollRenderer> m_inspectPaperdollRenderer;
+    Engine::ECS::Registry* m_inspectPaperdollRegistry = nullptr;
+    Engine::EntityID m_inspectCharacterEntity = Engine::INVALID_ENTITY;
+    Engine::Platform::Render::Shader* m_inspectShader = nullptr;
+    Game::Character::CharacterInstance* m_inspectCharacterInstance = nullptr;
+    std::string m_inspectDisplayName;
+    float m_inspectPaperdollYawDegrees = 0.0f;
+    bool m_inspectPaperdollOpen = false;
+    bool m_hasInspectPaperdollRotateClock = false;
+    std::chrono::steady_clock::time_point m_lastInspectPaperdollRotateTime{};
     Engine::ECS::Registry* m_inventoryRegistry = nullptr;
     Engine::EntityID m_inventoryEntity = Engine::INVALID_ENTITY;
     const Game::Character::GameItemCatalog* m_gameItemCatalog = nullptr;

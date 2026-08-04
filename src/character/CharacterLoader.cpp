@@ -40,6 +40,16 @@ bool CharacterLoader::FetchLoginLoadout(const CharacterLoginContext& context, Ch
     return m_database.FetchLoadout(context, out);
 }
 
+bool CharacterLoader::BuildDefaultLoadout(CharacterLoadout& out) const {
+    const ItemDefinition* body = m_catalog.DefaultBody();
+    if (!body) {
+        return false;
+    }
+    out = CharacterLoadout{};
+    out.bodyItemId = body->id;
+    return true;
+}
+
 bool CharacterLoader::LoadModelForItem(const ItemDefinition& item,
                                        std::shared_ptr<Engine::Platform::Render::Model>& outModel) {
     if (item.modelPath.empty() || !FileExists(item.modelPath)) {
@@ -87,15 +97,23 @@ bool CharacterLoader::LoadBody(Registry& registry,
     instance.SetBodyAssets(bodyAssets);
     instance.rootEntity = rootEntity;
 
+    if (!registry.HasComponent<MeshComponent>(rootEntity)) {
+        registry.AddComponent<MeshComponent>(rootEntity);
+    }
     MeshComponent* mesh = registry.GetComponent<MeshComponent>(rootEntity);
     if (!mesh) {
-        mesh = &registry.AddComponent<MeshComponent>(rootEntity);
+        LOG_ERROR("CharacterLoader", "Failed to attach body mesh component");
+        return false;
     }
     mesh->model = bodyAssets->bodyModel.get();
 
+    if (!registry.HasComponent<MaterialComponent>(rootEntity)) {
+        registry.AddComponent<MaterialComponent>(rootEntity);
+    }
     MaterialComponent* material = registry.GetComponent<MaterialComponent>(rootEntity);
     if (!material) {
-        material = &registry.AddComponent<MaterialComponent>(rootEntity);
+        LOG_ERROR("CharacterLoader", "Failed to attach body material component");
+        return false;
     }
     material->specularIntensity = 0.5f;
     material->shininess = 32.0f;

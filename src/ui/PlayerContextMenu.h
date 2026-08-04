@@ -35,6 +35,16 @@ enum class PlayerContextAction {
     Trade,
 };
 
+// Optional screen region (e.g. target player HUD) that opens the same context menu on RMB.
+struct PlayerHudContextHit {
+    bool active = false;
+    PlayerPickResult target{};
+    float x = 0.0f;
+    float y = 0.0f;
+    float w = 0.0f;
+    float h = 0.0f;
+};
+
 class PlayerContextMenu {
 public:
     using ActionCallback = std::function<void(PlayerContextAction action, const PlayerPickResult& target)>;
@@ -53,7 +63,8 @@ public:
                 const glm::mat4& projection,
                 int screenWidth,
                 int screenHeight,
-                bool gameInputBlocked);
+                bool gameInputBlocked,
+                const PlayerHudContextHit& hudContextHit = {});
 
     void Build(struct nk_context* ctx, int screenWidth, int screenHeight);
 

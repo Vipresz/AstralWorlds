@@ -2923,6 +2923,33 @@ void CharacterMenu::SetPaperdollCharacter(Engine::ECS::Registry* registry,
     }
 }
 
+void CharacterMenu::OpenInspectPaperdoll(Engine::ECS::Registry* registry,
+                                         Engine::EntityID characterEntity,
+                                         Engine::Platform::Render::Shader* shader,
+                                         Game::Character::CharacterInstance* characterInstance,
+                                         const std::string& displayName) {
+    m_inspectPaperdollRegistry = registry;
+    m_inspectCharacterEntity = characterEntity;
+    m_inspectShader = shader;
+    m_inspectCharacterInstance = characterInstance;
+    m_inspectDisplayName = displayName;
+    m_inspectPaperdollOpen = true;
+    if (!m_inspectPaperdollRenderer) {
+        m_inspectPaperdollRenderer = std::make_unique<Game::Character::CharacterPaperdollRenderer>();
+    }
+    if (LoadedOverlayPanel* inspectPanel = FindOverlayPanel("inspect")) {
+        inspectPanel->positionInitialized = false;
+    }
+    LOG_INFO_FMT("CharacterMenu", "Inspect paperdoll opened for '%s'", displayName.c_str());
+}
+
+void CharacterMenu::CloseInspectPaperdoll() {
+    m_inspectPaperdollOpen = false;
+    m_inspectDisplayName.clear();
+    m_inspectCharacterEntity = Engine::INVALID_ENTITY;
+    m_inspectCharacterInstance = nullptr;
+}
+
 CloseButtonConfig CharacterMenu::ResolvePanelCloseButton(const OverlayPanelConfig& panel) const {
     CloseButtonConfig resolved = m_config.closeButton;
     if (!panel.hasCloseButtonPlacement) {
@@ -3091,8 +3118,10 @@ void CharacterMenu::BuildOpenPanels(struct nk_context* ctx,
         LoadedBarButton* barButton = FindBarButton(panel.config.buttonId);
         const bool tradePanelVisible =
             panel.config.buttonId == "trade" && m_tradePanelOpen;
+        const bool inspectPanelVisible =
+            panel.config.buttonId == "inspect" && m_inspectPaperdollOpen;
         const bool barPanelVisible = barButton && barButton->pressed;
-        if (!tradePanelVisible && !barPanelVisible) {
+        if (!tradePanelVisible && !inspectPanelVisible && !barPanelVisible) {
             panel.dragging = false;
             continue;
         }
@@ -3281,52 +3310,106 @@ void CharacterMenu::BuildOpenPanels(struct nk_context* ctx,
             }
         }
 
-        if (panel.config.hasCharacterPreview && m_paperdollRenderer && m_paperdollRegistry &&
-            m_paperdollShader && m_paperdollCharacterInstance &&
-            m_paperdollCharacterEntity != Engine::INVALID_ENTITY) {
-            m_paperdollRenderer->SetYawDegrees(m_paperdollYawDegrees);
-            const struct nk_rect previewBounds =
-                CharacterPreviewBoundsFromPanel(panelBounds, panel.config);
-            DrawCharacterPreviewOnPanel(canvas,
-                                        previewBounds,
-                                        *m_paperdollRenderer,
-                                        *m_paperdollRegistry,
-                                        m_paperdollCharacterEntity,
-                                        *m_paperdollCharacterInstance,
-                                        *m_paperdollShader);
+        if (panel.config.hasCharacterPreview) {
+            const bool isInspectPanel = panel.config.buttonId == "inspect";
+            Game::Character::CharacterPaperdollRenderer* paperdollRenderer = nullptr;
+            Engine::ECS::Registry* paperdollRegistry = nullptr;
+            Engine::EntityID paperdollEntity = Engine::INVALID_ENTITY;
+            Game::Character::CharacterInstance* paperdollInstance = nullptr;
+            Engine::Platform::Render::Shader* paperdollShader = nullptr;
+            float* paperdollYawDegrees = nullptr;
+            bool* hasRotateClock = nullptr;
+            std::chrono::steady_clock::time_point* lastRotateTime = nullptr;
 
-            const PaperdollRotateButtonBounds liveRotateBounds =
-                PaperdollRotateBoundsFromPanel(panelBounds, m_config.paperdollRotate);
-
-            const auto now = std::chrono::steady_clock::now();
-            float deltaSeconds = 1.0f / 60.0f;
-            if (m_hasPaperdollRotateClock) {
-                deltaSeconds = std::chrono::duration<float>(now - m_lastPaperdollRotateTime).count();
-                deltaSeconds = std::clamp(deltaSeconds, 0.0f, 0.05f);
+            if (isInspectPanel) {
+                paperdollRenderer = m_inspectPaperdollRenderer.get();
+                paperdollRegistry = m_inspectPaperdollRegistry;
+                paperdollEntity = m_inspectCharacterEntity;
+                paperdollInstance = m_inspectCharacterInstance;
+                paperdollShader = m_inspectShader;
+                paperdollYawDegrees = &m_inspectPaperdollYawDegrees;
+                hasRotateClock = &m_hasInspectPaperdollRotateClock;
+                lastRotateTime = &m_lastInspectPaperdollRotateTime;
+            } else {
+                paperdollRenderer = m_paperdollRenderer.get();
+                paperdollRegistry = m_paperdollRegistry;
+                paperdollEntity = m_paperdollCharacterEntity;
+                paperdollInstance = m_paperdollCharacterInstance;
+                paperdollShader = m_paperdollShader;
+                paperdollYawDegrees = &m_paperdollYawDegrees;
+                hasRotateClock = &m_hasPaperdollRotateClock;
+                lastRotateTime = &m_lastPaperdollRotateTime;
             }
-            m_lastPaperdollRotateTime = now;
-            m_hasPaperdollRotateClock = true;
 
-            const float speed = std::max(0.0f, m_config.paperdollRotate.degreesPerSecond);
-            const float step = speed * deltaSeconds;
-            // Left arrow: clockwise. Right arrow: anti-clockwise. Hold for smooth spin.
-            if (DrawPaperdollRotateButton(ctx,
-                                          canvas,
-                                          liveRotateBounds.left,
-                                          m_paperdollRotateLeftTexture.get(),
-                                          m_paperdollRotateLeftLightTexture.get(),
-                                          m_pointerOverPanelUi)) {
-                m_paperdollYawDegrees = NormalizeYawDegrees(m_paperdollYawDegrees - step);
-                m_paperdollRenderer->SetYawDegrees(m_paperdollYawDegrees);
+            if (isInspectPanel && !m_inspectDisplayName.empty()) {
+                const struct nk_user_font* font = ctx->style.font;
+                if (font) {
+                    const struct nk_color transparent = nk_rgba(0, 0, 0, 0);
+                    const struct nk_color nameColor = nk_rgba(225, 232, 245, 255);
+                    const std::string& name = m_inspectDisplayName;
+                    const int nameLen = static_cast<int>(std::min(name.size(), size_t{32}));
+                    const float textW =
+                        font->width(font->userdata, font->height, name.c_str(), nameLen);
+                    const float nameTopY = panelBounds.y + 10.0f;
+                    nk_draw_text(canvas,
+                                 nk_rect(panelBounds.x + (panelBounds.w - textW) * 0.5f,
+                                         nameTopY,
+                                         textW,
+                                         static_cast<float>(font->height)),
+                                 name.c_str(),
+                                 nameLen,
+                                 font,
+                                 transparent,
+                                 nameColor);
+                }
             }
-            if (DrawPaperdollRotateButton(ctx,
-                                          canvas,
-                                          liveRotateBounds.right,
-                                          m_paperdollRotateRightTexture.get(),
-                                          m_paperdollRotateRightLightTexture.get(),
-                                          m_pointerOverPanelUi)) {
-                m_paperdollYawDegrees = NormalizeYawDegrees(m_paperdollYawDegrees + step);
-                m_paperdollRenderer->SetYawDegrees(m_paperdollYawDegrees);
+
+            if (paperdollRenderer && paperdollRegistry && paperdollShader && paperdollInstance &&
+                paperdollEntity != Engine::INVALID_ENTITY) {
+                paperdollRenderer->SetYawDegrees(*paperdollYawDegrees);
+                const struct nk_rect previewBounds =
+                    CharacterPreviewBoundsFromPanel(panelBounds, panel.config);
+                DrawCharacterPreviewOnPanel(canvas,
+                                            previewBounds,
+                                            *paperdollRenderer,
+                                            *paperdollRegistry,
+                                            paperdollEntity,
+                                            *paperdollInstance,
+                                            *paperdollShader);
+
+                const PaperdollRotateButtonBounds liveRotateBounds =
+                    PaperdollRotateBoundsFromPanel(panelBounds, m_config.paperdollRotate);
+
+                const auto now = std::chrono::steady_clock::now();
+                float deltaSeconds = 1.0f / 60.0f;
+                if (*hasRotateClock) {
+                    deltaSeconds =
+                        std::chrono::duration<float>(now - *lastRotateTime).count();
+                    deltaSeconds = std::clamp(deltaSeconds, 0.0f, 0.05f);
+                }
+                *lastRotateTime = now;
+                *hasRotateClock = true;
+
+                const float speed = std::max(0.0f, m_config.paperdollRotate.degreesPerSecond);
+                const float step = speed * deltaSeconds;
+                if (DrawPaperdollRotateButton(ctx,
+                                              canvas,
+                                              liveRotateBounds.left,
+                                              m_paperdollRotateLeftTexture.get(),
+                                              m_paperdollRotateLeftLightTexture.get(),
+                                              m_pointerOverPanelUi)) {
+                    *paperdollYawDegrees = NormalizeYawDegrees(*paperdollYawDegrees - step);
+                    paperdollRenderer->SetYawDegrees(*paperdollYawDegrees);
+                }
+                if (DrawPaperdollRotateButton(ctx,
+                                              canvas,
+                                              liveRotateBounds.right,
+                                              m_paperdollRotateRightTexture.get(),
+                                              m_paperdollRotateRightLightTexture.get(),
+                                              m_pointerOverPanelUi)) {
+                    *paperdollYawDegrees = NormalizeYawDegrees(*paperdollYawDegrees + step);
+                    paperdollRenderer->SetYawDegrees(*paperdollYawDegrees);
+                }
             }
         }
 
@@ -3347,6 +3430,9 @@ void CharacterMenu::BuildOpenPanels(struct nk_context* ctx,
             }
             if (panel.config.buttonId == "trade") {
                 DeclineAndCloseTradePanel();
+            }
+            if (panel.config.buttonId == "inspect") {
+                CloseInspectPaperdoll();
             }
             panel.dragging = false;
             LOG_INFO_FMT("CharacterMenu", "Panel '%s' closed", panel.config.buttonId.c_str());

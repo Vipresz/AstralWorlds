@@ -121,6 +121,55 @@ void CharacterHud::SetBarFill(const std::string& barId, float fill01) {
     m_barFills[barId] = std::clamp(fill01, 0.0f, 1.0f);
 }
 
+void CharacterHud::ResolveScreenBounds(int screenWidth,
+                                       int screenHeight,
+                                       float& outX,
+                                       float& outY,
+                                       float& outW,
+                                       float& outH) const {
+    const MenuScreenLayout layout =
+        MenuScreenLayout::From(screenWidth, screenHeight, MenuReferenceScreen{});
+    outW = layout.Scale(static_cast<float>(std::max(1, m_config.sourceWidth)));
+    outH = layout.Scale(static_cast<float>(std::max(1, m_config.sourceHeight)));
+
+    if (m_usePositionOverride) {
+        outX = m_overrideX;
+        outY = m_overrideY;
+        return;
+    }
+
+    outX = static_cast<float>(screenWidth) * m_config.xFraction;
+    outY = static_cast<float>(screenHeight) * m_config.yFraction;
+    if (m_config.anchor == "top_right") {
+        outX = static_cast<float>(screenWidth) * (1.0f - m_config.xFraction) - outW;
+    } else if (m_config.anchor == "bottom_left") {
+        outY = static_cast<float>(screenHeight) * (1.0f - m_config.yFraction) - outH;
+    } else if (m_config.anchor == "bottom_right") {
+        outX = static_cast<float>(screenWidth) * (1.0f - m_config.xFraction) - outW;
+        outY = static_cast<float>(screenHeight) * (1.0f - m_config.yFraction) - outH;
+    }
+}
+
+CharacterHud::ScreenBounds CharacterHud::ComputeScreenBounds(int screenWidth,
+                                                             int screenHeight) const {
+    ScreenBounds bounds;
+    ResolveScreenBounds(screenWidth, screenHeight, bounds.x, bounds.y, bounds.w, bounds.h);
+    return bounds;
+}
+
+CharacterHud::ScreenBounds CharacterHud::ComputeInteractiveBounds(int screenWidth,
+                                                                  int screenHeight) const {
+    ScreenBounds bounds = ComputeScreenBounds(screenWidth, screenHeight);
+    if (!m_titleLabel.empty()) {
+        const MenuScreenLayout layout =
+            MenuScreenLayout::From(screenWidth, screenHeight, MenuReferenceScreen{});
+        const float titleHeight = layout.Scale(16.0f) + 4.0f;
+        bounds.y -= titleHeight;
+        bounds.h += titleHeight;
+    }
+    return bounds;
+}
+
 void CharacterHud::MaybeReloadLayoutFromManifest() {
     const ManifestWatch watch = ResolveHudManifest();
     if (watch.writeTime == 0) {
@@ -171,28 +220,26 @@ void CharacterHud::Draw(struct nk_context* ctx, int screenWidth, int screenHeigh
         return;
     }
 
-    // Size from manifest source_width / source_height (design pixels, UI-scaled).
-    const MenuScreenLayout layout = MenuScreenLayout::From(
-        screenWidth,
-        screenHeight,
-        MenuReferenceScreen{});
-    const float hudW = layout.Scale(static_cast<float>(std::max(1, m_config.sourceWidth)));
-    const float hudH = layout.Scale(static_cast<float>(std::max(1, m_config.sourceHeight)));
+    float hudX = 0.0f;
+    float hudY = 0.0f;
+    float hudW = 0.0f;
+    float hudH = 0.0f;
+    ResolveScreenBounds(screenWidth, screenHeight, hudX, hudY, hudW, hudH);
+    DrawAt(ctx, screenWidth, screenHeight, hudX, hudY, hudW, hudH);
+}
 
-    float hudX = static_cast<float>(screenWidth) * m_config.xFraction;
-    float hudY = static_cast<float>(screenHeight) * m_config.yFraction;
-    if (m_config.anchor == "top_right") {
-        hudX = static_cast<float>(screenWidth) * (1.0f - m_config.xFraction) - hudW;
-    } else if (m_config.anchor == "bottom_left") {
-        hudY = static_cast<float>(screenHeight) * (1.0f - m_config.yFraction) - hudH;
-    } else if (m_config.anchor == "bottom_right") {
-        hudX = static_cast<float>(screenWidth) * (1.0f - m_config.xFraction) - hudW;
-        hudY = static_cast<float>(screenHeight) * (1.0f - m_config.yFraction) - hudH;
-    }
-
+void CharacterHud::DrawAt(struct nk_context* ctx,
+                          int screenWidth,
+                          int screenHeight,
+                          float hudX,
+                          float hudY,
+                          float hudW,
+                          float hudH) {
+    (void)screenWidth;
+    (void)screenHeight;
     OverlayScope overlay(
         ctx,
-        "CharacterHud",
+        m_overlayWindowName.c_str(),
         OverlayScope::FullScreen(screenWidth, screenHeight),
         NK_WINDOW_NO_INPUT);
     if (!overlay.IsOpen() || !overlay.Canvas()) {
@@ -201,6 +248,26 @@ void CharacterHud::Draw(struct nk_context* ctx, int screenWidth, int screenHeigh
 
     struct nk_command_buffer* canvas = overlay.Canvas();
     const struct nk_rect hudBounds = nk_rect(hudX, hudY, hudW, hudH);
+
+    if (!m_titleLabel.empty() && ctx->style.font) {
+        const struct nk_user_font* font = ctx->style.font;
+        const struct nk_color transparent = nk_rgba(0, 0, 0, 0);
+        const struct nk_color titleColor = nk_rgba(225, 232, 245, 255);
+        const int titleLen = static_cast<int>(std::min(m_titleLabel.size(), size_t{32}));
+        const float textW =
+            font->width(font->userdata, font->height, m_titleLabel.c_str(), titleLen);
+        const float titleY = hudY - static_cast<float>(font->height) - 4.0f;
+        nk_draw_text(canvas,
+                     nk_rect(hudX + (hudW - textW) * 0.5f,
+                             titleY,
+                             textW,
+                             static_cast<float>(font->height)),
+                     m_titleLabel.c_str(),
+                     titleLen,
+                     font,
+                     transparent,
+                     titleColor);
+    }
 
     // Fills behind the HUD frame so the ornate border/slots sit on top.
     for (const CharacterHudBarConfig& bar : m_config.bars) {

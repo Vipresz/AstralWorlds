@@ -30,6 +30,7 @@ public:
     CharacterLoader(ItemCatalog& catalog, EquipmentRules& rules, ICharacterDatabase& database);
 
     bool FetchLoginLoadout(const CharacterLoginContext& context, CharacterLoadout& out);
+    bool BuildDefaultLoadout(CharacterLoadout& out) const;
     bool ApplyLoadout(Engine::ECS::Registry& registry,
                       CharacterInstance& instance,
                       Engine::EntityID rootEntity,
