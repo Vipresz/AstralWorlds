@@ -1,0 +1,7 @@
+{
+  "skills": [
+    { "id": "punch", "manifest": "fighter/punch.json" },
+    { "id": "knee_kick", "manifest": "fighter/knee_kick.json" },
+    { "id": "roundhouse", "manifest": "fighter/roundhouse.json" }
+  ]
+}

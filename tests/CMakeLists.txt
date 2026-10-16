@@ -20,6 +20,7 @@ file(GLOB GAME_CHARACTER_SYSTEM_SOURCES
 )
 
 set(GAME_TEST_SOURCES
+    BackendGameLogicTest.cpp
     CharacterBodyAssetCacheTest.cpp
     CharacterInventoryDatabaseTest.cpp
     CharacterLoadE2ETest.cpp
@@ -27,7 +28,11 @@ set(GAME_TEST_SOURCES
     GameMenusManifestTest.cpp
     GameNetworkE2ETest.cpp
     GameTestMain.cpp
+    SkillBackendTest.cpp
     "${CMAKE_SOURCE_DIR}/src/AppPaths.cpp"
+    "${CMAKE_SOURCE_DIR}/src/GameNetworkConfig.cpp"
+    "${CMAKE_SOURCE_DIR}/src/WorldSceneBootstrap.cpp"
+    "${CMAKE_SOURCE_DIR}/src/menus/src/ManifestTradeConfig.cpp"
     ${GAME_CHARACTER_SOURCES}
     ${GAME_CHARACTER_SYSTEM_SOURCES}
 )

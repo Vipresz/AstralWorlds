@@ -21,6 +21,11 @@
 #include "character/CharacterReplicationComponent.h"
 #include "character/VitalsComponent.h"
 #include "character/VitalsReplication.h"
+#include "character/SkillCatalog.h"
+#include "character/SkillComponent.h"
+#include "character/SkillActivator.h"
+#include "systems/character/SkillExecutionSystem.h"
+#include "systems/character/SkillInputSystem.h"
 #include "audio/CharacterWalkAudioSystem.h"
 #include "systems/character/RemoteLoadoutApplySystem.h"
 #include "systems/character/PlayerFollowController.h"
@@ -365,6 +370,10 @@ int main(int argc, char* argv[]) {
             LOG_WARNING("Main", "Game item catalog failed to load");
         }
         equipmentRules.Load();
+        SkillCatalog skillCatalog;
+        if (!skillCatalog.Load()) {
+            LOG_WARNING("Main", "Skill catalog failed to load — combat skills disabled");
+        }
         const ItemDefinition* defaultBody = itemCatalog.DefaultBody();
         if (defaultBody && !defaultBody->modelPath.empty()) {
             CharacterBodyAssetCache::Instance().GetOrLoad(defaultBody->id, defaultBody->modelPath);
@@ -484,6 +493,9 @@ int main(int argc, char* argv[]) {
             characterInstance.WireAnimationComponent(registry);
             if (!registry.HasComponent<VitalsComponent>(character.id)) {
                 registry.AddComponent<VitalsComponent>(character.id);
+            }
+            if (!registry.HasComponent<SkillComponent>(character.id)) {
+                registry.AddComponent<SkillComponent>(character.id);
             }
             if (AnimationComponent* anim = registry.GetComponent<AnimationComponent>(character.id)) {
                 CharacterStats stats;
@@ -709,6 +721,17 @@ int main(int argc, char* argv[]) {
             std::make_shared<CharacterWalkAudioSystem>(audioSystem.get(), character.id);
         systemManager.RegisterSystem(walkAudioSystem);
         LOG_INFO("Main", "  CharacterWalkAudioSystem registered");
+
+        auto skillExecutionSystem =
+            std::make_shared<Game::Character::SkillExecutionSystem>(&skillCatalog);
+        systemManager.RegisterSystem(skillExecutionSystem);
+        LOG_INFO("Main", "  SkillExecutionSystem registered");
+
+        auto skillInputSystem =
+            std::make_shared<Game::Character::SkillInputSystem>(&mainWindow, &skillCatalog);
+        skillInputSystem->SetCharacterEntity(character.id);
+        systemManager.RegisterSystem(skillInputSystem);
+        LOG_INFO("Main", "  SkillInputSystem registered (hotkeys 1-3)");
         
         auto animationSystem = std::make_shared<AnimationSystem>();
         systemManager.RegisterSystem(animationSystem);
@@ -806,6 +829,33 @@ int main(int argc, char* argv[]) {
             if (!characterMenu->Initialize(&characterMenuConfig)) {
                 LOG_WARNING("Main", "Character menu bottom bar failed to load");
             }
+            characterMenu->BindActionBarSkills(skillCatalog);
+            characterMenu->SetSkillActivateCallback([&](const std::string& skillId) {
+                const SkillDefinition* skill = skillCatalog.Find(skillId);
+                if (skill) {
+                    SkillActivator::TryActivate(registry, character.id, skillCatalog, *skill);
+                }
+            });
+            characterMenu->SetSkillCooldownQuery([&](const std::string& skillId) {
+                Game::UI::CooldownTimerSnapshot snapshot;
+                const SkillComponent* skillComp =
+                    registry.GetComponent<SkillComponent>(character.id);
+                if (!skillComp) {
+                    return snapshot;
+                }
+                snapshot.remainingSeconds = skillComp->GetCooldownRemaining(skillId);
+                snapshot.totalSeconds = skillComp->GetCooldownTotal(skillId);
+                return snapshot;
+            });
+            skillInputSystem->SetSlotSkillResolver(
+                [characterMenu = characterMenu.get(), &skillCatalog](int slotIndex) -> const SkillDefinition* {
+                    const std::string* skillId =
+                        characterMenu->GetActionBarSkillId(static_cast<size_t>(slotIndex));
+                    if (!skillId) {
+                        return nullptr;
+                    }
+                    return skillCatalog.Find(*skillId);
+                });
             characterMenu->SetPaperdollCharacter(&registry, character.id, &shader, &characterInstance);
             characterMenu->SetInventoryEntity(&registry, character.id);
             characterMenu->SetInventorySyncCallback([&]() {
@@ -993,6 +1043,7 @@ int main(int argc, char* argv[]) {
                 LOG_WARNING("Main", "Target character HUD failed to load");
             } else {
                 targetCharacterHud.SetOverlayWindowName("TargetCharacterHud");
+                targetCharacterHud.SetAllowDrag(false);
                 targetCharacterHud.SetEnabled(false);
                 LOG_INFO("Main", "  Target character HUD initialized");
             }
@@ -1192,6 +1243,15 @@ int main(int argc, char* argv[]) {
                        chat->BlocksGameInput() || tradePrompt->BlocksGameInput() ||
                        (playerContextMenu && playerContextMenu->BlocksGameInput());
             });
+            skillInputSystem->SetInputBlockQuery([menu = mainMenu.get(),
+                                                  characterMenu = characterMenu.get(),
+                                                  chat = &chatWindow,
+                                                  tradePrompt = &tradeRequestPrompt,
+                                                  playerContextMenu = playerContextMenu.get()]() {
+                return menu->BlocksGameInput() || characterMenu->BlocksGameInput() ||
+                       chat->BlocksGameInput() || tradePrompt->BlocksGameInput() ||
+                       (playerContextMenu && playerContextMenu->BlocksGameInput());
+            });
             gameCameraInput->SetInputBlockQuery([menu = mainMenu.get(),
                                                  characterMenu = characterMenu.get(),
                                                  chat = &chatWindow,
@@ -1315,6 +1375,13 @@ int main(int argc, char* argv[]) {
             }
             if (mainMenu && mainMenu->IsGameStarted()) {
                 characterMenu->Update(mainWindow);
+                if (const SkillComponent* skillComp =
+                        registry.GetComponent<SkillComponent>(character.id)) {
+                    characterMenu->SetActionBarHighlightSkill(
+                        skillComp->isExecuting ? skillComp->activeSkillId : "");
+                } else {
+                    characterMenu->SetActionBarHighlightSkill("");
+                }
                 characterMenu->SyncTradeState(&registry, character.id);
                 std::string tradePartnerName;
                 const auto* trade =
@@ -1333,6 +1400,7 @@ int main(int argc, char* argv[]) {
                 const bool uiBlocksPlayerMenu =
                     (mainMenu && mainMenu->BlocksGameInput()) ||
                     (characterMenu->BlocksGameInput() && !playerContextMenu->IsOpen()) ||
+                    (characterHud.BlocksGameInput() && !playerContextMenu->IsOpen()) ||
                     (chatWindow.BlocksGameInput() && !playerContextMenu->IsOpen());
                 PlayerHudContextHit targetHudContextHit{};
                 if (playerTargetHud.HasTarget() && targetCharacterHud.IsEnabled()) {

@@ -23,6 +23,7 @@
     "x_fraction": 0.015,
     "y_fraction": 0.02,
     "anchor": "top_left",
+    "movable": true,
     "bars": [
       {
         "id": "health",
@@ -61,7 +62,8 @@
     "input_row_height": 16,
     "log_row_height": 10,
     "scroll_lines_per_wheel": 1.0,
-    "idle_alpha": 0.5
+    "idle_alpha": 0.5,
+    "movable": true
   },
   "paperdoll": {
     "texture": "paperdoll/paperdoll_2.png",
@@ -76,6 +78,7 @@
       "width_fraction": 0.25,
       "x_fraction": 0.55,
       "y_fraction": 0.42,
+      "movable": true,
       "close_button": {
         "size_fraction": 0.08,
         "x_anchor_fraction": 0.995,
@@ -95,6 +98,7 @@
       "width_fraction": 0.25,
       "x_fraction": 0.18,
       "y_fraction": 0.42,
+      "movable": true,
       "close_button": {
         "size_fraction": 0.08,
         "x_anchor_fraction": 0.995,
@@ -132,7 +136,8 @@
         "slot_alpha": 1.0
       },
       "drag_from_edges_only": true,
-      "drag_edge_fraction": 0.10
+      "drag_edge_fraction": 0.10,
+      "movable": true
     },
     {
       "button_id": "trade",
@@ -172,7 +177,8 @@
         "slot_alpha": 1.0
       },
       "drag_from_edges_only": true,
-      "drag_edge_fraction": 0.10
+      "drag_edge_fraction": 0.10,
+      "movable": true
     }
   ],
   "close_button": {
@@ -200,6 +206,17 @@
         "light": "paperdoll/arrows/rotate_right_side_light.png"
       }
     }
+  },
+  "action_bar": {
+    "x_fraction": 0.012,
+    "y_fraction": 0.5,
+    "slot_size_pixels": 52,
+    "slot_spacing_pixels": 6,
+    "slots": [
+      { "skill_id": "punch" },
+      { "skill_id": "knee_kick" },
+      { "skill_id": "roundhouse" }
+    ]
   },
   "bar_buttons": {
     "icon_height_fraction": 0.43137254901960784,

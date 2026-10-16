@@ -46,7 +46,8 @@ public:
     bool IsEnabled() const { return m_enabled; }
     bool IsInputFocused() const { return m_inputFocused; }
     bool BlocksGameInput() const {
-        return m_enabled && (m_inputFocused || m_dragging || m_pointerOver);
+        return m_enabled &&
+               (m_inputFocused || (m_config.movable && m_dragging) || m_pointerOver);
     }
 
     void AppendMessage(ChatLine line);
@@ -72,6 +73,12 @@ private:
     void MaybeReloadLayoutFromManifest();
     ChatBounds ResolveBounds(int screenWidth, int screenHeight);
     void InitializePanelPosition(int screenWidth, int screenHeight, float panelWidth, float panelHeight);
+    void ComputeAnchoredPosition(int screenWidth,
+                                 int screenHeight,
+                                 float panelWidth,
+                                 float panelHeight,
+                                 float& outX,
+                                 float& outY) const;
     void UpdatePointer(struct nk_context* ctx,
                        Engine::Platform::Window& window,
                        int screenWidth,

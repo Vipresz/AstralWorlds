@@ -121,6 +121,46 @@ void CharacterHud::SetBarFill(const std::string& barId, float fill01) {
     m_barFills[barId] = std::clamp(fill01, 0.0f, 1.0f);
 }
 
+void CharacterHud::ComputeAnchoredPosition(int screenWidth,
+                                           int screenHeight,
+                                           float hudW,
+                                           float hudH,
+                                           float& outX,
+                                           float& outY) const {
+    outX = static_cast<float>(screenWidth) * m_config.xFraction;
+    outY = static_cast<float>(screenHeight) * m_config.yFraction;
+    if (m_config.anchor == "top_right") {
+        outX = static_cast<float>(screenWidth) * (1.0f - m_config.xFraction) - hudW;
+    } else if (m_config.anchor == "bottom_left") {
+        outY = static_cast<float>(screenHeight) * (1.0f - m_config.yFraction) - hudH;
+    } else if (m_config.anchor == "bottom_right") {
+        outX = static_cast<float>(screenWidth) * (1.0f - m_config.xFraction) - hudW;
+        outY = static_cast<float>(screenHeight) * (1.0f - m_config.yFraction) - hudH;
+    }
+}
+
+void CharacterHud::ClampPanelPosition(
+    float& x, float& y, float width, float height, int screenWidth, int screenHeight) {
+    const float maxX = std::max(0.0f, static_cast<float>(screenWidth) - width);
+    const float maxY = std::max(0.0f, static_cast<float>(screenHeight) - height);
+    x = std::clamp(x, 0.0f, maxX);
+    y = std::clamp(y, 0.0f, maxY);
+}
+
+void CharacterHud::EnsurePositionInitialized(int screenWidth, int screenHeight) {
+    if (m_positionInitialized || m_usePositionOverride || !m_config.movable || !m_allowDrag) {
+        return;
+    }
+
+    const MenuScreenLayout layout =
+        MenuScreenLayout::From(screenWidth, screenHeight, MenuReferenceScreen{});
+    const float hudW = layout.Scale(static_cast<float>(std::max(1, m_config.sourceWidth)));
+    const float hudH = layout.Scale(static_cast<float>(std::max(1, m_config.sourceHeight)));
+    ComputeAnchoredPosition(screenWidth, screenHeight, hudW, hudH, m_panelX, m_panelY);
+    ClampPanelPosition(m_panelX, m_panelY, hudW, hudH, screenWidth, screenHeight);
+    m_positionInitialized = true;
+}
+
 void CharacterHud::ResolveScreenBounds(int screenWidth,
                                        int screenHeight,
                                        float& outX,
@@ -138,16 +178,13 @@ void CharacterHud::ResolveScreenBounds(int screenWidth,
         return;
     }
 
-    outX = static_cast<float>(screenWidth) * m_config.xFraction;
-    outY = static_cast<float>(screenHeight) * m_config.yFraction;
-    if (m_config.anchor == "top_right") {
-        outX = static_cast<float>(screenWidth) * (1.0f - m_config.xFraction) - outW;
-    } else if (m_config.anchor == "bottom_left") {
-        outY = static_cast<float>(screenHeight) * (1.0f - m_config.yFraction) - outH;
-    } else if (m_config.anchor == "bottom_right") {
-        outX = static_cast<float>(screenWidth) * (1.0f - m_config.xFraction) - outW;
-        outY = static_cast<float>(screenHeight) * (1.0f - m_config.yFraction) - outH;
+    if (m_config.movable && m_allowDrag && m_positionInitialized) {
+        outX = m_panelX;
+        outY = m_panelY;
+        return;
     }
+
+    ComputeAnchoredPosition(screenWidth, screenHeight, outW, outH, outX, outY);
 }
 
 CharacterHud::ScreenBounds CharacterHud::ComputeScreenBounds(int screenWidth,
@@ -212,6 +249,61 @@ void CharacterHud::MaybeReloadLayoutFromManifest() {
                  static_cast<int>(m_config.bars.size()));
 }
 
+void CharacterHud::UpdatePointer(struct nk_context* ctx, int screenWidth, int screenHeight) {
+    if (!ctx || screenWidth <= 0 || screenHeight <= 0 || !m_config.movable || !m_allowDrag ||
+        m_usePositionOverride) {
+        m_dragging = false;
+        m_pointerDown = false;
+        return;
+    }
+
+    EnsurePositionInitialized(screenWidth, screenHeight);
+
+    const ScreenBounds interactive = ComputeInteractiveBounds(screenWidth, screenHeight);
+    const struct nk_rect panelBounds =
+        nk_rect(interactive.x, interactive.y, interactive.w, interactive.h);
+
+    const bool leftDown = ctx->input.mouse.buttons[NK_BUTTON_LEFT].down;
+    const bool leftPressed =
+        nk_input_is_mouse_click_down_in_rect(&ctx->input, NK_BUTTON_LEFT, panelBounds, nk_true);
+
+    if (m_dragging) {
+        if (leftDown) {
+            m_panelX = ctx->input.mouse.pos.x - m_dragGrabX;
+            m_panelY = ctx->input.mouse.pos.y - m_dragGrabY;
+            ClampPanelPosition(
+                m_panelX, m_panelY, interactive.w, interactive.h, screenWidth, screenHeight);
+        } else {
+            m_dragging = false;
+        }
+        m_pointerDown = false;
+        return;
+    }
+
+    if (leftPressed) {
+        m_pointerDown = true;
+        m_pointerDownX = ctx->input.mouse.pos.x;
+        m_pointerDownY = ctx->input.mouse.pos.y;
+        m_dragGrabX = ctx->input.mouse.pos.x - interactive.x;
+        m_dragGrabY = ctx->input.mouse.pos.y - interactive.y;
+        return;
+    }
+
+    if (m_pointerDown && leftDown) {
+        const float dx = ctx->input.mouse.pos.x - m_pointerDownX;
+        const float dy = ctx->input.mouse.pos.y - m_pointerDownY;
+        if ((dx * dx + dy * dy) > (kDragThresholdPixels * kDragThresholdPixels)) {
+            m_dragging = true;
+            m_pointerDown = false;
+        }
+        return;
+    }
+
+    if (m_pointerDown && !leftDown) {
+        m_pointerDown = false;
+    }
+}
+
 void CharacterHud::Draw(struct nk_context* ctx, int screenWidth, int screenHeight) {
     MaybeReloadLayoutFromManifest();
 
@@ -219,6 +311,9 @@ void CharacterHud::Draw(struct nk_context* ctx, int screenWidth, int screenHeigh
         screenWidth <= 0 || screenHeight <= 0) {
         return;
     }
+
+    UpdatePointer(ctx, screenWidth, screenHeight);
+    EnsurePositionInitialized(screenWidth, screenHeight);
 
     float hudX = 0.0f;
     float hudY = 0.0f;

@@ -165,28 +165,46 @@ ChatWindow::ChatBounds ChatWindow::ResolveBounds(int screenWidth, int screenHeig
         InitializePanelPosition(screenWidth, screenHeight, bounds.width, bounds.height);
     }
 
-    bounds.x = m_panelX;
-    bounds.y = m_panelY;
+    if (m_config.movable) {
+        bounds.x = m_panelX;
+        bounds.y = m_panelY;
+    } else {
+        float x = 0.0f;
+        float y = 0.0f;
+        ComputeAnchoredPosition(screenWidth, screenHeight, bounds.width, bounds.height, x, y);
+        bounds.x = x;
+        bounds.y = y;
+    }
     return bounds;
 }
 
 void ChatWindow::InitializePanelPosition(
     int screenWidth, int screenHeight, float panelWidth, float panelHeight) {
-    float x = static_cast<float>(screenWidth) * m_config.xFraction;
-    float y = static_cast<float>(screenHeight) * m_config.yFraction;
-    if (m_config.anchor == "top_right") {
-        x = static_cast<float>(screenWidth) * (1.0f - m_config.xFraction) - panelWidth;
-    } else if (m_config.anchor == "bottom_left") {
-        y = static_cast<float>(screenHeight) * (1.0f - m_config.yFraction) - panelHeight;
-    } else if (m_config.anchor == "bottom_right") {
-        x = static_cast<float>(screenWidth) * (1.0f - m_config.xFraction) - panelWidth;
-        y = static_cast<float>(screenHeight) * (1.0f - m_config.yFraction) - panelHeight;
-    }
-
+    float x = 0.0f;
+    float y = 0.0f;
+    ComputeAnchoredPosition(screenWidth, screenHeight, panelWidth, panelHeight, x, y);
     m_panelX = x;
     m_panelY = y;
-    ClampPanelPosition(m_panelX, m_panelY, panelWidth, panelHeight, screenWidth, screenHeight);
     m_positionInitialized = true;
+}
+
+void ChatWindow::ComputeAnchoredPosition(int screenWidth,
+                                         int screenHeight,
+                                         float panelWidth,
+                                         float panelHeight,
+                                         float& outX,
+                                         float& outY) const {
+    outX = static_cast<float>(screenWidth) * m_config.xFraction;
+    outY = static_cast<float>(screenHeight) * m_config.yFraction;
+    if (m_config.anchor == "top_right") {
+        outX = static_cast<float>(screenWidth) * (1.0f - m_config.xFraction) - panelWidth;
+    } else if (m_config.anchor == "bottom_left") {
+        outY = static_cast<float>(screenHeight) * (1.0f - m_config.yFraction) - panelHeight;
+    } else if (m_config.anchor == "bottom_right") {
+        outX = static_cast<float>(screenWidth) * (1.0f - m_config.xFraction) - panelWidth;
+        outY = static_cast<float>(screenHeight) * (1.0f - m_config.yFraction) - panelHeight;
+    }
+    ClampPanelPosition(outX, outY, panelWidth, panelHeight, screenWidth, screenHeight);
 }
 
 void ChatWindow::ClampPanelPosition(
@@ -252,6 +270,17 @@ void ChatWindow::UpdatePointer(
     m_hovered = false;
     m_pointerOver = false;
     if (!ctx || screenWidth <= 0 || screenHeight <= 0) {
+        return;
+    }
+
+    if (!m_config.movable) {
+        m_dragging = false;
+        m_pointerDown = false;
+        const struct nk_rect panelBounds = nk_rect(bounds.x, bounds.y, bounds.width, bounds.height);
+        m_hovered = nk_input_is_mouse_hovering_rect(&ctx->input, panelBounds);
+        m_pointerOver = m_hovered || m_inputFocused;
+        m_lastPanelWidth = bounds.width;
+        m_lastPanelHeight = bounds.height;
         return;
     }
 

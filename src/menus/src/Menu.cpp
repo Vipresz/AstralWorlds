@@ -3,6 +3,7 @@
 #include "Logger.h"
 #include "ManifestTradeConfig.h"
 #include "character/CharacterPaperdollRenderer.h"
+#include "character/SkillCatalog.h"
 #include "core/ecs/components/PlayerTradeComponent.h"
 #include "core/network/TradeSession.h"
 #include "render/Shader.h"
@@ -156,6 +157,32 @@ bool JsonTryGetInt(const std::string& json, const char* key, int& out) {
     }
     out = static_cast<int>(value);
     return true;
+}
+
+bool JsonTryParseBoolToken(const std::string& value, bool& out) {
+    if (value == "true" || value == "1" || value == "yes") {
+        out = true;
+        return true;
+    }
+    if (value == "false" || value == "0" || value == "no") {
+        out = false;
+        return true;
+    }
+    return false;
+}
+
+bool JsonTryGetBool(const std::string& json, const char* key, bool& out) {
+    float numeric = 0.0f;
+    if (JsonTryGetFloat(json, key, numeric)) {
+        out = numeric != 0.0f;
+        return true;
+    }
+
+    std::string token;
+    if (!JsonTryGetString(json, key, token)) {
+        return false;
+    }
+    return JsonTryParseBoolToken(token, out);
 }
 
 std::string JsonExtractObject(const std::string& json, const char* objectKey) {
@@ -452,6 +479,7 @@ bool LoadOverlayPanelFromObject(const std::string& objectJson,
         out.dragFromEdgesOnly =
             dragFromEdgesOnly == "true" || dragFromEdgesOnly == "1" || dragFromEdgesOnly == "yes";
     }
+    JsonTryGetBool(objectJson, "movable", out.movable);
 
     return !out.buttonId.empty();
 }
@@ -569,6 +597,7 @@ bool CharacterMenu::LoadConfig(CharacterMenuConfig& out, const char* manifestPat
         JsonTryGetFloat(characterHudJson, "x_fraction", out.characterHud.xFraction);
         JsonTryGetFloat(characterHudJson, "y_fraction", out.characterHud.yFraction);
         JsonTryGetString(characterHudJson, "anchor", out.characterHud.anchor);
+        JsonTryGetBool(characterHudJson, "movable", out.characterHud.movable);
 
         out.characterHud.bars.clear();
         for (const std::string& barJson : JsonExtractArrayObjects(characterHudJson, "bars")) {
@@ -600,6 +629,7 @@ bool CharacterMenu::LoadConfig(CharacterMenuConfig& out, const char* manifestPat
         JsonTryGetFloat(chatJson, "log_row_height", out.chat.logRowHeight);
         JsonTryGetFloat(chatJson, "scroll_lines_per_wheel", out.chat.scrollLinesPerWheel);
         JsonTryGetFloat(chatJson, "idle_alpha", out.chat.idleAlpha);
+        JsonTryGetBool(chatJson, "movable", out.chat.movable);
         const std::string contentJson = JsonExtractObject(chatJson, "content");
         if (!contentJson.empty()) {
             JsonTryGetFloat(contentJson, "x_fraction", out.chat.content.xFraction);
@@ -724,6 +754,22 @@ bool CharacterMenu::LoadConfig(CharacterMenuConfig& out, const char* manifestPat
             if (!lightRelative.empty()) {
                 out.paperdollRotate.rightLightTexturePath =
                     JoinPath(CharacterMenuConfig::kRoot, lightRelative);
+            }
+        }
+    }
+
+    const std::string actionBarJson = JsonExtractObject(json, "action_bar");
+    if (!actionBarJson.empty()) {
+        JsonTryGetFloat(actionBarJson, "x_fraction", out.actionBar.xFraction);
+        JsonTryGetFloat(actionBarJson, "y_fraction", out.actionBar.yFraction);
+        JsonTryGetFloat(actionBarJson, "slot_size_pixels", out.actionBar.slotSizePixels);
+        JsonTryGetFloat(actionBarJson, "slot_spacing_pixels", out.actionBar.slotSpacingPixels);
+        out.actionBar.slots.clear();
+        for (const std::string& slotJson : JsonExtractArrayObjects(actionBarJson, "slots")) {
+            ActionBarSlotConfig slot;
+            JsonTryGetString(slotJson, "skill_id", slot.skillId);
+            if (!slot.skillId.empty()) {
+                out.actionBar.slots.push_back(std::move(slot));
             }
         }
     }
@@ -934,6 +980,20 @@ void CharacterMenu::Shutdown() {
         }
     }
     m_barButtons.clear();
+    for (LoadedActionBarSlot& slot : m_actionBarSlots) {
+        if (slot.unpressedTexture) {
+            slot.unpressedTexture->ClearTexture();
+            slot.unpressedTexture.reset();
+        }
+        if (slot.pressedTexture) {
+            slot.pressedTexture->ClearTexture();
+            slot.pressedTexture.reset();
+        }
+    }
+    m_actionBarSlots.clear();
+    m_actionBarHighlightSkillId.clear();
+    m_actionBarKeyHeld.fill(false);
+    m_actionBarMouseHeld.fill(false);
     for (auto& iconEntry : m_itemIconTextures) {
         if (iconEntry.second) {
             iconEntry.second->ClearTexture();
@@ -1496,6 +1556,55 @@ CharacterMenu::LoadedBarButton* CharacterMenu::FindBarButton(const std::string& 
         }
     }
     return nullptr;
+}
+
+void CharacterMenu::BindActionBarSkills(const Game::Character::SkillCatalog& catalog) {
+    m_actionBarSlots.clear();
+    m_actionBarSlots.reserve(m_config.actionBar.slots.size());
+
+    for (const ActionBarSlotConfig& slotConfig : m_config.actionBar.slots) {
+        const Game::Character::SkillDefinition* skill = catalog.Find(slotConfig.skillId);
+        if (!skill) {
+            LOG_WARNING_FMT("CharacterMenu",
+                              "Action bar slot references unknown skill '%s'",
+                              slotConfig.skillId.c_str());
+            continue;
+        }
+
+        LoadedActionBarSlot loaded;
+        loaded.skillId = skill->id;
+
+        if (!skill->iconUnpressed.empty()) {
+            const std::string path = JoinPath(CharacterMenuConfig::kRoot, skill->iconUnpressed);
+            loaded.unpressedTexture = std::make_unique<Engine::Platform::Render::Texture>(path.c_str());
+            if (!loaded.unpressedTexture->LoadTextureUI(256)) {
+                LOG_WARNING_FMT("CharacterMenu", "Action bar icon not loaded (%s)", path.c_str());
+                loaded.unpressedTexture.reset();
+            }
+        }
+
+        if (!skill->iconPressed.empty()) {
+            const std::string path = JoinPath(CharacterMenuConfig::kRoot, skill->iconPressed);
+            loaded.pressedTexture = std::make_unique<Engine::Platform::Render::Texture>(path.c_str());
+            if (!loaded.pressedTexture->LoadTextureUI(256)) {
+                LOG_WARNING_FMT("CharacterMenu", "Action bar pressed icon not loaded (%s)", path.c_str());
+                loaded.pressedTexture.reset();
+            }
+        }
+
+        m_actionBarSlots.push_back(std::move(loaded));
+    }
+
+    LOG_INFO_FMT("CharacterMenu", "Action bar loaded %zu/%zu skill slot(s)",
+                 m_actionBarSlots.size(),
+                 m_config.actionBar.slots.size());
+}
+
+const std::string* CharacterMenu::GetActionBarSkillId(size_t slotIndex) const {
+    if (slotIndex >= m_actionBarSlots.size()) {
+        return nullptr;
+    }
+    return &m_actionBarSlots[slotIndex].skillId;
 }
 
 CharacterMenu::LoadedOverlayPanel* CharacterMenu::FindOverlayPanel(const std::string& buttonId) {
@@ -2901,10 +3010,29 @@ void CharacterMenu::ToggleBarButton(const std::string& id) {
                  button->pressed ? "pressed" : "released");
 }
 
+void CharacterMenu::UpdateActionBarKeyState(Engine::Platform::Window& window) {
+    m_actionBarKeyHeld.fill(false);
+    if (!m_visible || m_actionBarSlots.empty()) {
+        return;
+    }
+
+    GLFWwindow* glfwWindow = window.GetGLFWWindow();
+    if (!glfwWindow) {
+        return;
+    }
+
+    const size_t slotCount = std::min(m_actionBarSlots.size(), m_actionBarKeyHeld.size());
+    for (size_t index = 0; index < slotCount; ++index) {
+        const int key = GLFW_KEY_1 + static_cast<int>(index);
+        m_actionBarKeyHeld[index] = glfwGetKey(glfwWindow, key) == GLFW_PRESS;
+    }
+}
+
 void CharacterMenu::Update(Engine::Platform::Window& window) {
     if (!m_visible) {
         return;
     }
+    UpdateActionBarKeyState(window);
     if (KeyPressed(window, GLFW_KEY_B, m_bKeyWasDown)) {
         ToggleBarButton("bag");
     }
@@ -3002,22 +3130,113 @@ bool CharacterMenu::TryGetBottomBarLayout(int screenWidth,
     return true;
 }
 
+void CharacterMenu::BuildActionBar(struct nk_context* ctx,
+                                   struct nk_command_buffer* canvas,
+                                   int screenWidth,
+                                   int screenHeight,
+                                   const MenuScreenLayout& layout) {
+    if (!ctx || !canvas || m_actionBarSlots.empty()) {
+        return;
+    }
+
+    const float slotSize = layout.Scale(m_config.actionBar.slotSizePixels);
+    const float slotSpacing = layout.Scale(m_config.actionBar.slotSpacingPixels);
+    const float totalHeight =
+        static_cast<float>(m_actionBarSlots.size()) * slotSize +
+        static_cast<float>(m_actionBarSlots.size() > 0 ? m_actionBarSlots.size() - 1 : 0) *
+            slotSpacing;
+
+    const float anchorX = screenWidth * std::clamp(m_config.actionBar.xFraction, 0.0f, 1.0f);
+    const float anchorY = screenHeight * std::clamp(m_config.actionBar.yFraction, 0.0f, 1.0f);
+    float slotTop = anchorY - totalHeight * 0.5f;
+
+    const struct nk_user_font* font = ctx->style.font;
+    const float labelHeight = font ? font->height * 0.85f : 12.0f;
+
+    for (size_t index = 0; index < m_actionBarSlots.size(); ++index) {
+        const LoadedActionBarSlot& slot = m_actionBarSlots[index];
+        const bool keyHeld =
+            index < m_actionBarKeyHeld.size() && m_actionBarKeyHeld[index];
+        const struct nk_rect slotBounds = nk_rect(anchorX, slotTop, slotSize, slotSize);
+        const bool mouseHeld =
+            nk_input_is_mouse_hovering_rect(&ctx->input, slotBounds) &&
+            ctx->input.mouse.buttons[NK_BUTTON_LEFT].down;
+        if (index < m_actionBarMouseHeld.size()) {
+            m_actionBarMouseHeld[index] = mouseHeld;
+        }
+        const bool skillActive = !m_actionBarHighlightSkillId.empty() &&
+                                 slot.skillId == m_actionBarHighlightSkillId;
+        const bool showPressed = keyHeld || mouseHeld || skillActive;
+        const Engine::Platform::Render::Texture* texture = nullptr;
+        if (showPressed) {
+            texture = slot.pressedTexture && slot.pressedTexture->IsLoaded()
+                          ? slot.pressedTexture.get()
+                          : slot.unpressedTexture.get();
+        } else {
+            texture = slot.unpressedTexture && slot.unpressedTexture->IsLoaded()
+                          ? slot.unpressedTexture.get()
+                          : slot.pressedTexture.get();
+        }
+
+        if (nk_input_is_mouse_hovering_rect(&ctx->input, slotBounds)) {
+            m_pointerOverActionBarUi = true;
+        }
+
+        if (texture && texture->IsLoaded()) {
+            Engine::Platform::UI::DrawTexture(
+                canvas, *texture, slotBounds, nk_rgba(255, 255, 255, 255));
+        } else {
+            nk_fill_rect(canvas, slotBounds, 4.0f, nk_rgba(40, 40, 48, 200));
+            nk_stroke_rect(canvas, slotBounds, 4.0f, 1.0f, nk_rgba(120, 120, 140, 255));
+        }
+
+        if (m_skillCooldownQuery) {
+            const Game::UI::CooldownTimerSnapshot cooldown = m_skillCooldownQuery(slot.skillId);
+            if (cooldown.remainingSeconds > 0.0f) {
+                Game::UI::DrawCooldownOverlay(
+                    canvas,
+                    slotBounds,
+                    cooldown.remainingSeconds,
+                    cooldown.totalSeconds,
+                    font);
+            }
+        }
+
+        if (font) {
+            const std::string label = std::to_string(index + 1);
+            const int labelLen = static_cast<int>(label.size());
+            const float textW =
+                font->width(font->userdata, font->height, label.c_str(), labelLen);
+            const float textX = slotBounds.x + 4.0f;
+            const float textY = slotBounds.y + slotBounds.h - labelHeight - 2.0f;
+            nk_draw_text(canvas,
+                         nk_rect(textX, textY, textW + 4.0f, labelHeight),
+                         label.c_str(),
+                         static_cast<int>(label.size()),
+                         font,
+                         nk_rgba(0, 0, 0, 180),
+                         nk_rgba(255, 255, 255, 230));
+        }
+
+        if (nk_input_is_mouse_click_in_rect(&ctx->input, NK_BUTTON_LEFT, slotBounds) &&
+            m_skillActivateCallback) {
+            m_skillActivateCallback(slot.skillId);
+        }
+
+        slotTop += slotSize + slotSpacing;
+    }
+}
+
 void CharacterMenu::BuildHudChrome(struct nk_context* ctx, int screenWidth, int screenHeight) {
     if (!ctx || !m_visible) {
         return;
     }
 
-    MenuScreenLayout layout;
-    struct nk_rect barBounds{};
-    float drawW = 0.0f;
-    float drawH = 0.0f;
-    float barX = 0.0f;
-    float barY = 0.0f;
-    if (!TryGetBottomBarLayout(screenWidth, screenHeight, layout, barBounds, drawW, drawH, barX, barY)) {
-        return;
-    }
+    const MenuScreenLayout layout =
+        MenuScreenLayout::From(screenWidth, screenHeight, m_config.ReferenceScreen());
 
     m_pointerOverBarUi = false;
+    m_pointerOverActionBarUi = false;
 
     Engine::Platform::UI::OverlayScope overlay(
         ctx,
@@ -3028,6 +3247,19 @@ void CharacterMenu::BuildHudChrome(struct nk_context* ctx, int screenWidth, int 
     }
 
     struct nk_command_buffer* canvas = overlay.Canvas();
+    BuildActionBar(ctx, canvas, screenWidth, screenHeight, layout);
+
+    MenuScreenLayout bottomLayout;
+    struct nk_rect barBounds{};
+    float drawW = 0.0f;
+    float drawH = 0.0f;
+    float barX = 0.0f;
+    float barY = 0.0f;
+    if (!TryGetBottomBarLayout(
+            screenWidth, screenHeight, bottomLayout, barBounds, drawW, drawH, barX, barY)) {
+        return;
+    }
+
     Engine::Platform::UI::DrawTexture(
         canvas, *m_bottomBarTexture, barBounds, nk_rgba(255, 255, 255, 255));
 
@@ -3231,7 +3463,7 @@ void CharacterMenu::BuildOpenPanels(struct nk_context* ctx,
                         ctx->input.mouse.pos.y,
                         panel.config.dragEdgeFraction);
             }
-            if (canStartPanelDrag) {
+            if (canStartPanelDrag && panel.config.movable) {
                 panel.dragging = true;
                 m_pointerOverPanelUi = true;
             }

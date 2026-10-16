@@ -46,6 +46,13 @@ public:
 
     void SetOverlayWindowName(const std::string& name) { m_overlayWindowName = name; }
 
+    // When false, ignores manifest movable and keeps the HUD anchored (e.g. target HUD).
+    void SetAllowDrag(bool allow) { m_allowDrag = allow; }
+
+    bool BlocksGameInput() const {
+        return m_enabled && m_allowDrag && m_config.movable && (m_dragging || m_pointerDown);
+    }
+
     ScreenBounds ComputeScreenBounds(int screenWidth, int screenHeight) const;
 
     // Includes the title label area above the frame when a title is set.
@@ -57,12 +64,22 @@ public:
 
 private:
     void MaybeReloadLayoutFromManifest();
+    void EnsurePositionInitialized(int screenWidth, int screenHeight);
+    void ComputeAnchoredPosition(int screenWidth,
+                                 int screenHeight,
+                                 float hudW,
+                                 float hudH,
+                                 float& outX,
+                                 float& outY) const;
     void ResolveScreenBounds(int screenWidth,
                              int screenHeight,
                              float& outX,
                              float& outY,
                              float& outW,
                              float& outH) const;
+    void UpdatePointer(struct nk_context* ctx, int screenWidth, int screenHeight);
+    static void ClampPanelPosition(
+        float& x, float& y, float width, float height, int screenWidth, int screenHeight);
     void DrawAt(struct nk_context* ctx,
                 int screenWidth,
                 int screenHeight,
@@ -82,6 +99,17 @@ private:
     std::uint64_t m_lastManifestWriteTime = 0;
     bool m_hasManifestWriteTime = false;
     bool m_enabled = true;
+    bool m_allowDrag = true;
+    bool m_positionInitialized = false;
+    bool m_dragging = false;
+    bool m_pointerDown = false;
+    float m_pointerDownX = 0.0f;
+    float m_pointerDownY = 0.0f;
+    float m_panelX = 0.0f;
+    float m_panelY = 0.0f;
+    float m_dragGrabX = 0.0f;
+    float m_dragGrabY = 0.0f;
+    static constexpr float kDragThresholdPixels = 5.0f;
 };
 
 } // namespace UI

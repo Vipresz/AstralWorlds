@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
-"""Mask everything outside the outermost detected edge and export a tight PNG.
+"""Mask everything outside detected edges and export tight PNG(s).
 
 Pipeline:
-  1. Trace the true outer silhouette (alpha channel for transparent PNGs,
-     or Canny edges for opaque images)
-  2. Cast rays from the image center; along each ray, walk from the border
-     inward to find the outer boundary at that angle
-  3. Fit the traced boundary (--fit) to smooth noise and optionally enforce
-     a circular shape
-  4. Move the cut line inward by --strip-thickness to remove the outer rim
-     (use --preview to pick the value interactively)
-  5. Fill inside the cut line, make outside transparent, crop tightly
-  6. Optionally resize to a target width (--width) while preserving aspect ratio
+  1. Detect outer edges (Canny on opaque images; alpha/silhouette as fallback)
+  2. Close edge loops and fill regions; ignore nested inner loops and tiny specks
+  3. Export one PNG per top-level region (separate windows stay separate)
+  4. Fit/smooth the traced boundary (--fit), strip the outer rim (-t), crop
+  5. Use --min-items / watershed to split touching sprite-sheet cells further
+
+Region rules:
+  - Nested edges (one inside another) -> keep only the outer boundary
+  - Overlapping separate shapes -> outer boundary of each
+  - Non-touching shapes -> one output file per shape
 
 Examples:
   python circle_crop_edges.py ../menu/character/char_3_light.png
@@ -21,6 +21,10 @@ Examples:
   python circle_crop_edges.py input.png --fit 8
   python circle_crop_edges.py input.png --sensitivity 7
   python circle_crop_edges.py input.png --width 512
+  python circle_crop_edges.py spritesheet.png --min-item-area 200
+  python circle_crop_edges.py spritesheet.png --max-items 4
+  python circle_crop_edges.py spritesheet.png --min-items 4 --max-items 4
+  python circle_crop_edges.py input.png --single
   python circle_crop_edges.py input_folder/ --recursive
 """
 
@@ -28,7 +32,6 @@ from __future__ import annotations
 
 import argparse
 import sys
-from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -49,8 +52,13 @@ FLOOD_TOLERANCE_MIN = 2
 FLOOD_TOLERANCE_MAX = 14
 CANNY_LOW_DEFAULT = 40
 CANNY_HIGH_DEFAULT = 120
-BOUNDARY_MODE_CONTOUR = "contour"
-BOUNDARY_MODE_POLAR = "polar"
+MIN_ITEM_AREA_DEFAULT = 64
+MAX_ITEMS_DEFAULT = 0
+MIN_ITEMS_DEFAULT = 0
+WATERSHED_DIST_FRAC = 0.35
+EDGE_CLOSE_ITERATIONS = 2
+MIN_BBOX_DIMENSION_FLOOR = 20
+MIN_BBOX_DIMENSION_FRAC = 0.02
 
 
 def image_has_transparency(rgba: np.ndarray) -> bool:
@@ -200,6 +208,182 @@ def trace_contour_boundary(mask: np.ndarray) -> np.ndarray:
     return best_contour.reshape(-1, 2).astype(np.int32)
 
 
+def resolve_min_bbox_dimension(width: int, height: int) -> int:
+    return max(MIN_BBOX_DIMENSION_FLOOR, int(min(width, height) * MIN_BBOX_DIMENSION_FRAC))
+
+
+def _is_bbox_inside(
+    inner: tuple[int, int, int, int],
+    outer: tuple[int, int, int, int],
+) -> bool:
+    inner_x, inner_y, inner_w, inner_h = inner
+    outer_x, outer_y, outer_w, outer_h = outer
+    return (
+        inner_x >= outer_x
+        and inner_y >= outer_y
+        and inner_x + inner_w <= outer_x + outer_w
+        and inner_y + inner_h <= outer_y + outer_h
+    )
+
+
+def close_mask_gaps(mask: np.ndarray, width: int, height: int) -> np.ndarray:
+    close_px = max(5, min(width, height) // 80) | 1
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (close_px, close_px))
+    return cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel, iterations=1)
+
+
+def contour_to_mask(mask_shape: tuple[int, int], contour: np.ndarray) -> np.ndarray:
+    region = np.zeros(mask_shape, dtype=np.uint8)
+    cv2.drawContours(region, [contour], -1, 255, thickness=cv2.FILLED)
+    return region
+
+
+def pick_top_level_region_masks(mask: np.ndarray, min_area: int) -> list[np.ndarray]:
+    """Return filled masks for each top-level outer region.
+
+    Drops nested inner loops and thin decorative specks inside a larger window.
+    """
+    if not np.any(mask):
+        return []
+
+    height, width = mask.shape
+    min_dim = resolve_min_bbox_dimension(width, height)
+    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
+    candidates: list[tuple[float, np.ndarray]] = []
+    for contour in contours:
+        area = float(cv2.contourArea(contour))
+        if area < float(min_area):
+            continue
+        _x, _y, box_w, box_h = cv2.boundingRect(contour)
+        if min(box_w, box_h) < min_dim:
+            continue
+        candidates.append((area, contour))
+
+    candidates.sort(key=lambda item: item[0], reverse=True)
+    kept_contours: list[np.ndarray] = []
+    for _area, contour in candidates:
+        moments = cv2.moments(contour)
+        if moments["m00"] <= 0.0:
+            continue
+        centroid = (
+            float(moments["m10"] / moments["m00"]),
+            float(moments["m01"] / moments["m00"]),
+        )
+        if any(cv2.pointPolygonTest(kept, centroid, False) >= 0 for kept in kept_contours):
+            continue
+        contour_box = cv2.boundingRect(contour)
+        if any(_is_bbox_inside(contour_box, cv2.boundingRect(kept)) for kept in kept_contours):
+            continue
+        kept_contours.append(contour)
+
+    masks = [contour_to_mask(mask.shape, contour) for contour in kept_contours]
+    return sort_component_masks_by_position(masks)
+
+
+def resolve_min_item_area(min_item_area: int, width: int, height: int) -> int:
+    """Minimum connected-component area that counts as a separate item."""
+    if min_item_area > 0:
+        return int(min_item_area)
+    image_area = max(1, width * height)
+    return max(MIN_ITEM_AREA_DEFAULT, image_area // 4000)
+
+
+def find_foreground_components(mask: np.ndarray, min_area: int) -> list[np.ndarray]:
+    """Return per-item binary masks sorted by area (largest first)."""
+    if not np.any(mask):
+        return []
+
+    num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(mask, connectivity=8)
+    components: list[tuple[int, np.ndarray]] = []
+    for label in range(1, num_labels):
+        area = int(stats[label, cv2.CC_STAT_AREA])
+        if area < min_area:
+            continue
+        component_mask = np.zeros_like(mask)
+        component_mask[labels == label] = 255
+        components.append((area, component_mask))
+
+    components.sort(key=lambda item: item[0], reverse=True)
+    return [component_mask for _, component_mask in components]
+
+
+def sort_component_masks_by_position(masks: list[np.ndarray]) -> list[np.ndarray]:
+    """Sort masks top-to-bottom, then left-to-right for stable sprite-sheet numbering."""
+
+    def centroid_key(mask: np.ndarray) -> tuple[float, float]:
+        moments = cv2.moments(mask, binaryImage=True)
+        if moments["m00"] > 0.0:
+            return (float(moments["m01"] / moments["m00"]), float(moments["m10"] / moments["m00"]))
+        return (0.0, 0.0)
+
+    return sorted(masks, key=centroid_key)
+
+
+def split_mask_watershed(mask: np.ndarray, min_area: int) -> list[np.ndarray]:
+    """Separate touching foreground blobs (e.g. sprite-sheet cells) via watershed."""
+    if not np.any(mask):
+        return []
+
+    distance = cv2.distanceTransform(mask, cv2.DIST_L2, 5)
+    peak = float(distance.max())
+    if peak <= 0.0:
+        return []
+
+    _, sure_foreground = cv2.threshold(distance, WATERSHED_DIST_FRAC * peak, 255, 0)
+    sure_foreground = np.uint8(sure_foreground)
+    unknown = cv2.subtract(mask, sure_foreground)
+    _, markers = cv2.connectedComponents(sure_foreground)
+    markers = markers + 1
+    markers[unknown == 255] = 0
+    watershed_image = cv2.cvtColor(mask, cv2.COLOR_GRAY2BGR)
+    cv2.watershed(watershed_image, markers)
+
+    components: list[np.ndarray] = []
+    for marker_id in range(2, int(markers.max()) + 1):
+        component_mask = np.zeros_like(mask)
+        component_mask[(markers == marker_id) & (mask > 0)] = 255
+        if int(np.count_nonzero(component_mask)) < min_area:
+            continue
+        components.append(component_mask)
+    return sort_component_masks_by_position(components)
+
+
+def refine_component_masks(
+    mask: np.ndarray,
+    min_area: int,
+    min_items: int,
+    *,
+    initial_count: int,
+) -> tuple[list[np.ndarray], str | None]:
+    """Try harder splits when connected components find fewer regions than required."""
+    if min_items <= 0 or initial_count >= min_items:
+        return find_foreground_components(mask, min_area), None
+
+    watershed_components = split_mask_watershed(mask, min_area)
+    if len(watershed_components) >= min_items:
+        return watershed_components, f"watershed split ({initial_count} -> {len(watershed_components)})"
+
+    basic = find_foreground_components(mask, min_area)
+    return basic, None
+
+
+def build_foreground_mask_from_closed_edges(closed_edges: np.ndarray) -> np.ndarray:
+    """Fill closed edge loops so each traced icon becomes its own component."""
+    height, width = closed_edges.shape
+    flood_base = np.zeros((height + 2, width + 2), dtype=np.uint8)
+    filled = closed_edges.copy()
+    cv2.floodFill(filled, flood_base, (0, 0), 255)
+    holes = cv2.bitwise_not(filled)
+    return cv2.bitwise_or(closed_edges, holes)
+
+
+def estimate_mask_center(mask: np.ndarray, width: int, height: int) -> tuple[float, float]:
+    moments = cv2.moments(mask, binaryImage=True)
+    if moments["m00"] > 0.0:
+        return float(moments["m10"] / moments["m00"]), float(moments["m01"] / moments["m00"])
+    return width * 0.5, height * 0.5
+
+
 def smooth_contour(boundary: np.ndarray, window: int) -> np.ndarray:
     if boundary.shape[0] < 8 or window < 3:
         return boundary
@@ -232,8 +416,19 @@ def save_rgba(path: Path, rgba: np.ndarray) -> None:
     Image.fromarray(rgba, mode="RGBA").save(path, format="PNG")
 
 
-def default_output_path(input_path: Path, suffix: str) -> Path:
-    return input_path.with_name(f"{input_path.stem}{suffix}{input_path.suffix}")
+def default_output_path(input_path: Path, suffix: str, item_index: int | None = None) -> Path:
+    if item_index is None:
+        return input_path.with_name(f"{input_path.stem}{suffix}{input_path.suffix}")
+    return input_path.with_name(f"{input_path.stem}_{item_index:02d}{suffix}{input_path.suffix}")
+
+
+def item_output_paths(base_output: Path, item_count: int) -> list[Path]:
+    if item_count <= 1:
+        return [base_output]
+    stem = base_output.stem
+    suffix = base_output.suffix or ".png"
+    parent = base_output.parent
+    return [parent / f"{stem}_{index:02d}{suffix}" for index in range(1, item_count + 1)]
 
 
 def processed_output_dir(input_dir: Path) -> Path:
@@ -258,9 +453,12 @@ def batch_output_path(
     output_root: Path,
     *,
     suffix: str,
+    item_index: int | None = None,
 ) -> Path:
     relative = input_file.relative_to(input_root)
-    if suffix:
+    if item_index is not None:
+        output_name = f"{relative.stem}_{item_index:02d}.png"
+    elif suffix:
         output_name = f"{relative.stem}{suffix}.png"
     else:
         output_name = f"{relative.stem}.png"
@@ -300,150 +498,88 @@ def detect_edges(
     return cv2.dilate(edges, connect_kernel, iterations=1)
 
 
-def ray_border_distance(
-    center_x: float,
-    center_y: float,
-    cos_angle: float,
-    sin_angle: float,
-    width: int,
-    height: int,
-) -> float:
-    candidates: list[float] = []
-    if abs(cos_angle) > 1e-6:
-        candidates.append((0.0 - center_x) / cos_angle)
-        candidates.append((width - 1.0 - center_x) / cos_angle)
-    if abs(sin_angle) > 1e-6:
-        candidates.append((0.0 - center_y) / sin_angle)
-        candidates.append((height - 1.0 - center_y) / sin_angle)
-
-    positive = [distance for distance in candidates if distance > 0.0]
-    if not positive:
-        return float(min(width, height))
-    return max(positive)
-
-
-def trace_boundary_rays(
-    center_x: float,
-    center_y: float,
-    width: int,
-    height: int,
+def build_edge_region_mask(
+    rgba: np.ndarray,
     *,
-    num_rays: int,
-    edge_step: float,
-    is_hit: Callable[[int, int], bool],
-    pick_outermost: bool,
+    canny_low: int,
+    canny_high: int,
+    blur: int,
+    use_gradient: bool,
+    content_mask: np.ndarray | None = None,
+    close_iterations: int = EDGE_CLOSE_ITERATIONS,
 ) -> np.ndarray:
-    """Cast rays from the image border inward and collect boundary hits."""
-    points: list[tuple[int, int]] = []
-
-    for angle in np.linspace(0.0, 2.0 * np.pi, num_rays, endpoint=False):
-        cos_angle = float(np.cos(angle))
-        sin_angle = float(np.sin(angle))
-        start_distance = ray_border_distance(center_x, center_y, cos_angle, sin_angle, width, height)
-
-        hit: tuple[int, int] | None = None
-        best_distance = -1.0
-        distance = start_distance
-        while distance > 0.0:
-            sample_x = int(round(center_x + distance * cos_angle))
-            sample_y = int(round(center_y + distance * sin_angle))
-            if 0 <= sample_x < width and 0 <= sample_y < height and is_hit(sample_x, sample_y):
-                if pick_outermost:
-                    if distance > best_distance:
-                        best_distance = distance
-                        hit = (sample_x, sample_y)
-                else:
-                    hit = (sample_x, sample_y)
-                    break
-            distance -= edge_step
-
-        if hit is not None:
-            points.append(hit)
-
-    if len(points) < 8:
-        return np.empty((0, 2), dtype=np.int32)
-    return np.asarray(points, dtype=np.int32)
-
-
-def trace_alpha_boundary(
-    alpha: np.ndarray,
-    center_x: float,
-    center_y: float,
-    *,
-    num_rays: int,
-    edge_step: float,
-    threshold: int = ALPHA_THRESHOLD,
-) -> np.ndarray:
-    """Trace the outer silhouette using the alpha channel."""
-    height, width = alpha.shape
-
-    def is_opaque(sample_x: int, sample_y: int) -> bool:
-        return int(alpha[sample_y, sample_x]) >= threshold
-
-    return trace_boundary_rays(
-        center_x,
-        center_y,
-        width,
-        height,
-        num_rays=num_rays,
-        edge_step=edge_step,
-        is_hit=is_opaque,
-        pick_outermost=False,
+    """Close detected edge loops and fill them to form separate regions."""
+    gray = build_grayscale(rgba)
+    edges = detect_edges(
+        gray,
+        canny_low=canny_low,
+        canny_high=canny_high,
+        blur=blur,
+        use_gradient=use_gradient,
     )
+    if content_mask is not None:
+        edges = cv2.bitwise_and(edges, content_mask)
+
+    close_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+    closed = cv2.morphologyEx(edges, cv2.MORPH_CLOSE, close_kernel, iterations=close_iterations)
+    return build_foreground_mask_from_closed_edges(closed)
 
 
-def trace_outer_boundary(
-    edges: np.ndarray,
-    center_x: float,
-    center_y: float,
+def extract_region_masks(
+    rgba: np.ndarray,
     *,
-    num_rays: int,
-    edge_step: float,
-) -> np.ndarray:
-    """Return Nx2 int32 polygon vertices on the outermost detected edge."""
-    height, width = edges.shape
+    edge_source: str,
+    bg_tolerance: int,
+    canny_low: int,
+    canny_high: int,
+    blur: int,
+    use_gradient: bool,
+    min_area: int,
+    min_items: int,
+) -> tuple[list[np.ndarray], np.ndarray | None, str | None]:
+    """Detect top-level outer regions from edges and/or silhouette."""
+    resolved_source = resolve_edge_source(edge_source, rgba)
+    height, width = rgba.shape[:2]
+    content_mask = build_foreground_mask(rgba, bg_tolerance=bg_tolerance)
+    shared_edges: np.ndarray | None = None
+    region_masks: list[np.ndarray] = []
+    split_note: str | None = None
 
-    def is_edge(sample_x: int, sample_y: int) -> bool:
-        return int(edges[sample_y, sample_x]) > 0
+    if edge_source in ("auto", "canny"):
+        edge_regions = build_edge_region_mask(
+            rgba,
+            canny_low=canny_low,
+            canny_high=canny_high,
+            blur=blur,
+            use_gradient=use_gradient,
+            content_mask=content_mask if edge_source == "silhouette" else None,
+        )
+        gray = build_grayscale(rgba)
+        shared_edges = detect_edges(
+            gray,
+            canny_low=canny_low,
+            canny_high=canny_high,
+            blur=blur,
+            use_gradient=use_gradient,
+        )
+        region_masks = pick_top_level_region_masks(edge_regions, min_area)
 
-    return trace_boundary_rays(
-        center_x,
-        center_y,
-        width,
-        height,
-        num_rays=num_rays,
-        edge_step=edge_step,
-        is_hit=is_edge,
-        pick_outermost=True,
-    )
+    if not region_masks and resolved_source in ("auto", "alpha", "silhouette"):
+        closed_content = close_mask_gaps(content_mask, width, height)
+        region_masks = pick_top_level_region_masks(closed_content, min_area)
 
+    if min_items > 0 and len(region_masks) < min_items:
+        initial_count = len(region_masks) or len(find_foreground_components(content_mask, min_area))
+        refined_masks, split_note = refine_component_masks(
+            content_mask,
+            min_area,
+            min_items,
+            initial_count=initial_count,
+        )
+        if len(refined_masks) >= min_items:
+            region_masks = refined_masks
 
-def smooth_boundary_polar(
-    boundary: np.ndarray,
-    center_x: float,
-    center_y: float,
-    *,
-    window: int,
-) -> np.ndarray:
-    if boundary.shape[0] < 8 or window < 3:
-        return boundary
-
-    vectors = boundary.astype(np.float64) - np.array([center_x, center_y], dtype=np.float64)
-    angles = np.arctan2(vectors[:, 1], vectors[:, 0])
-    radii = np.linalg.norm(vectors, axis=1)
-
-    order = np.argsort(angles)
-    angles = angles[order]
-    radii = radii[order]
-
-    # Wrap radii for circular smoothing.
-    padded = np.concatenate([radii, radii, radii])
-    kernel = np.ones(window, dtype=np.float64) / float(window)
-    smoothed = np.convolve(padded, kernel, mode="same")[len(radii) : 2 * len(radii)]
-
-    x = center_x + smoothed * np.cos(angles)
-    y = center_y + smoothed * np.sin(angles)
-    return np.column_stack([x, y]).astype(np.int32)
+    return region_masks, shared_edges, split_note
 
 
 def boundary_polar_coords(
@@ -518,23 +654,13 @@ def fit_boundary(
     *,
     fit: int,
     num_samples: int,
-    boundary_mode: str,
 ) -> np.ndarray:
-    if boundary_mode == BOUNDARY_MODE_CONTOUR:
-        smooth_window = resolve_contour_smooth_window(fit)
-        if smooth_window >= 3:
-            return smooth_contour(boundary, smooth_window)
-        return boundary
-
-    smooth_window, poly_degree = resolve_fit_parameters(fit)
+    smooth_window = resolve_contour_smooth_window(fit)
     fitted = boundary
     if smooth_window >= 3:
-        fitted = smooth_boundary_polar(
-            fitted,
-            center_x,
-            center_y,
-            window=smooth_window,
-        )
+        fitted = smooth_contour(fitted, smooth_window)
+
+    _smooth_window, poly_degree = resolve_fit_parameters(fit)
     if poly_degree > 0:
         fitted = smooth_boundary_polynomial(
             fitted,
@@ -546,94 +672,65 @@ def fit_boundary(
     return fitted
 
 
-def offset_boundary_inward(
-    boundary: np.ndarray,
-    center_x: float,
-    center_y: float,
-    pixels: float,
-) -> np.ndarray:
-    """Move each boundary point toward the center by `pixels` (strip outer rim)."""
-    if pixels <= 0.0 or boundary.shape[0] < 3:
-        return boundary
-
-    vectors = boundary.astype(np.float64) - np.array([center_x, center_y], dtype=np.float64)
-    angles = np.arctan2(vectors[:, 1], vectors[:, 0])
-    radii = np.maximum(np.linalg.norm(vectors, axis=1) - pixels, 1.0)
-    x = center_x + radii * np.cos(angles)
-    y = center_y + radii * np.sin(angles)
-    return np.column_stack([x, y]).astype(np.int32)
-
-
 @dataclass
 class OuterEdgeDetection:
     edges: np.ndarray | None
-    foreground_mask: np.ndarray | None
+    foreground_mask: np.ndarray
     raw_boundary: np.ndarray
     outer_boundary: np.ndarray
     center_x: float
     center_y: float
     edge_source: str
-    boundary_mode: str
+    item_index: int = 0
+    item_count: int = 1
 
 
-def resolve_boundary_mode(foreground_mask: np.ndarray) -> str:
-    foreground = np.argwhere(foreground_mask > 0)
-    if foreground.shape[0] == 0:
-        return BOUNDARY_MODE_POLAR
-
-    ys = foreground[:, 0]
-    xs = foreground[:, 1]
-    width = int(xs.max() - xs.min() + 1)
-    height = int(ys.max() - ys.min() + 1)
-    aspect = max(width, height) / max(1, min(width, height))
-    if aspect > 1.35:
-        return BOUNDARY_MODE_CONTOUR
-    return BOUNDARY_MODE_POLAR
-
-
-def trace_raw_boundary(
-    rgba: np.ndarray,
-    foreground_mask: np.ndarray | None,
-    edges: np.ndarray | None,
-    center_x: float,
-    center_y: float,
-    *,
-    edge_source: str,
-    num_rays: int,
-    edge_step: float,
-    boundary_mode: str,
-) -> np.ndarray:
-    if edge_source in ("alpha", "silhouette") and foreground_mask is not None:
-        if boundary_mode == BOUNDARY_MODE_CONTOUR:
-            return trace_contour_boundary(foreground_mask)
-        return trace_alpha_boundary(
-            foreground_mask,
-            center_x,
-            center_y,
-            num_rays=num_rays,
-            edge_step=edge_step,
-            threshold=1,
-        )
-    if edge_source == "alpha":
-        return trace_alpha_boundary(
-            rgba[..., 3],
-            center_x,
-            center_y,
-            num_rays=num_rays,
-            edge_step=edge_step,
-        )
-    if edges is None:
-        return np.empty((0, 2), dtype=np.int32)
-    return trace_outer_boundary(
-        edges,
-        center_x,
-        center_y,
-        num_rays=num_rays,
-        edge_step=edge_step,
-    )
+@dataclass
+class ProcessedItem:
+    cropped: np.ndarray
+    detection: OuterEdgeDetection
+    raw_boundary: np.ndarray
+    fitted_boundary: np.ndarray
+    cut_boundary: np.ndarray
 
 
 def detect_outer_edge(
+    rgba: np.ndarray,
+    *,
+    region_mask: np.ndarray,
+    edge_source: str,
+    edges: np.ndarray | None,
+    num_rays: int,
+    fit: int,
+    item_index: int = 0,
+    item_count: int = 1,
+) -> OuterEdgeDetection:
+    resolved_source = resolve_edge_source(edge_source, rgba)
+    height, width = rgba.shape[:2]
+    center_x, center_y = estimate_mask_center(region_mask, width, height)
+    boundary = trace_contour_boundary(region_mask)
+    raw_boundary = boundary.copy()
+    fitted_boundary = fit_boundary(
+        boundary,
+        center_x,
+        center_y,
+        fit=fit,
+        num_samples=num_rays,
+    )
+    return OuterEdgeDetection(
+        edges=edges,
+        foreground_mask=region_mask,
+        raw_boundary=raw_boundary,
+        outer_boundary=fitted_boundary,
+        center_x=center_x,
+        center_y=center_y,
+        edge_source=resolved_source,
+        item_index=item_index,
+        item_count=item_count,
+    )
+
+
+def detect_all_items(
     rgba: np.ndarray,
     *,
     edge_source: str,
@@ -643,84 +740,65 @@ def detect_outer_edge(
     blur: int,
     use_gradient: bool,
     num_rays: int,
-    edge_step: float,
     fit: int,
-    refine_center: bool,
-) -> OuterEdgeDetection:
-    resolved_source = resolve_edge_source(edge_source, rgba)
-    edges: np.ndarray | None = None
-    foreground_mask: np.ndarray | None = None
-    boundary_mode = BOUNDARY_MODE_POLAR
-
-    if resolved_source in ("alpha", "silhouette"):
-        foreground_mask = build_foreground_mask(rgba, bg_tolerance=bg_tolerance)
-        boundary_mode = resolve_boundary_mode(foreground_mask)
-        height, width = rgba.shape[:2]
-    elif resolved_source == "canny":
-        gray = build_grayscale(rgba)
-        edges = detect_edges(
-            gray,
-            canny_low=canny_low,
-            canny_high=canny_high,
-            blur=blur,
-            use_gradient=use_gradient,
-        )
-        height, width = gray.shape
-    else:
-        height, width = rgba.shape[:2]
-
-    center_x = width * 0.5
-    center_y = height * 0.5
-
-    boundary = trace_raw_boundary(
+    min_item_area: int,
+    min_items: int,
+    max_items: int,
+) -> list[OuterEdgeDetection]:
+    """Detect and trace the outer boundary of each top-level region."""
+    height, width = rgba.shape[:2]
+    min_area = resolve_min_item_area(min_item_area, width, height)
+    region_masks, shared_edges, split_note = extract_region_masks(
         rgba,
-        foreground_mask,
-        edges,
-        center_x,
-        center_y,
-        edge_source=resolved_source,
-        num_rays=num_rays,
-        edge_step=edge_step,
-        boundary_mode=boundary_mode,
+        edge_source=edge_source,
+        bg_tolerance=bg_tolerance,
+        canny_low=canny_low,
+        canny_high=canny_high,
+        blur=blur,
+        use_gradient=use_gradient,
+        min_area=min_area,
+        min_items=min_items,
     )
-    if boundary.shape[0] < 8 and resolved_source == "canny" and edges is not None:
-        boundary = outer_boundary_from_contours(edges)
 
-    if refine_center and boundary.shape[0] >= 8 and boundary_mode == BOUNDARY_MODE_POLAR:
-        center_x, center_y = estimate_center(boundary, width, height)
-        boundary = trace_raw_boundary(
-            rgba,
-            foreground_mask,
-            edges,
-            center_x,
-            center_y,
-            edge_source=resolved_source,
-            num_rays=num_rays,
-            edge_step=edge_step,
-            boundary_mode=boundary_mode,
+    if split_note:
+        print(f"Refined item split: {split_note}", file=sys.stderr)
+
+    detected_count = len(region_masks)
+    if max_items > 0:
+        region_masks = region_masks[:max_items]
+
+    if min_items > 0 and detected_count < min_items:
+        raise ValueError(
+            f"Expected at least {min_items} item(s), detected {detected_count}"
         )
-        if boundary.shape[0] < 8 and resolved_source == "canny" and edges is not None:
-            boundary = outer_boundary_from_contours(edges)
 
-    raw_boundary = boundary.copy()
-    fitted_boundary = fit_boundary(
-        boundary,
-        center_x,
-        center_y,
-        fit=fit,
-        num_samples=num_rays,
-        boundary_mode=boundary_mode,
-    )
-    return OuterEdgeDetection(
-        edges=edges,
-        foreground_mask=foreground_mask,
-        raw_boundary=raw_boundary,
-        outer_boundary=fitted_boundary,
-        center_x=center_x,
-        center_y=center_y,
-        edge_source=resolved_source,
-        boundary_mode=boundary_mode,
-    )
+    if not region_masks:
+        empty_mask = np.zeros((height, width), dtype=np.uint8)
+        return [
+            detect_outer_edge(
+                rgba,
+                region_mask=empty_mask,
+                edge_source=edge_source,
+                edges=shared_edges,
+                num_rays=num_rays,
+                fit=fit,
+            )
+        ]
+
+    item_count = len(region_masks)
+    return [
+        detect_outer_edge(
+            rgba,
+            region_mask=region_mask,
+            edge_source=edge_source,
+            edges=shared_edges,
+            num_rays=num_rays,
+            fit=fit,
+            item_index=index,
+            item_count=item_count,
+        )
+        for index, region_mask in enumerate(region_masks)
+    ]
 
 
 def render_crop(
@@ -734,71 +812,30 @@ def render_crop(
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     height, width = rgba.shape[:2]
 
-    if detection.boundary_mode == BOUNDARY_MODE_CONTOUR:
-        if fit <= 0 and detection.foreground_mask is not None:
-            mask = detection.foreground_mask.copy()
-        elif detection.outer_boundary.shape[0] >= 3:
-            mask = boundary_mask(
-                (height, width),
-                detection.outer_boundary,
-                shrink=0,
-                expand=0,
-            )
-        elif detection.foreground_mask is not None:
-            mask = detection.foreground_mask.copy()
-        else:
-            mask = np.zeros((height, width), dtype=np.uint8)
+    if fit <= 0 and detection.foreground_mask is not None:
+        mask = detection.foreground_mask.copy()
+    elif detection.outer_boundary.shape[0] >= 3:
+        mask = boundary_mask(
+            (height, width),
+            detection.outer_boundary,
+            shrink=0,
+            expand=0,
+        )
+    else:
+        mask = detection.foreground_mask.copy()
 
-        mask = erode_mask(mask, strip_thickness)
-        if expand > 0:
-            kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
-            mask = cv2.dilate(mask, kernel, iterations=expand)
-        if shrink > 0:
-            kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
-            mask = cv2.erode(mask, kernel, iterations=shrink)
+    mask = erode_mask(mask, strip_thickness)
+    if expand > 0:
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+        mask = cv2.dilate(mask, kernel, iterations=expand)
+    if shrink > 0:
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+        mask = cv2.erode(mask, kernel, iterations=shrink)
 
-        cut_boundary = trace_contour_boundary(mask)
-        masked = apply_mask(rgba, mask)
-        cropped = crop_to_opaque_bounds(masked)
-        return cropped, detection.raw_boundary, detection.outer_boundary, cut_boundary
-
-    cut_boundary = offset_boundary_inward(
-        detection.outer_boundary,
-        detection.center_x,
-        detection.center_y,
-        strip_thickness,
-    )
-    mask = boundary_mask(
-        (height, width),
-        cut_boundary,
-        shrink=shrink,
-        expand=expand,
-    )
+    cut_boundary = trace_contour_boundary(mask)
     masked = apply_mask(rgba, mask)
     cropped = crop_to_opaque_bounds(masked)
     return cropped, detection.raw_boundary, detection.outer_boundary, cut_boundary
-
-
-def outer_boundary_from_contours(edges: np.ndarray) -> np.ndarray:
-    """Fallback: largest external contour on the edge map."""
-    closed_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
-    closed = cv2.morphologyEx(edges, cv2.MORPH_CLOSE, closed_kernel, iterations=2)
-    contours, _ = cv2.findContours(closed, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
-    if not contours:
-        return np.empty((0, 2), dtype=np.int32)
-
-    height, width = edges.shape
-    center = np.array([width * 0.5, height * 0.5], dtype=np.float64)
-    best_contour = max(contours, key=cv2.contourArea)
-    points = best_contour.reshape(-1, 2)
-
-    # Keep the outer half of the contour (farther from center than the median).
-    distances = np.linalg.norm(points.astype(np.float64) - center, axis=1)
-    threshold = np.percentile(distances, 55.0)
-    outer = points[distances >= threshold]
-    if outer.shape[0] < 8:
-        outer = points
-    return outer.astype(np.int32)
 
 
 def boundary_mask(
@@ -860,11 +897,39 @@ def resize_to_width(rgba: np.ndarray, target_width: int) -> np.ndarray:
     return np.asarray(resized)
 
 
-def estimate_center(boundary: np.ndarray, width: int, height: int) -> tuple[float, float]:
-    if boundary.shape[0] == 0:
-        return width * 0.5, height * 0.5
-    centroid = boundary.mean(axis=0)
-    return float(centroid[0]), float(centroid[1])
+def process_item(
+    rgba: np.ndarray,
+    detection: OuterEdgeDetection,
+    *,
+    fit: int,
+    strip_thickness: float,
+    shrink: int,
+    expand: int,
+) -> ProcessedItem:
+    source = rgba
+    if detection.item_count > 1 and detection.foreground_mask is not None:
+        source = rgba.copy()
+        source[..., 3] = np.where(
+            detection.foreground_mask > 0,
+            source[..., 3],
+            0,
+        ).astype(np.uint8)
+
+    cropped, raw_boundary, fitted_boundary, cut_boundary = render_crop(
+        source,
+        detection,
+        fit=fit,
+        strip_thickness=strip_thickness,
+        shrink=shrink,
+        expand=expand,
+    )
+    return ProcessedItem(
+        cropped=cropped,
+        detection=detection,
+        raw_boundary=raw_boundary,
+        fitted_boundary=fitted_boundary,
+        cut_boundary=cut_boundary,
+    )
 
 
 def process_image(
@@ -875,16 +940,17 @@ def process_image(
     blur: int,
     use_gradient: bool,
     num_rays: int,
-    edge_step: float,
     fit: int,
     strip_thickness: float,
     shrink: int,
     expand: int,
-    refine_center: bool,
     edge_source: str,
     bg_tolerance: int,
-) -> tuple[np.ndarray, np.ndarray | None, np.ndarray, np.ndarray, np.ndarray]:
-    detection = detect_outer_edge(
+    min_item_area: int,
+    min_items: int,
+    max_items: int,
+) -> tuple[list[ProcessedItem], np.ndarray | None]:
+    detections = detect_all_items(
         rgba,
         edge_source=edge_source,
         bg_tolerance=bg_tolerance,
@@ -893,19 +959,35 @@ def process_image(
         blur=blur,
         use_gradient=use_gradient,
         num_rays=num_rays,
-        edge_step=edge_step,
         fit=fit,
-        refine_center=refine_center,
+        min_item_area=min_item_area,
+        min_items=min_items,
+        max_items=max_items,
     )
-    cropped, raw_boundary, fitted_boundary, cut_boundary = render_crop(
-        rgba,
-        detection,
-        fit=fit,
-        strip_thickness=strip_thickness,
-        shrink=shrink,
-        expand=expand,
-    )
-    return cropped, detection.edges, raw_boundary, fitted_boundary, cut_boundary
+    shared_edges = detections[0].edges if detections else None
+    processed = [
+        process_item(
+            rgba,
+            detection,
+            fit=fit,
+            strip_thickness=strip_thickness,
+            shrink=shrink,
+            expand=expand,
+        )
+        for detection in detections
+    ]
+    return processed, shared_edges
+
+
+def resolve_item_limits(args: argparse.Namespace) -> tuple[int, int]:
+    """Return (min_items, max_items) from CLI args."""
+    max_items = 1 if args.single else max(0, int(args.max_items))
+    min_items = max(0, int(args.min_items))
+    if min_items > 0 and max_items > 0 and min_items > max_items:
+        raise ValueError(
+            f"--min-items ({min_items}) cannot exceed --max-items ({max_items})"
+        )
+    return min_items, max_items
 
 
 def resolve_edge_detection_args(args: argparse.Namespace) -> tuple[int, int, int, int]:
@@ -924,8 +1006,8 @@ def resolve_edge_detection_args(args: argparse.Namespace) -> tuple[int, int, int
 def parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Detect edges, trace the outermost boundary, mask outside to transparency, "
-            "and crop tightly."
+            "Detect outer edges, mask everything outside to transparency, and crop tightly. "
+            "Automatically exports one PNG per top-level region."
         )
     )
     parser.add_argument(
@@ -950,12 +1032,51 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         help="When input is a folder, include images in subfolders (preserves structure in output)",
     )
     parser.add_argument(
+        "--min-item-area",
+        type=int,
+        default=0,
+        metavar="PX",
+        help=(
+            "Minimum pixel area for a detected region to count as a separate item "
+            f"(0=auto, floor {MIN_ITEM_AREA_DEFAULT}px). "
+            "Raise this to ignore specks; lower it to split tightly packed icons."
+        ),
+    )
+    parser.add_argument(
+        "--min-items",
+        type=int,
+        default=MIN_ITEMS_DEFAULT,
+        metavar="N",
+        help=(
+            "Require at least N detected regions before exporting "
+            f"(0=no requirement, default {MIN_ITEMS_DEFAULT}). "
+            "If connected components find fewer regions, a watershed pass "
+            "is used to split touching sprite-sheet cells."
+        ),
+    )
+    parser.add_argument(
+        "--max-items",
+        type=int,
+        default=MAX_ITEMS_DEFAULT,
+        metavar="N",
+        help=(
+            "Maximum number of detected regions to export "
+            f"(0=all detected regions, default {MAX_ITEMS_DEFAULT}). "
+            "Keeps the largest regions first. Same as --single when N=1."
+        ),
+    )
+    parser.add_argument(
+        "--single",
+        action="store_true",
+        help="Only process the largest detected item (same as --max-items 1)",
+    )
+    parser.add_argument(
         "--edge-source",
         choices=EDGE_SOURCES,
         default="auto",
         help=(
-            "How to detect the outer boundary. auto=alpha for transparent PNGs, "
-            "silhouette for opaque images on a solid background, canny for edge-map mode."
+            "How to detect regions. auto=Canny edge loops on opaque images and "
+            "alpha/silhouette fallback; alpha/silhouette/canny force a single mode."
         ),
     )
     parser.add_argument(
@@ -1004,13 +1125,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         "--rays",
         type=int,
         default=720,
-        help="Number of radial samples used to trace the outer edge",
-    )
-    parser.add_argument(
-        "--edge-step",
-        type=float,
-        default=1.0,
-        help="Pixel step when marching along each ray toward the center",
+        help="Number of boundary samples used for circular fitting (--fit 6+)",
     )
     parser.add_argument(
         "--fit",
@@ -1057,11 +1172,6 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         metavar="PX",
         help="Resize output to this width in pixels (preserves aspect ratio). 0=keep cropped size.",
     )
-    parser.add_argument(
-        "--no-refine-center",
-        action="store_true",
-        help="Skip second pass after re-centering on the traced boundary",
-    )
     parser.add_argument("--debug-edges", type=Path, help="Save the edge map PNG")
     parser.add_argument(
         "--debug-boundary",
@@ -1090,14 +1200,35 @@ def draw_boundary_ring(
 def save_debug_boundary(
     path: Path,
     rgba: np.ndarray,
-    raw_boundary: np.ndarray,
-    fitted_boundary: np.ndarray,
-    cut_boundary: np.ndarray,
+    processed_items: list[ProcessedItem],
 ) -> None:
     overlay = rgba.copy()
-    draw_boundary_ring(overlay, raw_boundary, (0, 255, 0, 255), thickness=1)
-    draw_boundary_ring(overlay, fitted_boundary, (255, 180, 0, 255), thickness=1)
-    draw_boundary_ring(overlay, cut_boundary, (0, 200, 255, 255), thickness=2)
+    colors = [
+        (0, 255, 0, 255),
+        (255, 180, 0, 255),
+        (0, 200, 255, 255),
+        (255, 80, 180, 255),
+        (180, 255, 80, 255),
+        (80, 180, 255, 255),
+    ]
+    for item_index, item in enumerate(processed_items):
+        color = colors[item_index % len(colors)]
+        draw_boundary_ring(overlay, item.raw_boundary, color, thickness=1)
+        draw_boundary_ring(overlay, item.fitted_boundary, color, thickness=1)
+        draw_boundary_ring(overlay, item.cut_boundary, color, thickness=2)
+        if item.cut_boundary.shape[0] > 0:
+            label_x = int(item.cut_boundary[:, 0].mean())
+            label_y = int(item.cut_boundary[:, 1].min()) - 4
+            cv2.putText(
+                overlay,
+                f"{item_index + 1}",
+                (label_x, max(12, label_y)),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.55,
+                color,
+                2,
+                cv2.LINE_AA,
+            )
     save_rgba(path, overlay)
 
 
@@ -1118,21 +1249,29 @@ def composite_on_checker(rgba: np.ndarray) -> np.ndarray:
 
 def build_preview_frame(
     rgba: np.ndarray,
-    cropped: np.ndarray,
-    raw_boundary: np.ndarray,
-    fitted_boundary: np.ndarray,
-    cut_boundary: np.ndarray,
+    processed_items: list[ProcessedItem],
     *,
     sensitivity: int,
     strip_thickness: float,
 ) -> np.ndarray:
     overlay = rgba.copy()
-    draw_boundary_ring(overlay, raw_boundary, (0, 255, 0, 255), thickness=1)
-    draw_boundary_ring(overlay, fitted_boundary, (255, 180, 0, 255), thickness=1)
-    draw_boundary_ring(overlay, cut_boundary, (0, 200, 255, 255), thickness=2)
+    colors = [
+        (0, 255, 0, 255),
+        (255, 180, 0, 255),
+        (0, 200, 255, 255),
+        (255, 80, 180, 255),
+        (180, 255, 80, 255),
+        (80, 180, 255, 255),
+    ]
+    for item_index, item in enumerate(processed_items):
+        color = colors[item_index % len(colors)]
+        draw_boundary_ring(overlay, item.raw_boundary, color, thickness=1)
+        draw_boundary_ring(overlay, item.fitted_boundary, color, thickness=1)
+        draw_boundary_ring(overlay, item.cut_boundary, color, thickness=2)
 
     left = composite_on_checker(overlay)
-    right = composite_on_checker(cropped)
+    preview_item = processed_items[0]
+    right = composite_on_checker(preview_item.cropped)
 
     gap = 12
     header = 36
@@ -1147,8 +1286,8 @@ def build_preview_frame(
     frame[header : header + right.shape[0], left.shape[1] + gap :] = right_bgr
 
     label = (
-        f"sens={sensitivity}  strip={strip_thickness:.0f}px  green=raw  orange=fit  "
-        f"cyan=cut  |  S save  Q quit"
+        f"items={len(processed_items)}  sens={sensitivity}  strip={strip_thickness:.0f}px  "
+        f"left=all traces  right=item 1 crop  |  S save  Q quit"
     )
     cv2.putText(frame, label, (10, 24), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (230, 230, 230), 1, cv2.LINE_AA)
     return frame
@@ -1161,9 +1300,7 @@ def interactive_strip_preview(
     blur: int,
     use_gradient: bool,
     num_rays: int,
-    edge_step: float,
     fit: int,
-    refine_center: bool,
     initial_sensitivity: int,
     initial_strip: float,
     shrink: int,
@@ -1171,6 +1308,9 @@ def interactive_strip_preview(
     canny_low_override: int | None,
     canny_high_override: int | None,
     bg_tolerance_override: int | None,
+    min_item_area: int,
+    min_items: int,
+    max_items: int,
 ) -> tuple[int, float] | None:
     window = "Edge crop preview"
     max_strip = max(40, min(rgba.shape[:2]) // 3)
@@ -1195,13 +1335,13 @@ def interactive_strip_preview(
     selected_sensitivity = initial_sensitivity
     selected_strip = float(initial_strip)
     cached_sensitivity = -1
-    detection: OuterEdgeDetection | None = None
+    processed_items: list[ProcessedItem] | None = None
 
     while True:
         sensitivity = int(cv2.getTrackbarPos("sensitivity", window))
         strip = float(cv2.getTrackbarPos("strip thickness px", window))
 
-        if detection is None or sensitivity != cached_sensitivity:
+        if processed_items is None or sensitivity != cached_sensitivity:
             canny_low, canny_high, bg_tolerance = resolve_sensitivity_parameters(sensitivity)
             if canny_low_override is not None:
                 canny_low = canny_low_override
@@ -1209,35 +1349,41 @@ def interactive_strip_preview(
                 canny_high = canny_high_override
             if bg_tolerance_override is not None:
                 bg_tolerance = max(1, bg_tolerance_override)
-            detection = detect_outer_edge(
+            processed_items, _ = process_image(
                 rgba,
-                edge_source=edge_source,
-                bg_tolerance=bg_tolerance,
                 canny_low=canny_low,
                 canny_high=canny_high,
                 blur=blur,
                 use_gradient=use_gradient,
                 num_rays=num_rays,
-                edge_step=edge_step,
                 fit=fit,
-                refine_center=refine_center,
+                strip_thickness=strip,
+                shrink=shrink,
+                expand=expand,
+                edge_source=edge_source,
+                bg_tolerance=bg_tolerance,
+                min_item_area=min_item_area,
+                min_items=min_items,
+                max_items=max_items,
             )
             cached_sensitivity = sensitivity
+        else:
+            detections = [item.detection for item in processed_items]
+            processed_items = [
+                process_item(
+                    rgba,
+                    detection,
+                    fit=fit,
+                    strip_thickness=strip,
+                    shrink=shrink,
+                    expand=expand,
+                )
+                for detection in detections
+            ]
 
-        cropped, raw_boundary, fitted_boundary, cut_boundary = render_crop(
-            rgba,
-            detection,
-            fit=fit,
-            strip_thickness=strip,
-            shrink=shrink,
-            expand=expand,
-        )
         frame = build_preview_frame(
             rgba,
-            cropped,
-            raw_boundary,
-            fitted_boundary,
-            cut_boundary,
+            processed_items,
             sensitivity=sensitivity,
             strip_thickness=strip,
         )
@@ -1267,60 +1413,73 @@ def process_single_file(
     canny_high: int,
     bg_tolerance: int,
 ) -> int:
+    min_items, max_items = resolve_item_limits(args)
     rgba = load_rgba(input_path)
-    detection = detect_outer_edge(
-        rgba,
-        edge_source=args.edge_source,
-        bg_tolerance=max(1, bg_tolerance),
-        canny_low=canny_low,
-        canny_high=canny_high,
-        blur=args.blur,
-        use_gradient=not args.no_gradient,
-        num_rays=max(64, args.rays),
-        edge_step=max(0.25, args.edge_step),
-        fit=fit,
-        refine_center=not args.no_refine_center,
-    )
-
-    cropped, raw_boundary, fitted_boundary, cut_boundary = render_crop(
-        rgba,
-        detection,
-        fit=fit,
-        strip_thickness=strip_thickness,
-        shrink=max(0, args.shrink),
-        expand=max(0, args.expand),
-    )
-    edges = detection.edges
+    try:
+        processed_items, shared_edges = process_image(
+            rgba,
+            canny_low=canny_low,
+            canny_high=canny_high,
+            blur=args.blur,
+            use_gradient=not args.no_gradient,
+            num_rays=max(64, args.rays),
+            fit=fit,
+            strip_thickness=strip_thickness,
+            shrink=max(0, args.shrink),
+            expand=max(0, args.expand),
+            edge_source=args.edge_source,
+            bg_tolerance=max(1, bg_tolerance),
+            min_item_area=max(0, args.min_item_area),
+            min_items=min_items,
+            max_items=max_items,
+        )
+    except ValueError as error:
+        print(f"Failed {input_path.name}: {error}", file=sys.stderr)
+        return 1
 
     if args.debug_edges:
-        if edges is None:
+        if shared_edges is None:
             print("Debug edges skipped: current edge source does not build a Canny map.", file=sys.stderr)
         else:
             save_rgba(
                 args.debug_edges.resolve(),
-                np.dstack([edges, edges, edges, np.full_like(edges, 255)]),
+                np.dstack([shared_edges, shared_edges, shared_edges, np.full_like(shared_edges, 255)]),
             )
     if args.debug_boundary:
-        save_debug_boundary(
-            args.debug_boundary.resolve(),
-            rgba,
-            raw_boundary,
-            fitted_boundary,
-            cut_boundary,
-        )
+        save_debug_boundary(args.debug_boundary.resolve(), rgba, processed_items)
 
-    if raw_boundary.shape[0] < 3:
-        print(f"Warning: outer edge boundary not found for {input_path.name}", file=sys.stderr)
-
+    output_paths = item_output_paths(output_path, len(processed_items))
     output_width = max(0, args.width)
-    if output_width > 0:
-        cropped = resize_to_width(cropped, output_width)
+    item_count = len(processed_items)
+    edge_source = processed_items[0].detection.edge_source if processed_items else args.edge_source
 
-    save_rgba(output_path, cropped)
-    print(
-        f"{input_path.name}: {cropped.shape[1]}x{cropped.shape[0]} -> {output_path} "
-        f"(edge source: {detection.edge_source})"
-    )
+    for item_index, (item, item_output_path) in enumerate(zip(processed_items, output_paths)):
+        if item.raw_boundary.shape[0] < 3:
+            print(
+                f"Warning: outer edge boundary not found for {input_path.name} "
+                f"(item {item_index + 1}/{item_count})",
+                file=sys.stderr,
+            )
+
+        cropped = item.cropped
+        if output_width > 0:
+            cropped = resize_to_width(cropped, output_width)
+
+        save_rgba(item_output_path, cropped)
+        if item_count == 1:
+            print(
+                f"{input_path.name}: 1 item -> {item_output_path} "
+                f"({cropped.shape[1]}x{cropped.shape[0]}, edge source: {edge_source})"
+            )
+        else:
+            print(
+                f"{input_path.name}: item {item_index + 1}/{item_count} -> {item_output_path} "
+                f"({cropped.shape[1]}x{cropped.shape[0]})"
+            )
+
+    if item_count > 1:
+        print(f"{input_path.name}: detected {item_count} item(s) (edge source: {edge_source})")
+
     return 0
 
 
@@ -1346,29 +1505,66 @@ def process_folder(input_dir: Path, args: argparse.Namespace) -> int:
     fit = max(0, min(FIT_MAX, args.fit))
     strip_thickness = max(0.0, args.strip_thickness)
     _, canny_low, canny_high, bg_tolerance = resolve_edge_detection_args(args)
+    min_items, max_items = resolve_item_limits(args)
 
     print(f"Processing {len(images)} image(s) from {input_dir}")
     print(f"Output folder: {output_dir}")
 
     failures = 0
     for image_path in images:
-        output_path = batch_output_path(
-            image_path,
-            input_dir.resolve(),
-            output_dir,
-            suffix="",
-        )
         try:
-            process_single_file(
-                image_path,
-                output_path,
-                args,
-                fit=fit,
-                strip_thickness=strip_thickness,
+            rgba = load_rgba(image_path)
+            processed_items, _ = process_image(
+                rgba,
                 canny_low=canny_low,
                 canny_high=canny_high,
-                bg_tolerance=bg_tolerance,
+                blur=args.blur,
+                use_gradient=not args.no_gradient,
+                num_rays=max(64, args.rays),
+                fit=fit,
+                strip_thickness=strip_thickness,
+                shrink=max(0, args.shrink),
+                expand=max(0, args.expand),
+                edge_source=args.edge_source,
+                bg_tolerance=max(1, bg_tolerance),
+                min_item_area=max(0, args.min_item_area),
+                min_items=min_items,
+                max_items=max_items,
             )
+            output_width = max(0, args.width)
+            item_count = len(processed_items)
+            for item_index, item in enumerate(processed_items, start=1):
+                if item_count == 1:
+                    output_path = batch_output_path(
+                        image_path,
+                        input_dir.resolve(),
+                        output_dir,
+                        suffix="",
+                    )
+                else:
+                    output_path = batch_output_path(
+                        image_path,
+                        input_dir.resolve(),
+                        output_dir,
+                        suffix="",
+                        item_index=item_index,
+                    )
+                cropped = item.cropped
+                if output_width > 0:
+                    cropped = resize_to_width(cropped, output_width)
+                save_rgba(output_path, cropped)
+                if item_count == 1:
+                    print(
+                        f"{image_path.name}: 1 item -> {output_path} "
+                        f"({cropped.shape[1]}x{cropped.shape[0]})"
+                    )
+                else:
+                    print(
+                        f"{image_path.name}: item {item_index}/{item_count} -> {output_path} "
+                        f"({cropped.shape[1]}x{cropped.shape[0]})"
+                    )
+            if item_count > 1:
+                print(f"{image_path.name}: detected {item_count} item(s)")
         except Exception as error:  # noqa: BLE001 - batch tool should continue on failure
             failures += 1
             print(f"Failed {image_path.name}: {error}", file=sys.stderr)
@@ -1383,6 +1579,12 @@ def process_folder(input_dir: Path, args: argparse.Namespace) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv or sys.argv[1:])
+
+    try:
+        min_items, max_items = resolve_item_limits(args)
+    except ValueError as error:
+        print(error, file=sys.stderr)
+        return 1
 
     input_path = args.input.resolve()
     if not input_path.exists():
@@ -1409,9 +1611,7 @@ def main(argv: list[str] | None = None) -> int:
             blur=args.blur,
             use_gradient=not args.no_gradient,
             num_rays=max(64, args.rays),
-            edge_step=max(0.25, args.edge_step),
             fit=fit,
-            refine_center=not args.no_refine_center,
             initial_sensitivity=sensitivity,
             initial_strip=strip_thickness,
             shrink=max(0, args.shrink),
@@ -1419,6 +1619,9 @@ def main(argv: list[str] | None = None) -> int:
             canny_low_override=args.canny_low,
             canny_high_override=args.canny_high,
             bg_tolerance_override=args.bg_tolerance,
+            min_item_area=max(0, args.min_item_area),
+            min_items=min_items,
+            max_items=max_items,
         )
         if picked is None:
             print("Preview cancelled.")
@@ -1451,6 +1654,10 @@ def main(argv: list[str] | None = None) -> int:
         f"(canny {canny_low}/{canny_high}, flood-tolerance {bg_tolerance})"
     )
     print(f"Strip thickness: {strip_thickness:.1f}px")
+    if min_items > 0:
+        print(f"Min items: {min_items}")
+    if max_items > 0:
+        print(f"Max items: {max_items}")
     if args.width > 0:
         print(f"Output width: {args.width}px")
     return status

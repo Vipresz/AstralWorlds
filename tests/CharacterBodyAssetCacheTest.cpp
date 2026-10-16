@@ -8,6 +8,8 @@ using Game::Character::CharacterBodyAssetCache;
 using Game::Character::ItemCatalog;
 
 TEST(CharacterBodyAssetCacheTest, LoadsDefaultBodyOnce) {
+    ASSERT_TRUE(Game::Tests::SetWorkingDirectoryToTestRuntime());
+
     ItemCatalog catalog;
     ASSERT_TRUE(catalog.Load(Game::Tests::RequireAsset("tests/fixtures/e2e_items.json").c_str()));
 

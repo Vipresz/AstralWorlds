@@ -4,6 +4,7 @@
 
 #include "ui/MenuStyle.h"
 #include "ui/ItemTooltip.h"
+#include "ui/CooldownOverlay.h"
 #include "ui/UISystem.h"
 #include "render/Texture.h"
 #include "MenuLayout.h"
@@ -12,6 +13,7 @@
 #include "core/Types.h"
 #include "systems/inventory/InventoryComponent.h"
 
+#include <array>
 #include <chrono>
 #include <functional>
 #include <memory>
@@ -39,6 +41,7 @@ class Shader;
 namespace Game {
 namespace Character {
 class CharacterInstance;
+class SkillCatalog;
 } // namespace Character
 
 namespace UI {
@@ -50,6 +53,18 @@ struct BarButtonConfig {
     float xFraction = -1.0f;
     float yFraction = -1.0f;
     float heightFraction = -1.0f;
+};
+
+struct ActionBarSlotConfig {
+    std::string skillId;
+};
+
+struct ActionBarConfig {
+    float xFraction = 0.012f;
+    float yFraction = 0.5f;
+    float slotSizePixels = 52.0f;
+    float slotSpacingPixels = 6.0f;
+    std::vector<ActionBarSlotConfig> slots;
 };
 
 struct MinimapHudConfig {
@@ -78,6 +93,7 @@ struct CharacterHudConfig {
     float xFraction = 0.015f;
     float yFraction = 0.02f;
     std::string anchor = "top_left";
+    bool movable = true;
     std::vector<CharacterHudBarConfig> bars;
 };
 
@@ -106,6 +122,7 @@ struct ChatHudConfig {
     float scrollLinesPerWheel = 1.0f;
     // Opacity when the mouse is not over the chat (0 = invisible, 1 = opaque).
     float idleAlpha = 0.5f;
+    bool movable = true;
 };
 
 struct BagItemGridConfig {
@@ -147,6 +164,7 @@ struct OverlayPanelConfig {
     BagItemGridConfig partnerTradeGrid;
     bool dragFromEdgesOnly = false;
     float dragEdgeFraction = 0.10f;
+    bool movable = true;
 };
 
 struct CloseButtonConfig {
@@ -187,6 +205,7 @@ struct CharacterMenuConfig {
     float barButtonFirstXFraction = 0.4485308173773625628217642848642f;
     float barButtonYFraction = 0.5f;
     std::vector<BarButtonConfig> barButtons;
+    ActionBarConfig actionBar;
     MinimapHudConfig minimap;
     CharacterHudConfig characterHud;
     ChatHudConfig chat;
@@ -227,11 +246,25 @@ public:
     bool IsVisible() const { return m_visible; }
     bool BlocksGameInput() const {
         return m_visible &&
-               (m_pointerOverBarUi || m_pointerOverPanelUi || m_tradePanelOpen ||
-                m_inspectPaperdollOpen);
+               (m_pointerOverBarUi || m_pointerOverActionBarUi || m_pointerOverPanelUi ||
+                m_tradePanelOpen || m_inspectPaperdollOpen);
     }
 
     const CharacterMenuConfig& GetConfig() const { return m_config; }
+
+    void BindActionBarSkills(const Game::Character::SkillCatalog& catalog);
+    const std::string* GetActionBarSkillId(size_t slotIndex) const;
+    void SetSkillActivateCallback(std::function<void(const std::string& skillId)> callback) {
+        m_skillActivateCallback = std::move(callback);
+    }
+    void SetSkillCooldownQuery(
+        std::function<Game::UI::CooldownTimerSnapshot(const std::string& skillId)> query) {
+        m_skillCooldownQuery = std::move(query);
+    }
+    void SetActionBarHighlightSkill(const std::string& skillId) {
+        m_actionBarHighlightSkillId = skillId;
+    }
+    void UpdateActionBarKeyState(Engine::Platform::Window& window);
 
     void SetPaperdollCharacter(Engine::ECS::Registry* registry,
                                Engine::EntityID characterEntity,
@@ -297,6 +330,11 @@ public:
 
     // UILayerId::Hud — bottom action bar and bar buttons (always visible in-game).
     void BuildHudChrome(struct nk_context* ctx, int screenWidth, int screenHeight);
+    void BuildActionBar(struct nk_context* ctx,
+                        struct nk_command_buffer* canvas,
+                        int screenWidth,
+                        int screenHeight,
+                        const MenuScreenLayout& layout);
 
     // UILayerId::Panels — opened manifest panels (paperdoll, bag, trade) and settings.
     void BuildOpenPanels(struct nk_context* ctx,
@@ -320,6 +358,12 @@ private:
     };
 
     LoadedBarButton* FindBarButton(const std::string& id);
+
+    struct LoadedActionBarSlot {
+        std::string skillId;
+        std::unique_ptr<Engine::Platform::Render::Texture> unpressedTexture;
+        std::unique_ptr<Engine::Platform::Render::Texture> pressedTexture;
+    };
     bool TryGetBottomBarLayout(int screenWidth,
                                int screenHeight,
                                MenuScreenLayout& outLayout,
@@ -413,6 +457,12 @@ private:
     std::unique_ptr<Engine::Platform::Render::Texture> m_paperdollRotateLeftLightTexture;
     std::unique_ptr<Engine::Platform::Render::Texture> m_paperdollRotateRightLightTexture;
     std::vector<LoadedBarButton> m_barButtons;
+    std::vector<LoadedActionBarSlot> m_actionBarSlots;
+    std::function<void(const std::string& skillId)> m_skillActivateCallback;
+    std::function<Game::UI::CooldownTimerSnapshot(const std::string& skillId)> m_skillCooldownQuery;
+    std::string m_actionBarHighlightSkillId;
+    std::array<bool, 9> m_actionBarKeyHeld{};
+    std::array<bool, 9> m_actionBarMouseHeld{};
     std::vector<LoadedOverlayPanel> m_overlayPanels;
     std::unique_ptr<Game::Character::CharacterPaperdollRenderer> m_paperdollRenderer;
     Engine::ECS::Registry* m_paperdollRegistry = nullptr;
@@ -483,6 +533,7 @@ private:
     std::chrono::steady_clock::time_point m_lastPaperdollRotateTime{};
     bool m_visible = false;
     mutable bool m_pointerOverBarUi = false;
+    mutable bool m_pointerOverActionBarUi = false;
     mutable bool m_pointerOverPanelUi = false;
 };
 
