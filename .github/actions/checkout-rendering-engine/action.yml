@@ -11,8 +11,13 @@ runs:
   steps:
     - name: Resolve RenderingEngine submodule commit
       id: rendering_engine
-      shell: bash
-      run: echo "sha=$(git ls-tree HEAD RenderingEngine | awk '{print $3}')" >> "$GITHUB_OUTPUT"
+      shell: pwsh
+      run: |
+        $line = git ls-tree HEAD RenderingEngine
+        if (-not $line) { throw "RenderingEngine submodule gitlink missing from HEAD" }
+        $sha = ($line -split '\s+', 4)[2]
+        if (-not $sha) { throw "Could not parse RenderingEngine commit from: $line" }
+        "sha=$sha" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8NoBOM
 
     - name: Checkout RenderingEngine
       uses: actions/checkout@v4
