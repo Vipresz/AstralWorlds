@@ -47,6 +47,7 @@ Thumbs.db
 
 # Log files
 *.log
+scripts/logs/
 LastCoverageResults.log
 server.log
 *_debug.log
