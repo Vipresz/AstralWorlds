@@ -21,6 +21,10 @@ jobs:
     runs-on: [self-hosted, Windows, X64]
     timeout-minutes: 90
     steps:
+      - name: Enable Git long paths
+        shell: powershell
+        run: git config --global core.longpaths true
+
       - name: Checkout
         uses: actions/checkout@v4
         with:
@@ -31,8 +35,12 @@ jobs:
         with:
           token: ${{ secrets.REPO_PAT }}
 
+      - name: Bootstrap RenderingEngine libs
+        shell: powershell
+        run: ./tools/ci/bootstrap_game_libs.ps1 -GameLibsPath RenderingEngine/libs
+
       - name: Verify engine libs
-        shell: pwsh
+        shell: powershell
         run: |
           $glm = "RenderingEngine/libs/glm-1.0.2/glm/glm.hpp"
           $glfw = "RenderingEngine/libs/glfw-3.4/include/GLFW/glfw3.h"
@@ -54,14 +62,14 @@ jobs:
         run: cmake --build build --config Release --target Game GameServer GameTests --parallel
 
       - name: Verify binaries
-        shell: pwsh
+        shell: powershell
         run: |
           if (-not (Test-Path "build/bin/Release/game.exe")) { throw "game.exe missing" }
           if (-not (Test-Path "build/bin/Release/game_server.exe")) { throw "game_server.exe missing" }
           Write-Host "Game and server binaries built successfully."
 
       - name: Smoke test game.exe
-        shell: pwsh
+        shell: powershell
         working-directory: build/bin/Release
         run: |
           $proc = Start-Process -FilePath ".\game.exe" -ArgumentList "--smoke-test" -PassThru -Wait -NoNewWindow
@@ -69,14 +77,14 @@ jobs:
           Write-Host "game.exe smoke test passed."
 
       - name: Game unit tests
-        shell: pwsh
+        shell: powershell
         working-directory: build/bin/Release
         run: |
           ctest --test-dir ../.. -C Release --output-on-failure --exclude-regex "GameNetworkE2ETest"
           if ($LASTEXITCODE -ne 0) { throw "Game unit tests failed with exit code $LASTEXITCODE" }
 
       - name: Game e2e tests
-        shell: pwsh
+        shell: powershell
         working-directory: build/bin/Release
         run: |
           ./GameTests.exe --gtest_filter=GameNetworkE2ETest.ConnectLoadCharacterAndMeasureMovementAck:GameNetworkE2ETest.BroadcastsChatBetweenPlayers:CharacterLoadE2ETest.*:ChatInputFocusTest.*:GameMenusManifestTest.*
