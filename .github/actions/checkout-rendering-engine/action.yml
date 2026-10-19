@@ -11,13 +11,23 @@ runs:
   steps:
     - name: Resolve RenderingEngine submodule commit
       id: rendering_engine
-      shell: pwsh
+      shell: python
       run: |
-        $line = git ls-tree HEAD RenderingEngine
-        if (-not $line) { throw "RenderingEngine submodule gitlink missing from HEAD" }
-        $sha = ($line -split '\s+', 4)[2]
-        if (-not $sha) { throw "Could not parse RenderingEngine commit from: $line" }
-        "sha=$sha" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8NoBOM
+        import os
+        import subprocess
+
+        line = subprocess.check_output(
+            ["git", "ls-tree", "HEAD", "RenderingEngine"],
+            text=True,
+        ).strip()
+        if not line:
+            raise SystemExit("RenderingEngine submodule gitlink missing from HEAD")
+        parts = line.split()
+        if len(parts) < 3:
+            raise SystemExit(f"Could not parse RenderingEngine commit from: {line}")
+        sha = parts[2]
+        with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as out:
+            out.write(f"sha={sha}\n")
 
     - name: Checkout RenderingEngine
       uses: actions/checkout@v4
