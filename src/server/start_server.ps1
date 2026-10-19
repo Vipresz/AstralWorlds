@@ -33,4 +33,4 @@ if (-not (Test-Path $serverExe)) {
 Write-Host "Starting AstralWorlds server on port $Port ($Config)..." -ForegroundColor Green
 Write-Host "Clients: game.exe --name YourName --host 127.0.0.1 --port $Port" -ForegroundColor DarkGray
 
-& $serverExe --port $Port
+& $serverExe --dev-open-login --port $Port

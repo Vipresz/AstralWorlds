@@ -69,12 +69,53 @@ GameNetworkConfig GameNetworkConfig::ParseCommandLine(int argc, char* argv[]) {
                 config.useTls = true;
                 ++i;
             }
+        } else if (arg == "--tls-server-name") {
+            const std::string value = ArgValue(argc, argv, i);
+            if (!value.empty()) {
+                config.tlsServerName = value;
+                config.useTls = true;
+                ++i;
+            }
         } else if (arg == "--offline" || arg == "--no-network") {
             config.enabled = false;
+        } else if (arg == "--smoke-test") {
+            config.smokeTest = true;
+            config.enabled = false;
+        } else if (arg == "--e2e-test") {
+            config.e2eTest = true;
+            config.enabled = true;
+        } else if (arg == "--e2e-seconds") {
+            const std::string value = ArgValue(argc, argv, i);
+            if (!value.empty()) {
+                config.e2eRunSeconds = std::atoi(value.c_str());
+                ++i;
+            }
+        } else if (arg == "--e2e-movement-samples") {
+            const std::string value = ArgValue(argc, argv, i);
+            if (!value.empty()) {
+                config.e2eMovementSamples = std::atoi(value.c_str());
+                ++i;
+            }
+        } else if (arg == "--e2e-report") {
+            const std::string value = ArgValue(argc, argv, i);
+            if (!value.empty()) {
+                config.e2eReportPath = value;
+                ++i;
+            }
         }
     }
 
     return config;
+}
+
+std::string GameNetworkConfig::ResolveTlsServerName() const {
+    if (!tlsServerName.empty()) {
+        return tlsServerName;
+    }
+    if (serverHost == "127.0.0.1" || serverHost == "::1") {
+        return "localhost";
+    }
+    return serverHost;
 }
 
 } // namespace Game

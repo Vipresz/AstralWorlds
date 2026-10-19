@@ -1,0 +1,19 @@
+{
+  "id": "knee_kick",
+  "name": "Knee Kick",
+  "animation": "graphics/Models/character/animation/combat/fighter/knee.fbx",
+  "duration_seconds": 1.0,
+  "cooldown_seconds": 2.5,
+  "full_body": false,
+  "damage": 18,
+  "damage_delay_seconds": 0.45,
+  "target": "enemy",
+  "area": {
+    "shape": "cone",
+    "range": 1.8,
+    "angle_degrees": 55
+  },
+  "icon_unpressed": "skills/combat/fighter/unpressed/knee_kick.png",
+  "icon_pressed": "skills/combat/fighter/pressed/knee_kick.png",
+  "hotkey": "2"
+}

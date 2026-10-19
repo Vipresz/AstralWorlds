@@ -1,0 +1,19 @@
+{
+  "id": "punch",
+  "name": "Punch",
+  "animation": "graphics/Models/character/animation/combat/fighter/punching.fbx",
+  "duration_seconds": 1.0,
+  "cooldown_seconds": 2.0,
+  "full_body": false,
+  "damage": 12,
+  "damage_delay_seconds": 0.35,
+  "target": "enemy",
+  "area": {
+    "shape": "cone",
+    "range": 2.2,
+    "angle_degrees": 70
+  },
+  "icon_unpressed": "skills/combat/fighter/unpressed/punch.png",
+  "icon_pressed": "skills/combat/fighter/pressed/punch.png",
+  "hotkey": "1"
+}

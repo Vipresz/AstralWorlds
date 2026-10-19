@@ -1,10 +1,11 @@
 cmake_minimum_required(VERSION 3.22)
 
-# Enable OBJCXX on macOS for Objective-C++ support (needed for Gear 360 Bluetooth)
+# Enable OBJCXX on macOS for Objective-C++ support (needed for Gear 360 Bluetooth).
+# C is required for mbedTLS when Platform TLS is enabled (Linux game/server CI).
 if(APPLE)
-    project(GameEngine VERSION 0.1.1 LANGUAGES CXX OBJCXX)
+    project(GameEngine VERSION 0.1.1 LANGUAGES C CXX OBJCXX)
 else()
-    project(GameEngine VERSION 0.1.1 LANGUAGES CXX)
+    project(GameEngine VERSION 0.1.1 LANGUAGES C CXX)
 endif()
 
 # C++ Standard
@@ -60,7 +61,7 @@ endif()
 if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/RenderingEngine/CMakeLists.txt")
     set(BUILD_ENGINE_EXAMPLES OFF CACHE BOOL "" FORCE)
     set(BUILD_ENGINE_TESTS ${BUILD_ENGINE_TESTS} CACHE BOOL "Build RenderingEngine unit tests" FORCE)
-    if(NOT BUILD_GAME AND NOT BUILD_SKELETON_EDITOR AND BUILD_ENGINE_TESTS)
+    if(NOT BUILD_GAME AND NOT BUILD_SKELETON_EDITOR AND BUILD_ENGINE_TESTS AND NOT BUILD_GAME_TESTS)
         set(BUILD_ENGINE_PLATFORM OFF CACHE BOOL "" FORCE)
     endif()
     add_subdirectory(RenderingEngine)
@@ -73,13 +74,18 @@ endif()
 option(BUILD_GAME "Build the main game executable" ON)
 option(BUILD_SKELETON_EDITOR "Build the skeleton editor" ON)
 option(BUILD_ENGINE_TESTS "Build RenderingEngine unit tests" ON)
+option(BUILD_GAME_TESTS "Build AstralWorlds game e2e tests" ON)
 
-if(BUILD_ENGINE_TESTS)
+if(BUILD_ENGINE_TESTS OR BUILD_GAME_TESTS)
     enable_testing()
 endif()
 
 if(BUILD_GAME AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/src/CMakeLists.txt")
     add_subdirectory(src)
+endif()
+
+if(BUILD_GAME_TESTS AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/CMakeLists.txt")
+    add_subdirectory(tests)
 endif()
 
 if(BUILD_SKELETON_EDITOR AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/editors/skeleton/CMakeLists.txt")

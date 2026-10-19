@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cctype>
+#include <cstdlib>
 #include <fstream>
 #include <sstream>
 #include <string>
@@ -23,6 +24,37 @@ inline const char* SkipJsonWhitespace(const char* cursor) {
         ++cursor;
     }
     return cursor;
+}
+
+inline bool JsonTryGetUInt(const std::string& json, const char* key, uint32_t& out) {
+    const std::string needle = std::string("\"") + key + "\"";
+    const size_t keyPos = json.find(needle);
+    if (keyPos == std::string::npos) {
+        return false;
+    }
+
+    const size_t colonPos = json.find(':', keyPos + needle.size());
+    if (colonPos == std::string::npos) {
+        return false;
+    }
+
+    size_t cursor = colonPos + 1;
+    while (cursor < json.size() && std::isspace(static_cast<unsigned char>(json[cursor]))) {
+        ++cursor;
+    }
+    if (cursor >= json.size()) {
+        return false;
+    }
+
+    const char* start = json.c_str() + cursor;
+    char* end = nullptr;
+    const unsigned long value = std::strtoul(start, &end, 10);
+    if (end == start) {
+        return false;
+    }
+
+    out = static_cast<uint32_t>(value);
+    return true;
 }
 
 inline bool JsonTryGetString(const std::string& json, const char* key, std::string& out) {

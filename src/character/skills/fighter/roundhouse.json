@@ -1,0 +1,18 @@
+{
+  "id": "roundhouse",
+  "name": "Roundhouse",
+  "animation": "graphics/Models/character/animation/combat/fighter/roundhouse.fbx",
+  "duration_seconds": 1.0,
+  "cooldown_seconds": 3.0,
+  "full_body": true,
+  "damage": 24,
+  "damage_delay_seconds": 0.5,
+  "target": "enemy",
+  "area": {
+    "shape": "sphere",
+    "radius": 2.5
+  },
+  "icon_unpressed": "skills/combat/fighter/unpressed/roundhouse.png",
+  "icon_pressed": "skills/combat/fighter/pressed/roundhouse.png",
+  "hotkey": "3"
+}

@@ -1,8 +1,8 @@
 #pragma once
 
+#include "character/CharacterBodyAssetCache.h"
 #include "core/Types.h"
 #include "core/ecs/Registry.h"
-#include "render/Animation.h"
 #include "render/Model.h"
 #include "render/Skeleton.h"
 
@@ -24,7 +24,7 @@ public:
     float height = 0.0f;
     float bottomY = 0.0f;
 
-    Engine::Platform::Render::Model* GetBodyModel() const { return m_bodyModel.get(); }
+    Engine::Platform::Render::Model* GetBodyModel() const;
     bool HasSkinnedBody() const;
     float GetHeadHeightOffset() const;
 
@@ -36,18 +36,11 @@ public:
 private:
     friend class CharacterLoader;
 
-    std::unique_ptr<Engine::Platform::Render::Model> m_bodyModel;
-    std::unique_ptr<Engine::Platform::Render::Skeleton> m_skeleton;
-    std::unique_ptr<Engine::Platform::Render::Animation> m_idleAnimation;
-    std::unique_ptr<Engine::Platform::Render::Animation> m_walkingAnimation;
-    std::unique_ptr<Engine::Platform::Render::Animation> m_runningAnimation;
-    std::unique_ptr<Engine::Platform::Render::Animation> m_jumpAnimation;
-    std::unique_ptr<Engine::Platform::Render::Animation> m_jumpMovingAnimation;
-    std::unique_ptr<Engine::Platform::Render::Animation> m_fallingAnimation;
-    std::unique_ptr<Engine::Platform::Render::Animation> m_landingAnimation;
-    std::unique_ptr<Engine::Platform::Render::Animation> m_leftTurnAnimation;
-    std::unique_ptr<Engine::Platform::Render::Animation> m_rightTurnAnimation;
-    std::vector<std::unique_ptr<Engine::Platform::Render::Model>> m_itemModels;
+    void SetBodyAssets(std::shared_ptr<const CharacterBodyAssets> assets);
+
+    std::shared_ptr<const CharacterBodyAssets> m_bodyAssets;
+    std::unique_ptr<Engine::Platform::Render::Skeleton> m_instanceSkeleton;
+    std::vector<std::shared_ptr<Engine::Platform::Render::Model>> m_itemModels;
     std::vector<Engine::EntityID> m_equipmentEntities;
 };
 

@@ -5,11 +5,19 @@
 #include "character/EquipmentRules.h"
 #include "character/ItemCatalog.h"
 
+#include <memory>
+#include <vector>
+
 namespace Engine {
+namespace Platform {
+namespace Render {
+class Model;
+}
+}
 namespace ECS {
 class Registry;
 }
-} // namespace Engine
+}
 
 namespace Game {
 namespace Character {
@@ -22,6 +30,7 @@ public:
     CharacterLoader(ItemCatalog& catalog, EquipmentRules& rules, ICharacterDatabase& database);
 
     bool FetchLoginLoadout(const CharacterLoginContext& context, CharacterLoadout& out);
+    bool BuildDefaultLoadout(CharacterLoadout& out) const;
     bool ApplyLoadout(Engine::ECS::Registry& registry,
                       CharacterInstance& instance,
                       Engine::EntityID rootEntity,
@@ -46,8 +55,7 @@ private:
     bool AttachEquipment(Engine::ECS::Registry& registry,
                          CharacterInstance& instance,
                          const CharacterLoadout& loadout);
-    bool LoadModelForItem(const ItemDefinition& item, std::unique_ptr<Engine::Platform::Render::Model>& outModel);
-    bool LoadSkinnedBodyAnimations(const std::string& bodyModelPath, CharacterInstance& instance);
+    bool LoadModelForItem(const ItemDefinition& item, std::shared_ptr<Engine::Platform::Render::Model>& outModel);
 
     ItemCatalog& m_catalog;
     EquipmentRules& m_rules;

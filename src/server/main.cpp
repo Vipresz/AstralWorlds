@@ -1,11 +1,24 @@
 #include "Logger.h"
 
+#include "AppPaths.h"
+#include "character/CharacterInventoryDatabase.h"
+#include "character/CharacterDatabase.h"
 #include "character/CharacterStats.h"
+#include "character/CharacterTypes.h"
+#include "character/GameItemCatalog.h"
+#include "ManifestTradeConfig.h"
+#include "core/ecs/components/PlayerItemOwnershipComponent.h"
 #include "core/network/NetTypes.h"
+#include "core/network/MovementCommand.h"
+#include "core/network/ItemCombineRecipe.h"
+#include "core/network/ShardConfig.h"
+#include "core/network/ScalePolicyConfig.h"
+#include "core/network/ServerSecurityPolicy.h"
 
 #include "network/AuthoritativeGameSimulator.h"
 
 #include "network/NetServer.h"
+#include "network/ShardPopulationReporter.h"
 
 #include "network/TlsSession.h"
 
@@ -23,6 +36,7 @@
 #include <memory>
 #include <string>
 #include <thread>
+#include <unordered_set>
 
 #include <glm/glm.hpp>
 
@@ -33,6 +47,8 @@ using Engine::Net::kDefaultPort;
 using Engine::Platform::Networking::AuthoritativeGameSimulator;
 
 using Engine::Platform::Networking::NetServer;
+
+using Engine::Platform::Networking::ShardPopulationReporter;
 
 using Engine::Platform::Networking::TlsConfig;
 
@@ -72,7 +88,17 @@ void PrintUsage(const char* program) {
 
               << "  " << program << " --heightmap <terrain.png>\n"
 
-              << "  " << program << " --tls-cert <cert.pem> --tls-key <key.pem>\n\n"
+              << "  " << program << " --auth-token <token>\n"
+              << "  " << program << " --dev-open-login\n"
+              << "  " << program << " --tls-cert <cert.pem> --tls-key <key.pem>\n"
+              << "  " << program << " --max-players <count>\n"
+              << "  " << program << " --shard-id <id>\n"
+              << "  " << program << " --redirect-host <host> --redirect-port <port>\n"
+              << "  " << program << " --scale-config <zone.json>\n"
+              << "  " << program << " --shard-soft-cap <count>\n"
+              << "  " << program << " --layer-density-threshold <count>\n"
+              << "  " << program << " --overflow-policy <LayerFirst|ShardFirst|LayerThenShard>\n"
+              << "  " << program << " --gateway-host <host> --gateway-port <port>\n\n"
 
               << "Default: authoritative ECS simulation on port " << kDefaultPort << "\n";
 
@@ -164,6 +190,10 @@ int main(int argc, char* argv[]) {
 
     logger.SetMinLevel(EngineLogging::LogLevel::LevelInfo);
 
+    if (!Game::SetWorkingDirectoryToExecutable()) {
+        LOG_WARNING("Server", "Could not set working directory to executable folder");
+    }
+
 
 
     const uint16_t port = ParsePort(argc, argv);
@@ -173,8 +203,14 @@ int main(int argc, char* argv[]) {
     const std::string tlsCertPath = ParseArgValue(argc, argv, "--tls-cert");
 
     const std::string tlsKeyPath = ParseArgValue(argc, argv, "--tls-key");
-
     const bool relayOnly = HasFlag(argc, argv, "--relay-only");
+    const bool devOpenLogin = HasFlag(argc, argv, "--dev-open-login");
+    std::string authToken = ParseArgValue(argc, argv, "--auth-token");
+    if (authToken.empty()) {
+        if (const char* envToken = std::getenv("ASTRAL_AUTH_TOKEN")) {
+            authToken = envToken;
+        }
+    }
 
 
 
@@ -190,16 +226,66 @@ int main(int argc, char* argv[]) {
 
     NetServer server;
 
+    Engine::Net::ServerSecurityPolicy securityPolicy;
+    securityPolicy.enforceAuthentication = !devOpenLogin;
+    securityPolicy.encryptUdpPayloads = !devOpenLogin;
+    securityPolicy.allowOpenLogin = devOpenLogin;
+    server.SetSecurityPolicy(securityPolicy);
+    if (!authToken.empty()) {
+        server.SetRequiredAuthToken(authToken);
+    } else if (!devOpenLogin) {
+        LOG_ERROR("Server", "Missing --auth-token or ASTRAL_AUTH_TOKEN (use --dev-open-login for local testing)");
+        return 1;
+    }
+
     std::unique_ptr<AuthoritativeGameSimulator> simulator;
+    std::unique_ptr<Game::Character::ServerLoadoutDatabase> loadoutDatabase;
+    std::unique_ptr<Game::Character::CharacterInventoryDatabase> inventoryDatabase;
+    std::unique_ptr<Game::Character::GameItemCatalog> gameItemCatalog;
+    ShardPopulationReporter populationReporter;
+    float persistenceAccumulatorSeconds = 0.0f;
+    std::unordered_set<Engine::Net::UserId> persistedUsers;
 
     if (!relayOnly) {
 
         simulator = std::make_unique<AuthoritativeGameSimulator>(server);
 
+        gameItemCatalog = std::make_unique<Game::Character::GameItemCatalog>();
+        if (!gameItemCatalog->Load("character/game_items.json")) {
+            LOG_WARNING("Server", "Game item catalog failed to load — using default stack caps");
+        }
+        simulator->SetBagCapacity(Engine::ECS::kDefaultBagCapacity);
+        simulator->SetItemStackCapResolver(
+            [catalog = gameItemCatalog.get()](const std::string& itemId) {
+                return catalog->GetStackCap(itemId);
+            });
+        simulator->SetInventoryActionValidator(
+            [catalog = gameItemCatalog.get()](Engine::Net::InventoryActionType action,
+                                              const std::string& itemId) {
+                if (action == Engine::Net::InventoryActionType::Drop) {
+                    return !itemId.empty();
+                }
+                if (action == Engine::Net::InventoryActionType::Combine ||
+                    action == Engine::Net::InventoryActionType::Pickup) {
+                    return true;
+                }
+                return catalog->CanUseItem(itemId);
+            });
+        simulator->SetItemCombineRecipes({
+            {"maple", "silver_birch", "ember_oak", 1},
+        });
+
         simulator->SetSpawnPosition(glm::vec3(5.0f, 0.0f, 5.0f));
         Game::Character::CharacterStats characterStats;
         Game::Character::LoadCharacterStats(characterStats);
         simulator->SetMovementSpeeds(characterStats.walkSpeed, characterStats.runSpeed);
+        Game::UI::ManifestTradeConfig tradeConfig;
+        if (Game::UI::LoadManifestTradeConfig(tradeConfig)) {
+            simulator->SetTradeMaxDistance(tradeConfig.maxDistance);
+            LOG_INFO_FMT("Server",
+                         "Trade max distance set to %.1f from menus/manifest.json",
+                         tradeConfig.maxDistance);
+        }
         const std::string heightmapPath =
             ParseArgValue(argc, argv, "--heightmap").empty()
                 ? std::string("terrain/barren_scar/00.png")
@@ -215,24 +301,72 @@ int main(int argc, char* argv[]) {
 
         server.SetAuthoritativeMode(true);
 
-        server.SetClientLoggedInCallback([&simulator](Engine::Net::UserId userId, const std::string& displayName) {
+        loadoutDatabase = std::make_unique<Game::Character::ServerLoadoutDatabase>("character/loadouts");
+        LOG_INFO_FMT("Server", "Using loadout directory %s", loadoutDatabase->GetLoadoutsDirectory().c_str());
+        inventoryDatabase = std::make_unique<Game::Character::CharacterInventoryDatabase>("character/astral_worlds.db");
+        if (!inventoryDatabase->Open()) {
+            LOG_WARNING("Server", "Inventory database failed to open — persistence disabled");
+        }
 
-            if (simulator) {
+        server.SetClientLoggedInCallback([&simulator, &loadoutDatabase, &inventoryDatabase, &persistedUsers](
+                                             Engine::Net::UserId userId,
+                                             const std::string& displayName) {
+            if (!simulator || !loadoutDatabase || !inventoryDatabase) {
+                return;
+            }
+            persistedUsers.insert(userId);
 
-                simulator->OnClientLoggedIn(userId, displayName);
+            Game::Character::CharacterLoginContext loginContext;
+            loginContext.userId = userId;
+            loginContext.displayName = displayName;
 
+            Engine::Net::ReplicatedItemOwnership restoredOwnership;
+            const bool hasSavedInventory =
+                inventoryDatabase->LoadOwnership(userId, restoredOwnership) &&
+                !restoredOwnership.items.empty();
+            if (hasSavedInventory) {
+                simulator->OnClientLoggedIn(userId, displayName, {}, &restoredOwnership);
+                return;
             }
 
+            Game::Character::CharacterLoadout loadout;
+            loadoutDatabase->FetchLoadout(loginContext, loadout);
+
+            std::vector<std::pair<std::string, uint32_t>> starterInventory;
+            starterInventory.reserve(loadout.inventory.size());
+            for (const Game::Character::LoadoutInventoryEntry& entry : loadout.inventory) {
+                starterInventory.emplace_back(entry.itemId, entry.quantity);
+            }
+
+            if (!starterInventory.empty()) {
+                LOG_INFO_FMT(
+                    "Server",
+                    "Granting %zu starter inventory stack(s) to new account %u",
+                    starterInventory.size(),
+                    userId);
+            } else {
+                LOG_WARNING_FMT(
+                    "Server",
+                    "No starter inventory configured for account %u",
+                    userId);
+            }
+
+            simulator->OnClientLoggedIn(userId, displayName, starterInventory);
         });
 
-        server.SetClientDisconnectedCallback([&simulator](Engine::Net::UserId userId) {
-
-            if (simulator) {
-
-                simulator->OnClientDisconnected(userId);
-
+        server.SetClientDisconnectedCallback([&simulator, &inventoryDatabase, &persistedUsers](
+                                                 Engine::Net::UserId userId) {
+            if (!simulator || !inventoryDatabase) {
+                return;
             }
 
+            const Engine::Net::ReplicatedItemOwnership* ownership = simulator->GetOwnedItems(userId);
+            if (ownership) {
+                inventoryDatabase->SaveOwnership(userId, *ownership);
+            }
+            persistedUsers.erase(userId);
+
+            simulator->OnClientDisconnected(userId);
         });
 
         server.SetGenericDataInterceptor([&simulator](Engine::Net::UserId userId,
@@ -241,6 +375,11 @@ int main(int argc, char* argv[]) {
 
             return simulator && simulator->HandleGenericData(userId, payload);
 
+        });
+
+        server.SetMovementCommandInterceptor([&simulator](Engine::Net::UserId userId,
+                                                          Engine::Net::MovementCommand& command) {
+            return simulator && simulator->HandleMovementCommand(userId, command);
         });
 
     }
@@ -282,6 +421,78 @@ int main(int argc, char* argv[]) {
     }
 
 
+
+    Engine::Net::ShardConfig shardConfig;
+    Engine::Net::ScalePolicyConfig scalePolicy;
+    const std::string scaleConfigPath = ParseArgValue(argc, argv, "--scale-config");
+    if (!scaleConfigPath.empty()) {
+        Engine::Net::ZoneScaleConfig zoneConfig;
+        if (!Engine::Net::ZoneScaleConfig::TryLoadFromFile(scaleConfigPath, zoneConfig)) {
+            LOG_ERROR_FMT("Server", "Failed to load scale config: %s", scaleConfigPath.c_str());
+            return 1;
+        }
+        shardConfig = zoneConfig.shard;
+        scalePolicy = zoneConfig.scalePolicy;
+        LOG_INFO_FMT("Server", "Loaded zone scale config '%s' for zone '%s'",
+                     scaleConfigPath.c_str(),
+                     zoneConfig.zoneId.c_str());
+    }
+
+    const std::string maxPlayersArg = ParseArgValue(argc, argv, "--max-players");
+    if (!maxPlayersArg.empty()) {
+        shardConfig.maxPlayers = static_cast<uint32_t>(std::atoi(maxPlayersArg.c_str()));
+    }
+    const std::string shardIdArg = ParseArgValue(argc, argv, "--shard-id");
+    if (!shardIdArg.empty()) {
+        shardConfig.shardId = static_cast<uint32_t>(std::atoi(shardIdArg.c_str()));
+    }
+    shardConfig.redirectHost = ParseArgValue(argc, argv, "--redirect-host");
+    const std::string redirectPortArg = ParseArgValue(argc, argv, "--redirect-port");
+    if (!redirectPortArg.empty()) {
+        shardConfig.redirectTcpPort = static_cast<uint16_t>(std::atoi(redirectPortArg.c_str()));
+        shardConfig.redirectUdpPort = static_cast<uint16_t>(shardConfig.redirectTcpPort + 1);
+    }
+    server.SetShardConfig(shardConfig);
+
+    if (shardConfig.maxPlayers > 0) {
+        scalePolicy.shardHardCap = shardConfig.maxPlayers;
+    }
+    const std::string shardSoftCapArg = ParseArgValue(argc, argv, "--shard-soft-cap");
+    if (!shardSoftCapArg.empty()) {
+        scalePolicy.shardSoftCap = static_cast<uint32_t>(std::atoi(shardSoftCapArg.c_str()));
+    }
+    const std::string layerDensityArg = ParseArgValue(argc, argv, "--layer-density-threshold");
+    if (!layerDensityArg.empty()) {
+        scalePolicy.cellLayerDensityThreshold = static_cast<uint32_t>(std::atoi(layerDensityArg.c_str()));
+    }
+    const std::string overflowPolicyArg = ParseArgValue(argc, argv, "--overflow-policy");
+    if (overflowPolicyArg == "LayerFirst") {
+        scalePolicy.overflowPolicy = Engine::Net::OverflowPolicy::LayerFirst;
+    } else if (overflowPolicyArg == "ShardFirst") {
+        scalePolicy.overflowPolicy = Engine::Net::OverflowPolicy::ShardFirst;
+    } else if (overflowPolicyArg == "LayerThenShard") {
+        scalePolicy.overflowPolicy = Engine::Net::OverflowPolicy::LayerThenShard;
+    }
+    server.SetScalePolicyConfig(scalePolicy);
+
+    const std::string gatewayHost = ParseArgValue(argc, argv, "--gateway-host");
+    const std::string gatewayPortArg = ParseArgValue(argc, argv, "--gateway-port");
+    if (!gatewayHost.empty() && !gatewayPortArg.empty()) {
+        populationReporter.Configure(shardConfig.shardId,
+                                     shardConfig.maxPlayers,
+                                     shardConfig.overflowShardId,
+                                     nullptr);
+        populationReporter.SetGatewayEndpoint(gatewayHost, static_cast<uint16_t>(std::atoi(gatewayPortArg.c_str())));
+        LOG_INFO_FMT("Server",
+                     "Gateway population sync enabled via %s:%s",
+                     gatewayHost.c_str(),
+                     gatewayPortArg.c_str());
+    } else if (shardConfig.overflowShardId != 0) {
+        populationReporter.Configure(shardConfig.shardId,
+                                     shardConfig.maxPlayers,
+                                     shardConfig.overflowShardId,
+                                     nullptr);
+    }
 
     if (!server.Start("0.0.0.0", port)) {
 
@@ -339,6 +550,18 @@ int main(int argc, char* argv[]) {
 
         simulator->Update(elapsed);
 
+        populationReporter.Tick(server, static_cast<uint32_t>(server.GetLoggedInClientCount()));
+
+        persistenceAccumulatorSeconds += elapsed;
+        if (inventoryDatabase && persistenceAccumulatorSeconds >= 60.0f) {
+            persistenceAccumulatorSeconds = 0.0f;
+            for (Engine::Net::UserId userId : persistedUsers) {
+                const Engine::Net::ReplicatedItemOwnership* ownership = simulator->GetOwnedItems(userId);
+                if (ownership && !ownership->items.empty()) {
+                    inventoryDatabase->SaveOwnership(userId, *ownership);
+                }
+            }
+        }
     }
 
 

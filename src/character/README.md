@@ -17,10 +17,12 @@ Login (offline or online)
 
 | File | Purpose |
 |------|---------|
-| `items.json` | Item id → model path, slot |
+| `items.json` | Equipment item id → model path, slot |
+| `game_items.json` | Inventory item id, numeric id, icon, stack size |
 | `equipment_rules.json` | Per-slot local offset / rotation / scale |
-| `loadouts/default.json` | Fallback loadout when no user file exists |
-| `loadouts/<userId>.json` | Per-account loadout (simulates server DB in dev) |
+| `loadouts/default.json` | New-character template (body, equipment, starter inventory) |
+| `loadouts/<userId>.json` | Per-account loadout overrides (dev) |
+| `astral_worlds.db` | Local SQLite inventory DB (`accounts`, `account_inventory`) |
 
 ### Example loadout
 
@@ -30,20 +32,44 @@ Login (offline or online)
   "equipment": [
     { "item_id": "helm_starter", "slot": "head" },
     { "item_id": "sword_starter", "slot": "mainhand" }
+  ],
+  "inventory": [
+    { "item_id": "maple", "quantity": 10 }
   ]
 }
 ```
 
-Add matching entries to `items.json` with model paths under `graphics/`.
+`inventory` entries use string ids from `game_items.json` (e.g. `maple`). Offline play seeds the local bag from the loadout. Online play uses `default.json` (plus per-user overrides) as a **template for new characters only**. Returning characters load inventory rows from `character/astral_worlds.db` on the server (`account_id`, `item_id`, `quantity`). Bag slot layout stays client-side.
+
+Per-user loadouts (`loadouts/<userId>.json`) override `default.json` for body and equipment. If a user file has no `inventory` section, starter items from `default.json` are merged in.
+
+Add matching equipment entries to `items.json` with model paths under `graphics/`.
+
+Inventory materials use string ids in `game_items.json` (e.g. `gold_bar`). Those ids are the canonical network key for `PlayerItemOwnership` replication; `numeric_id` is the compact key for bag UI and crafting.
+
+## Inventory authority (online)
+
+Two engine generic-data channels — do not mix them:
+
+| Channel | When | Server rule |
+|---------|------|-------------|
+| `item_ownership` | Bag drag rearrange | Multiset must match; rejects forged totals |
+| `inventory_action` | Use / Drop from action panel | Server removes items; `CanUseItem` validator for Use |
+
+Bag UX (`src/menus/src/Menu.cpp`): left-click selects usable items; right-click opens action panel; **Use** in the panel selects only (does not consume online). Drop sends `inventory_action`. Combined use of two selected items is a local stub until recipe validation exists on the server.
+
+Wiring: `main.cpp` sets `SetInventoryActionCallback` and `SetInventoryCombinedUseCallback` on `NetworkSystem`.
 
 ## Code map
 
 | File | Role |
 |------|------|
 | `CharacterTypes.h` | `EquipSlot`, `CharacterLoadout`, login context |
-| `ItemCatalog` | Resolves item ids to models |
+| `ItemCatalog` | Resolves equipment ids to models |
+| `GameItemCatalog` | Resolves inventory ids to icons and numeric ids; string ids match engine ownership replication |
 | `EquipmentRules` | Attachment offsets per slot |
 | `ServerLoadoutDatabase` | Loads `loadouts/<userId>.json` at login |
+| `CharacterInventoryDatabase` | SQLite persistence for `account_inventory` (server) |
 | `CharacterLoader` | Fetches loadout and builds ECS entities |
 | `CharacterInstance` | Owns models + equipment entity ids |
 | `CharacterEquipmentSystem` | Parents equipment to character transform |

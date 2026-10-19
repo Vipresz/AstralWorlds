@@ -30,9 +30,15 @@ struct EquippedItem {
     EquipSlot slot = EquipSlot::Unknown;
 };
 
+struct LoadoutInventoryEntry {
+    std::string itemId;
+    uint32_t quantity = 1;
+};
+
 struct CharacterLoadout {
     std::string bodyItemId = "body_male_default";
     std::vector<EquippedItem> equipment;
+    std::vector<LoadoutInventoryEntry> inventory;
 };
 
 struct CharacterLoginContext {

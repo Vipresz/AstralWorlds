@@ -22,6 +22,9 @@ public:
 
     void Update(float deltaTime, Engine::ECS::Registry& registry, uint64_t tickNumber) override;
 
+    CharacterInstance* TryGetRemoteInstance(Engine::EntityID entityId);
+    const CharacterInstance* TryGetRemoteInstance(Engine::EntityID entityId) const;
+
 private:
     CharacterLoader& m_loader;
     Engine::Platform::Networking::Systems::NetworkSystem* m_networkSystem;

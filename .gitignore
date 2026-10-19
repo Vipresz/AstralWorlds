@@ -52,6 +52,7 @@ LastCoverageResults.log
 server.log
 *_debug.log
 *_editor_debug.log
+scripts/logs/
 
 # JSON config files (generated) — keep game manifests/loadouts
 *.json

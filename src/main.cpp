@@ -2,18 +2,42 @@
 #include "AppPaths.h"
 #include "GameNetworkConfig.h"
 #include "character/CharacterLoader.h"
+#include "character/CharacterBodyAssetCache.h"
 #include "character/CharacterDatabase.h"
 #include "character/CharacterEquipmentSystem.h"
 #include "character/CharacterStats.h"
 #include "character/ItemCatalog.h"
+#include "character/GameItemCatalog.h"
 #include "character/EquipmentRules.h"
 #include "character/NameplateComponent.h"
 #include "character/CharacterNameplateRenderer.h"
+#include "character/CharacterSpeechBubbleRenderer.h"
+#include "character/SpeechBubbleComponent.h"
 #include "ui/CharacterHud.h"
+#include "ui/ChatWindow.h"
+#include "ui/GameChatBridge.h"
+#include "ui/TradeRequestPrompt.h"
 #include "character/CharacterReplication.h"
 #include "character/CharacterReplicationComponent.h"
+#include "character/VitalsComponent.h"
+#include "character/VitalsReplication.h"
+#include "character/SkillCatalog.h"
+#include "character/SkillComponent.h"
+#include "character/SkillActivator.h"
+#include "systems/character/SkillExecutionSystem.h"
+#include "systems/character/SkillInputSystem.h"
 #include "audio/CharacterWalkAudioSystem.h"
 #include "systems/character/RemoteLoadoutApplySystem.h"
+#include "systems/character/PlayerFollowController.h"
+#include "systems/inventory/InventoryComponent.h"
+#include "systems/inventory/InventoryOwnershipSync.h"
+#include "core/ecs/components/PlayerItemOwnershipComponent.h"
+#include "core/ecs/components/PlayerTradeComponent.h"
+#include "core/network/MovementCommand.h"
+#include "core/network/InventoryAction.h"
+#include "core/network/TradeSession.h"
+#include "core/network/NetworkPayloads.h"
+#include "systems/inventory/InventoryInteraction.h"
 #include "core/ecs/Registry.h"
 #include "core/System.h"
 #include "render/Window.h"
@@ -34,16 +58,25 @@
 #include "core/network/LoadoutReplication.h"
 #include "core/network/NetworkPayloads.h"
 #include "network/systems/NetworkSystem.h"
+#include "WorldSceneBootstrap.h"
 #include "network/systems/ReplicationSystem.h"
+#include "network/ItemOwnershipReplicationBinding.h"
+#include "network/TradeReplicationBinding.h"
 #ifdef ENGINE_ENABLE_AUDIO
 #include "audio/MiniaudioBackend.h"
 #endif
 #ifdef PLATFORM_HAS_NUKLEAR
 #include "ui/UISystem.h"
 #include "ui/MenuStyle.h"
+#include "ui/UILayer.h"
 #include "MainMenu.h"
 #include "Menu.h"
 #include "ui/Minimap.h"
+#define NK_INCLUDE_FIXED_TYPES
+#define NK_INCLUDE_STANDARD_IO
+#define NK_INCLUDE_STANDARD_VARARGS
+#define NK_INCLUDE_DEFAULT_ALLOCATOR
+#include "nuklear.h"
 #include <GLFW/glfw3.h>
 #endif
 #include <memory>
@@ -53,6 +86,8 @@
 #include <string>
 #include <algorithm>
 #include <vector>
+#include <chrono>
+#include <fstream>
 #include <GLFW/glfw3.h>
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
@@ -71,7 +106,110 @@ using namespace Game::Audio;
 #ifdef PLATFORM_HAS_NUKLEAR
 using namespace Engine::Platform::UI;
 using namespace Game::UI;
+#include "ui/PlayerContextMenu.h"
+#include "ui/PlayerTargetHud.h"
+#include "ui/PlayerTargeting.h"
 #endif
+
+namespace {
+
+
+void SyncBagFromOwnership(Engine::ECS::Registry& registry,
+                          Engine::EntityID entityId,
+                          const GameItemCatalog& catalog) {
+    auto* inventory =
+        registry.GetComponent<Engine::Systems::Inventory::InventoryComponent>(entityId);
+    const auto* ownership =
+        registry.GetComponent<Engine::ECS::PlayerItemOwnershipComponent>(entityId);
+    if (!inventory || !ownership) {
+        return;
+    }
+    Game::Inventory::SyncInventoryFromOwnership(*inventory, *ownership, catalog);
+}
+
+void ApplyVitalsToHud(const VitalsComponent* vitals, Game::UI::CharacterHud& hud) {
+    if (!vitals || vitals->maxHealth <= 0.0f) {
+        hud.SetBarFill("health", 1.0f);
+    } else {
+        hud.SetBarFill("health", vitals->currentHealth / vitals->maxHealth);
+    }
+    if (!vitals || vitals->maxMana <= 0.0f) {
+        hud.SetBarFill("mana", 1.0f);
+    } else {
+        hud.SetBarFill("mana", vitals->currentMana / vitals->maxMana);
+    }
+}
+
+void PushBagOwnershipToServer(Engine::ECS::Registry& registry,
+                              Engine::EntityID entityId,
+                              const Game::Character::GameItemCatalog& catalog,
+                              const std::shared_ptr<NetworkSystem>& networkSystem,
+                              bool networkConnected) {
+    if (!networkSystem || !networkConnected) {
+        return;
+    }
+
+    auto* inventory =
+        registry.GetComponent<Engine::Systems::Inventory::InventoryComponent>(entityId);
+    auto* ownership =
+        registry.GetComponent<Engine::ECS::PlayerItemOwnershipComponent>(entityId);
+    if (!inventory || !ownership) {
+        return;
+    }
+
+    const Engine::Net::UserId ownerUserId = networkSystem->GetLocalUserId();
+    Game::Inventory::BuildOwnershipFromInventory(
+        *ownership, *inventory, catalog, ownerUserId);
+
+    const Engine::Net::ReplicatedItemOwnership replicated =
+        Game::Inventory::BuildReplicatedOwnership(*ownership);
+
+    Engine::Net::GenericDataPayload payload;
+    payload.userId = ownerUserId;
+    payload.tick = 0;
+    payload.channel = Engine::Net::kItemOwnershipChannel;
+    payload.data = replicated.Serialize().Data();
+    networkSystem->GetClient().SendGenericData(payload);
+}
+
+void SendInventoryActionToServer(const std::shared_ptr<NetworkSystem>& networkSystem,
+                                 const Engine::Net::InventoryActionCommand& command) {
+    if (!networkSystem) {
+        return;
+    }
+
+    Engine::Net::GenericDataPayload payload;
+    payload.userId = networkSystem->GetLocalUserId();
+    payload.tick = 0;
+    payload.channel = Engine::Net::kInventoryActionChannel;
+    payload.data = Engine::Net::SerializeInventoryAction(command).Data();
+    networkSystem->GetClient().SendGenericData(payload);
+}
+
+void SendInventoryActionToServer(const std::shared_ptr<NetworkSystem>& networkSystem,
+                                 Engine::Net::InventoryActionType action,
+                                 uint16_t slotIndex) {
+    Engine::Net::InventoryActionCommand command;
+    command.action = action;
+    command.slotIndex = slotIndex;
+    SendInventoryActionToServer(networkSystem, command);
+}
+
+void SendTradeCommandToServer(const std::shared_ptr<NetworkSystem>& networkSystem,
+                              const Engine::Net::TradeCommand& command) {
+    if (!networkSystem) {
+        return;
+    }
+
+    Engine::Net::GenericDataPayload payload;
+    payload.userId = networkSystem->GetLocalUserId();
+    payload.tick = 0;
+    payload.channel = Engine::Net::kTradeChannel;
+    payload.data = Engine::Net::SerializeTradeCommand(command).Data();
+    networkSystem->GetClient().SendGenericData(payload);
+}
+
+} // namespace
 
 int main(int argc, char* argv[]) {
     if (!Game::SetWorkingDirectoryToExecutable()) {
@@ -81,6 +219,44 @@ int main(int argc, char* argv[]) {
 
     const Game::GameNetworkConfig networkConfig = Game::GameNetworkConfig::ParseCommandLine(argc, argv);
 
+    const bool e2eMode = networkConfig.e2eTest;
+
+    if (networkConfig.smokeTest) {
+        EngineLogging::Logger& logger = EngineLogging::Logger::GetInstance();
+        logger.Initialize("smoke.log");
+        Window smokeWindow(64, 64);
+        if (smokeWindow.Initialize() != 0) {
+            fprintf(stderr, "Smoke test failed: window init\n");
+            return 1;
+        }
+#ifdef PLATFORM_HAS_NUKLEAR
+        UISystem uiSystem;
+        MainMenuConfig menuConfig;
+        if (!MainMenu::LoadConfig(menuConfig)) {
+            fprintf(stderr, "Smoke test failed: could not load menus/manifest.json\n");
+            return 1;
+        }
+        if (!uiSystem.Initialize(&smokeWindow, MenuStyle::Astral())) {
+            fprintf(stderr, "Smoke test failed: UISystem init\n");
+            return 1;
+        }
+        uiSystem.RegisterLayer(UILayerId::Hud, [](struct nk_context* ctx, const MenuStyle&, int, int) {
+            if (nk_begin(ctx,
+                         "smoke",
+                         nk_rect(4.0f, 4.0f, 56.0f, 20.0f),
+                         NK_WINDOW_NO_SCROLLBAR | NK_WINDOW_BACKGROUND)) {
+                nk_label(ctx, "ok", NK_TEXT_LEFT);
+            }
+            nk_end(ctx);
+        });
+        uiSystem.PresentFrame();
+        uiSystem.Shutdown();
+#endif
+        smokeWindow.swapBuffers();
+        LOG_INFO("Main", "Smoke test passed");
+        return 0;
+    }
+
     EngineLogging::Logger& logger = EngineLogging::Logger::GetInstance();
     logger.Initialize("debug.log");
     logger.SetMinLevel(EngineLogging::LogLevel::LevelInfo);
@@ -89,7 +265,7 @@ int main(int argc, char* argv[]) {
     
     try {
         LOG_INFO("Main", "Initializing window...");
-        Window mainWindow(1366, 768);
+        Window mainWindow(e2eMode ? 128 : 1366, e2eMode ? 128 : 768);
         if (mainWindow.Initialize() != 0) {
             LOG_ERROR("Main", "Failed to initialize window");
             return 1;
@@ -112,8 +288,14 @@ int main(int argc, char* argv[]) {
         menuStyle.metrics.hudFontSize = menuConfig.textSize;
         std::unique_ptr<MainMenu> mainMenu = std::make_unique<MainMenu>();
         std::unique_ptr<CharacterMenu> characterMenu = std::make_unique<CharacterMenu>();
+        std::unique_ptr<PlayerContextMenu> playerContextMenu = CreatePlayerContextMenu();
         Engine::Platform::UI::Minimap minimap;
         Game::UI::CharacterHud characterHud;
+        Game::UI::CharacterHud targetCharacterHud;
+        Game::UI::PlayerTargetHud playerTargetHud;
+        Game::UI::ChatWindow chatWindow;
+        Game::UI::GameChatBridge chatBridge;
+        Game::UI::TradeRequestPrompt tradeRequestPrompt;
         const bool menuBlocksStart = true;
         bool bootUiReady = false;
         if (uiSystem->Initialize(&mainWindow, menuStyle)) {
@@ -180,12 +362,25 @@ int main(int argc, char* argv[]) {
         Registry registry;
 
         ItemCatalog itemCatalog;
+        GameItemCatalog gameItemCatalog;
         EquipmentRules equipmentRules;
         ServerLoadoutDatabase characterDatabase;
         itemCatalog.Load();
+        if (!gameItemCatalog.Load()) {
+            LOG_WARNING("Main", "Game item catalog failed to load");
+        }
         equipmentRules.Load();
+        SkillCatalog skillCatalog;
+        if (!skillCatalog.Load()) {
+            LOG_WARNING("Main", "Skill catalog failed to load — combat skills disabled");
+        }
+        const ItemDefinition* defaultBody = itemCatalog.DefaultBody();
+        if (defaultBody && !defaultBody->modelPath.empty()) {
+            CharacterBodyAssetCache::Instance().GetOrLoad(defaultBody->id, defaultBody->modelPath);
+        }
         CharacterLoader characterLoader(itemCatalog, equipmentRules, characterDatabase);
         CharacterInstance characterInstance;
+        Game::Character::PlayerFollowController playerFollowController;
         
         LOG_INFO("Main", "Creating character entity...");
         Entity character = registry.CreateEntity();
@@ -209,6 +404,10 @@ int main(int argc, char* argv[]) {
             groundModel->CreatePlane(100.0f, 100.0f);
         }
         pumpBootLoading(0.55f, "Loading world...");
+
+        if (!Game::BootstrapWorldScene(registry)) {
+            LOG_WARNING("Main", "World scene bootstrap skipped (missing or invalid scenes/world.scene.json)");
+        }
         
         auto& groundTransform = registry.AddComponent<TransformComponent>(ground.id);
         groundTransform.SetPosition(0.0f, 0.0f, 0.0f);
@@ -238,7 +437,14 @@ int main(int argc, char* argv[]) {
 
         std::shared_ptr<NetworkSystem> networkSystem;
         std::shared_ptr<ReplicationSystem> replicationSystem;
+        std::shared_ptr<RemoteLoadoutApplySystem> remoteLoadoutSystem;
         bool characterLoaded = false;
+        std::chrono::steady_clock::time_point e2eSessionStart = std::chrono::steady_clock::now();
+        std::chrono::steady_clock::time_point e2eConnectDone{};
+        std::chrono::steady_clock::time_point e2eCharacterDone{};
+        bool e2eConnectRecorded = false;
+        bool e2eReadyRecorded = false;
+        bool e2eReportWritten = false;
 
         auto syncReplicationLoadout = [&](EntityID entityId, const CharacterLoginContext& loginContext) {
             CharacterLoadout loadout;
@@ -268,11 +474,35 @@ int main(int argc, char* argv[]) {
             if (characterLoaded) {
                 return true;
             }
-            if (!characterLoader.LoginAndBuild(registry, characterInstance, character.id, loginContext)) {
-                LOG_ERROR("Main", "Failed to build character from loadout");
+            if (mainWindow.getShouldClose()) {
+                LOG_WARNING("Main", "Character load aborted — window closed");
+                return false;
+            }
+            try {
+                if (!characterLoader.LoginAndBuild(registry, characterInstance, character.id, loginContext)) {
+                    LOG_ERROR("Main", "Failed to build character from loadout");
+                    return false;
+                }
+            } catch (const std::exception& ex) {
+                LOG_ERROR_FMT("Main", "Character load failed: %s", ex.what());
+                return false;
+            } catch (...) {
+                LOG_ERROR("Main", "Character load failed with unknown error");
                 return false;
             }
             characterInstance.WireAnimationComponent(registry);
+            if (!registry.HasComponent<VitalsComponent>(character.id)) {
+                registry.AddComponent<VitalsComponent>(character.id);
+            }
+            if (!registry.HasComponent<SkillComponent>(character.id)) {
+                registry.AddComponent<SkillComponent>(character.id);
+            }
+            if (AnimationComponent* anim = registry.GetComponent<AnimationComponent>(character.id)) {
+                CharacterStats stats;
+                LoadCharacterStats(stats);
+                anim->walkAnimReferenceSpeed = stats.walkSpeed;
+                anim->runAnimReferenceSpeed = stats.runSpeed;
+            }
             characterLoader.PlaceOnTerrain(
                 registry, character.id, characterInstance, spawnX, spawnZ, terrainHeight);
             cameraRig.SetHeightOffset(characterInstance.GetHeadHeightOffset());
@@ -285,12 +515,45 @@ int main(int argc, char* argv[]) {
             if (AnimationComponent* anim = registry.GetComponent<AnimationComponent>(character.id)) {
                 anim->groundLevel = terrainHeight;
             }
+            if (!registry.HasComponent<Engine::Systems::Inventory::InventoryComponent>(character.id)) {
+                auto& inventory = registry.AddComponent<Engine::Systems::Inventory::InventoryComponent>(
+                    character.id);
+                inventory = Engine::Systems::Inventory::InventoryComponent(24);
+            }
+
+            Engine::ECS::PlayerItemOwnershipComponent* ownership =
+                registry.GetComponent<Engine::ECS::PlayerItemOwnershipComponent>(character.id);
+            if (!ownership) {
+                ownership = &registry.AddComponent<Engine::ECS::PlayerItemOwnershipComponent>(
+                    character.id);
+            }
+
+            const Engine::Net::UserId ownerUserId =
+                loginContext.userId != Engine::Net::kInvalidUserId
+                    ? loginContext.userId
+                    : (networkSystem ? networkSystem->GetLocalUserId()
+                                     : static_cast<Engine::Net::UserId>(1));
+
+            CharacterLoadout loginLoadout;
+            if (characterLoader.FetchLoginLoadout(loginContext, loginLoadout)) {
+                if (ownership->ownedItems.empty() && !loginContext.isOnlineLogin) {
+                    Game::Inventory::ApplyLoadoutOwnership(
+                        *ownership, loginLoadout, gameItemCatalog, ownerUserId);
+                }
+            }
+            if (ownership->ownerUserId == Engine::Net::kInvalidUserId) {
+                ownership->ownerUserId = ownerUserId;
+            }
+            SyncBagFromOwnership(registry, character.id, gameItemCatalog);
             if (networkSystem) {
                 networkSystem->SetRemotePlayerModel(
                     characterInstance.GetBodyModel(), characterInstance.scale);
             }
             syncReplicationLoadout(character.id, loginContext);
             characterLoaded = true;
+            if (e2eMode) {
+                e2eCharacterDone = std::chrono::steady_clock::now();
+            }
             LOG_INFO("Main", "Local character loaded");
             return true;
         };
@@ -310,6 +573,9 @@ int main(int argc, char* argv[]) {
         if (networkConfig.enabled) {
             replicationSystem = std::make_shared<ReplicationSystem>();
             RegisterLoadoutReplication(*replicationSystem);
+            RegisterVitalsReplication(*replicationSystem);
+            Engine::Platform::Networking::RegisterItemOwnershipReplication(*replicationSystem);
+            Engine::Platform::Networking::RegisterTradeReplication(*replicationSystem);
             systemManager.RegisterSystem(replicationSystem);
             LOG_INFO("Main", "  ReplicationSystem registered");
 
@@ -323,7 +589,12 @@ int main(int argc, char* argv[]) {
             // Local transform comes from prediction + TransformState reconcile; applying
             // server EntitySnapshot transforms would stomp scale and fight prediction.
             auto applyReplicationSnapshot =
-                [networkSystem, replicationSystem, &registry](const Engine::Net::EntitySnapshot& snapshot) {
+                [networkSystem,
+                 replicationSystem,
+                 &registry,
+                 &gameItemCatalog,
+                 localCharacterId = character.id,
+                 characterMenu = characterMenu.get()](const Engine::Net::EntitySnapshot& snapshot) {
                     if (snapshot.entityId == networkSystem->GetLocalUserId()) {
                         Engine::Net::EntitySnapshot filtered = snapshot;
                         filtered.components.erase(
@@ -338,6 +609,10 @@ int main(int argc, char* argv[]) {
                                 }),
                             filtered.components.end());
                         replicationSystem->ApplyEntitySnapshot(filtered, registry);
+                        if (characterMenu) {
+                            characterMenu->CancelBagDrag();
+                        }
+                        SyncBagFromOwnership(registry, localCharacterId, gameItemCatalog);
                         return;
                     }
                     replicationSystem->ApplyEntitySnapshot(snapshot, registry);
@@ -368,7 +643,12 @@ int main(int argc, char* argv[]) {
                 });
             systemManager.RegisterSystem(networkSystem);
 
-            auto remoteLoadoutSystem = std::make_shared<RemoteLoadoutApplySystem>(
+#ifdef PLATFORM_HAS_NUKLEAR
+            chatBridge.Attach(chatWindow, networkSystem, registry, networkConfig.displayName);
+            LOG_INFO("Main", "  Chat wired to network");
+#endif
+
+            remoteLoadoutSystem = std::make_shared<RemoteLoadoutApplySystem>(
                 characterLoader, networkSystem.get(), character.id);
             systemManager.RegisterSystem(remoteLoadoutSystem);
             LOG_INFO("Main", "  RemoteLoadoutApplySystem registered");
@@ -388,6 +668,18 @@ int main(int argc, char* argv[]) {
         inputSystem->SetMovementSpeeds(characterStats.walkSpeed, characterStats.runSpeed);
         inputSystem->SetCharacterEntity(character.id);
         inputSystem->SetTerrainModel(groundModel.get());
+        inputSystem->SetFollowCancelCallback([&playerFollowController]() {
+            playerFollowController.CancelFollow("manual input");
+        });
+        inputSystem->SetFollowAutoMoveQuery([&](glm::vec3& outDirection, bool& outRun) {
+            return playerFollowController.TryGetAutoMoveDirection(
+                registry, networkSystem.get(), character.id, outDirection, outRun);
+        });
+        inputSystem->SetEscapeCallback([&playerFollowController]() {
+            if (playerFollowController.IsFollowing()) {
+                playerFollowController.CancelFollow("escape");
+            }
+        });
         systemManager.RegisterSystem(inputSystem);
         LOG_INFO("Main", "  InputSystem registered");
 
@@ -404,6 +696,9 @@ int main(int argc, char* argv[]) {
                 tls.enabled = true;
                 tls.caCertificatePath = networkConfig.tlsCaPath;
                 tls.insecureSkipVerify = networkConfig.tlsInsecure;
+                if (!networkConfig.tlsInsecure) {
+                    tls.serverName = networkConfig.ResolveTlsServerName();
+                }
                 networkSystem->SetTlsConfig(tls);
             }
         }
@@ -426,6 +721,17 @@ int main(int argc, char* argv[]) {
             std::make_shared<CharacterWalkAudioSystem>(audioSystem.get(), character.id);
         systemManager.RegisterSystem(walkAudioSystem);
         LOG_INFO("Main", "  CharacterWalkAudioSystem registered");
+
+        auto skillExecutionSystem =
+            std::make_shared<Game::Character::SkillExecutionSystem>(&skillCatalog);
+        systemManager.RegisterSystem(skillExecutionSystem);
+        LOG_INFO("Main", "  SkillExecutionSystem registered");
+
+        auto skillInputSystem =
+            std::make_shared<Game::Character::SkillInputSystem>(&mainWindow, &skillCatalog);
+        skillInputSystem->SetCharacterEntity(character.id);
+        systemManager.RegisterSystem(skillInputSystem);
+        LOG_INFO("Main", "  SkillInputSystem registered (hotkeys 1-3)");
         
         auto animationSystem = std::make_shared<AnimationSystem>();
         systemManager.RegisterSystem(animationSystem);
@@ -477,7 +783,14 @@ int main(int argc, char* argv[]) {
                     networkConfig.displayName)) {
                 networkConnected = true;
                 networkWantsConnect = false;
+                if (e2eMode) {
+                    e2eConnectDone = std::chrono::steady_clock::now();
+                    e2eConnectRecorded = true;
+                }
                 LOG_INFO_FMT("Main", "Connected to server as user %u", networkSystem->GetLocalUserId());
+#ifdef PLATFORM_HAS_NUKLEAR
+                chatBridge.SetOnline(true);
+#endif
                 pumpEnterLoading(0.55f, "Loading character...");
                 if (replicationSystem) {
                     replicationSystem->RegisterReplicatedEntity(networkSystem->GetLocalUserId(), character.id);
@@ -516,7 +829,195 @@ int main(int argc, char* argv[]) {
             if (!characterMenu->Initialize(&characterMenuConfig)) {
                 LOG_WARNING("Main", "Character menu bottom bar failed to load");
             }
+            characterMenu->BindActionBarSkills(skillCatalog);
+            characterMenu->SetSkillActivateCallback([&](const std::string& skillId) {
+                const SkillDefinition* skill = skillCatalog.Find(skillId);
+                if (skill) {
+                    SkillActivator::TryActivate(registry, character.id, skillCatalog, *skill);
+                }
+            });
+            characterMenu->SetSkillCooldownQuery([&](const std::string& skillId) {
+                Game::UI::CooldownTimerSnapshot snapshot;
+                const SkillComponent* skillComp =
+                    registry.GetComponent<SkillComponent>(character.id);
+                if (!skillComp) {
+                    return snapshot;
+                }
+                snapshot.remainingSeconds = skillComp->GetCooldownRemaining(skillId);
+                snapshot.totalSeconds = skillComp->GetCooldownTotal(skillId);
+                return snapshot;
+            });
+            skillInputSystem->SetSlotSkillResolver(
+                [characterMenu = characterMenu.get(), &skillCatalog](int slotIndex) -> const SkillDefinition* {
+                    const std::string* skillId =
+                        characterMenu->GetActionBarSkillId(static_cast<size_t>(slotIndex));
+                    if (!skillId) {
+                        return nullptr;
+                    }
+                    return skillCatalog.Find(*skillId);
+                });
             characterMenu->SetPaperdollCharacter(&registry, character.id, &shader, &characterInstance);
+            characterMenu->SetInventoryEntity(&registry, character.id);
+            characterMenu->SetInventorySyncCallback([&]() {
+                SyncBagFromOwnership(registry, character.id, gameItemCatalog);
+            });
+            characterMenu->SetInventoryMutationCallback([&]() {
+                PushBagOwnershipToServer(
+                    registry, character.id, gameItemCatalog, networkSystem, networkConnected);
+            });
+            characterMenu->SetInventoryActionCallback([&](Game::UI::CharacterMenu::BagItemAction action,
+                                                          int slotIndex) {
+                if (slotIndex < 0) {
+                    return;
+                }
+
+                if (networkConnected && networkSystem) {
+                    if (action != Game::UI::CharacterMenu::BagItemAction::Drop) {
+                        return;
+                    }
+                    SendInventoryActionToServer(
+                        networkSystem,
+                        Engine::Net::InventoryActionType::Drop,
+                        static_cast<uint16_t>(slotIndex));
+                    return;
+                }
+
+                auto* inventory =
+                    registry.GetComponent<Engine::Systems::Inventory::InventoryComponent>(
+                        character.id);
+                auto* ownership =
+                    registry.GetComponent<Engine::ECS::PlayerItemOwnershipComponent>(
+                        character.id);
+                if (!inventory || !ownership) {
+                    return;
+                }
+
+                const Engine::Net::UserId ownerUserId =
+                    ownership->ownerUserId != Engine::Net::kInvalidUserId
+                        ? ownership->ownerUserId
+                        : static_cast<Engine::Net::UserId>(1);
+
+                const bool success = Game::Inventory::ApplyDropAtSlot(
+                    *inventory, *ownership, gameItemCatalog,
+                    static_cast<size_t>(slotIndex), ownerUserId);
+                if (!success) {
+                    LOG_WARNING_FMT("Main", "Bag drop failed for slot %d", slotIndex);
+                }
+            });
+            characterMenu->SetInventoryCombinedUseCallback([&](int primarySlot, int secondarySlot) {
+                if (primarySlot < 0 || secondarySlot < 0) {
+                    return;
+                }
+
+                if (networkConnected && networkSystem) {
+                    Engine::Net::InventoryActionCommand command;
+                    command.action = Engine::Net::InventoryActionType::Combine;
+                    command.slotIndex = static_cast<uint16_t>(primarySlot);
+                    command.secondarySlotIndex = static_cast<uint16_t>(secondarySlot);
+                    SendInventoryActionToServer(networkSystem, command);
+                    return;
+                }
+
+                auto* inventory =
+                    registry.GetComponent<Engine::Systems::Inventory::InventoryComponent>(
+                        character.id);
+                auto* ownership =
+                    registry.GetComponent<Engine::ECS::PlayerItemOwnershipComponent>(
+                        character.id);
+                if (!inventory || !ownership) {
+                    return;
+                }
+
+                const Engine::Net::UserId ownerUserId =
+                    ownership->ownerUserId != Engine::Net::kInvalidUserId
+                        ? ownership->ownerUserId
+                        : static_cast<Engine::Net::UserId>(1);
+
+                const bool success = Game::Inventory::ApplyCombinedUseAtSlots(
+                    *inventory,
+                    *ownership,
+                    gameItemCatalog,
+                    static_cast<size_t>(primarySlot),
+                    static_cast<size_t>(secondarySlot),
+                    ownerUserId);
+                if (!success) {
+                    LOG_WARNING_FMT(
+                        "Main",
+                        "Combined bag item use failed for slots %d and %d",
+                        primarySlot,
+                        secondarySlot);
+                }
+            });
+            characterMenu->RequestInventorySync();
+            characterMenu->SetGameItemCatalog(&gameItemCatalog);
+            characterMenu->SetTradeCommandCallback([&](const Engine::Net::TradeCommand& command) {
+                if (networkConnected && networkSystem) {
+                    SendTradeCommandToServer(networkSystem, command);
+                }
+            });
+            tradeRequestPrompt.SetTradeCommandCallback([&](const Engine::Net::TradeCommand& command) {
+                if (networkConnected && networkSystem) {
+                    SendTradeCommandToServer(networkSystem, command);
+                }
+            });
+            playerContextMenu->SetActionCallback([&](PlayerContextAction action,
+                                                     const PlayerPickResult& target) {
+                switch (action) {
+                    case PlayerContextAction::Inspect:
+                        if (target.entity != Engine::INVALID_ENTITY && remoteLoadoutSystem) {
+                            CharacterInstance* remoteInstance =
+                                remoteLoadoutSystem->TryGetRemoteInstance(target.entity);
+                            if (remoteInstance) {
+                                characterMenu->OpenInspectPaperdoll(&registry,
+                                                                  target.entity,
+                                                                  &shader,
+                                                                  remoteInstance,
+                                                                  target.displayName);
+                            } else {
+                                LOG_WARNING_FMT("Main",
+                                                "Inspect failed — no loadout for '%s'",
+                                                target.displayName.c_str());
+                            }
+                        }
+                        break;
+                    case PlayerContextAction::Follow:
+                        if (target.userId != Engine::Net::kInvalidUserId) {
+                            playerFollowController.StartFollow(target.userId, target.displayName);
+                        } else {
+                            LOG_WARNING("Main", "Follow requires a valid remote player");
+                        }
+                        break;
+                    case PlayerContextAction::Trade:
+                        if (networkConnected && networkSystem &&
+                            target.userId != Engine::Net::kInvalidUserId) {
+                            float tradeDistance = 0.0f;
+                            if (!TryGetHorizontalDistanceBetweenEntities(
+                                    registry, character.id, target.entity, tradeDistance) ||
+                                (characterMenuConfig.tradeMaxDistance > 0.0f &&
+                                 tradeDistance > characterMenuConfig.tradeMaxDistance)) {
+                                LOG_WARNING_FMT(
+                                    "Main",
+                                    "Too far to trade with '%s' (%.1f > %.1f)",
+                                    target.displayName.c_str(),
+                                    tradeDistance,
+                                    characterMenuConfig.tradeMaxDistance);
+                                break;
+                            }
+                            Engine::Net::TradeCommand command;
+                            command.action = Engine::Net::TradeAction::Request;
+                            command.targetUserId = target.userId;
+                            SendTradeCommandToServer(networkSystem, command);
+                            characterMenu->SetTradeDisplayNames(networkConfig.displayName,
+                                                                target.displayName);
+                            LOG_INFO_FMT("Main",
+                                         "Trade requested with '%s'",
+                                         target.displayName.c_str());
+                        } else {
+                            LOG_WARNING("Main", "Trade requires an online connection");
+                        }
+                        break;
+                }
+            });
             pumpBootLoading(0.94f, "Loading HUD...");
             if (!minimap.Initialize(heightmapPath.c_str(),
                                     groundModel.get(),
@@ -538,66 +1039,250 @@ int main(int argc, char* argv[]) {
             } else {
                 LOG_INFO("Main", "  Character HUD initialized (top-left)");
             }
-            uiSystem->SetUIBuilder([menu = mainMenu.get(),
-                                    characterMenu = characterMenu.get(),
-                                    minimap = &minimap,
-                                    characterHud = &characterHud,
-                                    network = networkSystem.get(),
-                                    uiSys = uiSystem.get(),
-                                    &registry,
-                                    &cameraRig,
-                                    &projection](struct nk_context* ctx,
-                                                  const MenuStyle& style,
-                                                  int screenW,
-                                                  int screenH) {
-                if (menu->IsVisible()) {
+            if (!targetCharacterHud.Initialize(characterMenuConfig.characterHud)) {
+                LOG_WARNING("Main", "Target character HUD failed to load");
+            } else {
+                targetCharacterHud.SetOverlayWindowName("TargetCharacterHud");
+                targetCharacterHud.SetAllowDrag(false);
+                targetCharacterHud.SetEnabled(false);
+                LOG_INFO("Main", "  Target character HUD initialized");
+            }
+            if (!chatWindow.Initialize(characterMenuConfig.chat, characterMenuConfig.ReferenceScreen())) {
+                LOG_WARNING("Main", "Chat window failed to load background");
+            } else {
+                LOG_INFO("Main", "  Chat window initialized (bottom-left HUD)");
+            }
+            uiSystem->ClearLayers();
+            uiSystem->RegisterLayer(
+                Engine::Platform::UI::UILayerId::Modal,
+                [menu = mainMenu.get(), uiSys = uiSystem.get()](struct nk_context* ctx,
+                                                                  const MenuStyle& style,
+                                                                  int screenW,
+                                                                  int screenH) {
+                    if (!menu->IsVisible()) {
+                        return;
+                    }
                     menu->Build(ctx, style, *uiSys, screenW, screenH);
-                } else {
+                },
+                "MainMenu");
+            uiSystem->RegisterLayer(
+                Engine::Platform::UI::UILayerId::WorldLabels,
+                [menu = mainMenu.get(),
+                 uiSys = uiSystem.get(),
+                 &registry,
+                 &cameraRig,
+                 &projection](struct nk_context* ctx,
+                              const MenuStyle& /*style*/,
+                              int screenW,
+                              int screenH) {
+                    if (menu->IsVisible() || !menu->IsGameStarted() || !cameraRig.source) {
+                        return;
+                    }
+                    CharacterNameplateRenderer::Draw(ctx,
+                                                     registry,
+                                                     uiSys->GetFontLibrary(),
+                                                     *cameraRig.source,
+                                                     projection,
+                                                     screenW,
+                                                     screenH,
+                                                     true);
+                    CharacterSpeechBubbleRenderer::Draw(ctx,
+                                                        registry,
+                                                        uiSys->GetFontLibrary(),
+                                                        *cameraRig.source,
+                                                        projection,
+                                                        screenW,
+                                                        screenH,
+                                                        true);
+                },
+                "WorldLabels");
+            uiSystem->RegisterLayer(
+                Engine::Platform::UI::UILayerId::Hud,
+                [menu = mainMenu.get(),
+                 minimap = &minimap,
+                 characterHud = &characterHud,
+                 targetCharacterHud = &targetCharacterHud,
+                 playerTargetHud = &playerTargetHud,
+                 chat = &chatWindow,
+                 characterMenu = characterMenu.get(),
+                 gameWindow = &mainWindow,
+                 uiSys = uiSystem.get(),
+                 network = networkSystem.get(),
+                 localCharacterId = character.id,
+                 &registry](struct nk_context* ctx,
+                            const MenuStyle& /*style*/,
+                            int screenW,
+                            int screenH) {
+                    if (menu->IsVisible() || !menu->IsGameStarted()) {
+                        return;
+                    }
                     if (menu->IsGameStarted() && !characterMenu->IsVisible()) {
                         characterMenu->Show();
                     }
+
+                    const VitalsComponent* localVitals =
+                        registry.GetComponent<VitalsComponent>(localCharacterId);
+                    ApplyVitalsToHud(localVitals, *characterHud);
+                    characterHud->ClearTitleLabel();
+                    characterHud->ClearPositionOverride();
+                    characterHud->Draw(ctx, screenW, screenH);
+
+                    if (playerTargetHud->HasTarget()) {
+                        const PlayerPickResult& target = playerTargetHud->GetTarget();
+                        const VitalsComponent* targetVitals =
+                            registry.GetComponent<VitalsComponent>(target.entity);
+                        ApplyVitalsToHud(targetVitals, *targetCharacterHud);
+                        targetCharacterHud->SetTitleLabel(target.displayName);
+                        const CharacterHud::ScreenBounds localBounds =
+                            characterHud->ComputeScreenBounds(screenW, screenH);
+                        constexpr float kHudGap = 8.0f;
+                        targetCharacterHud->SetPositionOverride(
+                            localBounds.x + localBounds.w + kHudGap, localBounds.y);
+                        targetCharacterHud->SetEnabled(true);
+                        targetCharacterHud->Draw(ctx, screenW, screenH);
+                    } else {
+                        targetCharacterHud->SetEnabled(false);
+                        targetCharacterHud->ClearTitleLabel();
+                        targetCharacterHud->ClearPositionOverride();
+                    }
+
+                    chat->Draw(ctx, uiSys->GetFontLibrary(), *gameWindow, screenW, screenH);
+                    static thread_local std::vector<EntityID> minimapRemotePlayers;
+                    minimapRemotePlayers.clear();
+                    if (network) {
+                        network->CollectRemotePlayerEntities(minimapRemotePlayers);
+                    }
+                    minimap->Draw(ctx,
+                                  registry,
+                                  screenW,
+                                  screenH,
+                                  minimapRemotePlayers.data(),
+                                  minimapRemotePlayers.size());
                     if (characterMenu->IsVisible()) {
-                        characterMenu->Build(ctx, style, *uiSys, screenW, screenH);
+                        characterMenu->BuildHudChrome(ctx, screenW, screenH);
                     }
-                    if (menu->IsGameStarted()) {
-                        characterHud->Draw(ctx, screenW, screenH);
-                        static thread_local std::vector<EntityID> minimapRemotePlayers;
-                        minimapRemotePlayers.clear();
-                        if (network) {
-                            network->CollectRemotePlayerEntities(minimapRemotePlayers);
-                        }
-                        minimap->Draw(ctx,
-                                      registry,
-                                      screenW,
-                                      screenH,
-                                      minimapRemotePlayers.data(),
-                                      minimapRemotePlayers.size());
+                },
+                "Hud");
+            uiSystem->RegisterLayer(
+                Engine::Platform::UI::UILayerId::Modal,
+                [menu = mainMenu.get(),
+                 tradePrompt = &tradeRequestPrompt](struct nk_context* ctx,
+                                                    const MenuStyle& /*style*/,
+                                                    int screenW,
+                                                    int screenH) {
+                    if (menu->IsVisible()) {
+                        return;
                     }
-                    if (cameraRig.source) {
-                        CharacterNameplateRenderer::Draw(ctx,
-                                                         registry,
-                                                         uiSys->GetFontLibrary(),
-                                                         *cameraRig.source,
-                                                         projection,
-                                                         screenW,
-                                                         screenH,
-                                                         true);
+                    tradePrompt->Draw(ctx, screenW, screenH);
+                },
+                "TradeRequestPrompt");
+            uiSystem->RegisterLayer(
+                Engine::Platform::UI::UILayerId::Panels,
+                [menu = mainMenu.get(),
+                 characterMenu = characterMenu.get(),
+                 uiSys = uiSystem.get()](struct nk_context* ctx,
+                                         const MenuStyle& style,
+                                         int screenW,
+                                         int screenH) {
+                    if (menu->IsVisible() || !characterMenu->IsVisible()) {
+                        return;
                     }
-                }
-                const bool blockInput =
-                    menu->BlocksGameInput() || characterMenu->BlocksGameInput();
-                uiSys->SetBlockingGameInput(blockInput);
+                    characterMenu->BuildOpenPanels(ctx, style, *uiSys, screenW, screenH);
+                },
+                "CharacterPanels");
+            uiSystem->RegisterLayer(
+                Engine::Platform::UI::UILayerId::Popups,
+                [menu = mainMenu.get(),
+                 characterMenu = characterMenu.get()](struct nk_context* ctx,
+                                                      const MenuStyle& /*style*/,
+                                                      int screenW,
+                                                      int screenH) {
+                    if (menu->IsVisible()) {
+                        return;
+                    }
+                    characterMenu->BuildPopups(ctx, screenW, screenH);
+                },
+                "CharacterMenuPopups");
+            uiSystem->RegisterLayer(
+                Engine::Platform::UI::UILayerId::ContextMenu,
+                [menu = mainMenu.get(),
+                 playerContextMenu = playerContextMenu.get()](struct nk_context* ctx,
+                                                              const MenuStyle& /*style*/,
+                                                              int screenW,
+                                                              int screenH) {
+                    if (menu->IsVisible() || !playerContextMenu) {
+                        return;
+                    }
+                    playerContextMenu->Build(ctx, screenW, screenH);
+                },
+                "PlayerContextMenu");
+            uiSystem->RegisterLayer(
+                Engine::Platform::UI::UILayerId::Debug,
+                [menu = mainMenu.get(),
+                 characterMenu = characterMenu.get(),
+                 chat = &chatWindow,
+                 tradePrompt = &tradeRequestPrompt,
+                 playerContextMenu = playerContextMenu.get(),
+                 uiSys = uiSystem.get()](struct nk_context* /*ctx*/,
+                                         const MenuStyle& /*style*/,
+                                         int /*screenW*/,
+                                         int /*screenH*/) {
+                    const bool blockInput =
+                        menu->BlocksGameInput() || characterMenu->BlocksGameInput() ||
+                        chat->BlocksGameInput() || tradePrompt->BlocksGameInput() ||
+                        (playerContextMenu && playerContextMenu->BlocksGameInput());
+                    uiSys->SetBlockingGameInput(blockInput);
+                },
+                "InputBlocking");
+            inputSystem->SetInputBlockQuery([menu = mainMenu.get(),
+                                             characterMenu = characterMenu.get(),
+                                             chat = &chatWindow,
+                                             tradePrompt = &tradeRequestPrompt,
+                                             playerContextMenu = playerContextMenu.get()]() {
+                return menu->BlocksGameInput() || characterMenu->BlocksGameInput() ||
+                       chat->BlocksGameInput() || tradePrompt->BlocksGameInput() ||
+                       (playerContextMenu && playerContextMenu->BlocksGameInput());
             });
-            inputSystem->SetInputBlockQuery([menu = mainMenu.get(), characterMenu = characterMenu.get()]() {
-                return menu->BlocksGameInput() || characterMenu->BlocksGameInput();
+            skillInputSystem->SetInputBlockQuery([menu = mainMenu.get(),
+                                                  characterMenu = characterMenu.get(),
+                                                  chat = &chatWindow,
+                                                  tradePrompt = &tradeRequestPrompt,
+                                                  playerContextMenu = playerContextMenu.get()]() {
+                return menu->BlocksGameInput() || characterMenu->BlocksGameInput() ||
+                       chat->BlocksGameInput() || tradePrompt->BlocksGameInput() ||
+                       (playerContextMenu && playerContextMenu->BlocksGameInput());
             });
-            gameCameraInput->SetInputBlockQuery([menu = mainMenu.get(), characterMenu = characterMenu.get()]() {
-                return menu->BlocksGameInput() || characterMenu->BlocksGameInput();
+            gameCameraInput->SetInputBlockQuery([menu = mainMenu.get(),
+                                                 characterMenu = characterMenu.get(),
+                                                 chat = &chatWindow,
+                                                 tradePrompt = &tradeRequestPrompt,
+                                                 playerContextMenu = playerContextMenu.get()]() {
+                return menu->BlocksGameInput() || characterMenu->BlocksGameInput() ||
+                       chat->BlocksGameInput() || tradePrompt->BlocksGameInput() ||
+                       (playerContextMenu && playerContextMenu->BlocksGameInput());
             });
             cameraRig.obstruction.SetInputBlockedQuery(
-                [menu = mainMenu.get(), characterMenu = characterMenu.get()]() {
-                    return menu->BlocksGameInput() || characterMenu->BlocksGameInput();
+                [menu = mainMenu.get(),
+                 characterMenu = characterMenu.get(),
+                 chat = &chatWindow,
+                 tradePrompt = &tradeRequestPrompt,
+                 playerContextMenu = playerContextMenu.get()]() {
+                    return menu->BlocksGameInput() || characterMenu->BlocksGameInput() ||
+                           chat->BlocksGameInput() || tradePrompt->BlocksGameInput() ||
+                           (playerContextMenu && playerContextMenu->BlocksGameInput());
                 });
+            mainWindow.SetEscapeHandler([&chatWindow, &mainWindow, &playerFollowController]() {
+                if (chatWindow.IsInputFocused()) {
+                    chatWindow.CancelInput();
+                    mainWindow.SetCharInputHandler(nullptr);
+                    return true;
+                }
+                if (playerFollowController.IsFollowing()) {
+                    playerFollowController.CancelFollow("escape");
+                    return true;
+                }
+                return false;
+            });
             systemManager.RegisterSystem(uiSystem);
             LOG_INFO("Main", "  UISystem registered (main menu)");
             pumpBootLoading(1.0f, "Ready");
@@ -605,7 +1290,7 @@ int main(int argc, char* argv[]) {
             // Draw one ready frame so PLAY appears before the first game-loop tick.
             pumpBootLoading(1.0f, "Ready");
             if (const char* autoPlay = std::getenv("AW_AUTO_PLAY");
-                autoPlay && autoPlay[0] == '1') {
+                (autoPlay && autoPlay[0] == '1') || e2eMode) {
                 mainMenu->BeginEnterWorld();
             }
         } else if (uiSystem) {
@@ -659,7 +1344,7 @@ int main(int argc, char* argv[]) {
             }
 
             if (networkRetryCooldown > 0.0f) {
-                networkRetryCooldown = std::max(0.0f, networkRetryCooldown - deltaTime);
+                networkRetryCooldown = (std::max)(0.0f, networkRetryCooldown - deltaTime);
             }
 
 #ifdef PLATFORM_HAS_NUKLEAR
@@ -688,6 +1373,68 @@ int main(int argc, char* argv[]) {
                 }
                 mainMenu->Update(deltaTime);
             }
+            if (mainMenu && mainMenu->IsGameStarted()) {
+                characterMenu->Update(mainWindow);
+                if (const SkillComponent* skillComp =
+                        registry.GetComponent<SkillComponent>(character.id)) {
+                    characterMenu->SetActionBarHighlightSkill(
+                        skillComp->isExecuting ? skillComp->activeSkillId : "");
+                } else {
+                    characterMenu->SetActionBarHighlightSkill("");
+                }
+                characterMenu->SyncTradeState(&registry, character.id);
+                std::string tradePartnerName;
+                const auto* trade =
+                    registry.GetComponent<Engine::ECS::PlayerTradeComponent>(character.id);
+                if (trade && trade->IsActive() && networkSystem) {
+                    tradePartnerName = networkSystem->GetPeerDisplayName(trade->partnerUserId);
+                }
+                const Engine::Net::UserId localUserId =
+                    networkSystem ? networkSystem->GetLocalUserId() : Engine::Net::kInvalidUserId;
+                tradeRequestPrompt.Sync(trade, localUserId, tradePartnerName);
+                if (characterMenu->IsTradePanelOpen()) {
+                    if (trade && trade->IsActive()) {
+                        characterMenu->SetTradeDisplayNames(networkConfig.displayName, tradePartnerName);
+                    }
+                }
+                const bool uiBlocksPlayerMenu =
+                    (mainMenu && mainMenu->BlocksGameInput()) ||
+                    (characterMenu->BlocksGameInput() && !playerContextMenu->IsOpen()) ||
+                    (characterHud.BlocksGameInput() && !playerContextMenu->IsOpen()) ||
+                    (chatWindow.BlocksGameInput() && !playerContextMenu->IsOpen());
+                PlayerHudContextHit targetHudContextHit{};
+                if (playerTargetHud.HasTarget() && targetCharacterHud.IsEnabled()) {
+                    const CharacterHud::ScreenBounds targetHudBounds =
+                        targetCharacterHud.ComputeInteractiveBounds(framebufferWidth,
+                                                                    framebufferHeight);
+                    targetHudContextHit.active = true;
+                    targetHudContextHit.target = playerTargetHud.GetTarget();
+                    targetHudContextHit.x = targetHudBounds.x;
+                    targetHudContextHit.y = targetHudBounds.y;
+                    targetHudContextHit.w = targetHudBounds.w;
+                    targetHudContextHit.h = targetHudBounds.h;
+                }
+                playerContextMenu->Update(mainWindow,
+                                          registry,
+                                          networkSystem.get(),
+                                          cameraRig.source,
+                                          projection,
+                                          framebufferWidth,
+                                          framebufferHeight,
+                                          uiBlocksPlayerMenu,
+                                          targetHudContextHit);
+                playerTargetHud.Update(mainWindow,
+                                       registry,
+                                       networkSystem.get(),
+                                       cameraRig.source,
+                                       projection,
+                                       framebufferWidth,
+                                       framebufferHeight,
+                                       uiBlocksPlayerMenu,
+                                       playerContextMenu->IsOpen());
+                chatWindow.Update(mainWindow);
+                UpdateSpeechBubbles(registry, deltaTime);
+            }
 #endif
             
             try {
@@ -695,6 +1442,46 @@ int main(int argc, char* argv[]) {
             } catch (const std::exception& e) {
                 LOG_ERROR_FMT("Main", "System update error: %s", e.what());
                 break;
+            }
+
+            if (e2eMode) {
+                const bool sessionReady =
+                    characterLoaded && (!networkConfig.enabled || networkConnected);
+                if (sessionReady && !e2eReadyRecorded) {
+                    e2eReadyRecorded = true;
+                }
+
+                const float elapsedSeconds = std::chrono::duration<float>(
+                                                std::chrono::steady_clock::now() - e2eSessionStart)
+                                                .count();
+                if (sessionReady && elapsedSeconds >= static_cast<float>(networkConfig.e2eRunSeconds) &&
+                    !e2eReportWritten) {
+                    const auto writeMs = [](const std::chrono::steady_clock::time_point& start,
+                                            const std::chrono::steady_clock::time_point& end) -> double {
+                        if (start.time_since_epoch().count() == 0 ||
+                            end.time_since_epoch().count() == 0) {
+                            return 0.0;
+                        }
+                        return std::chrono::duration<double, std::milli>(end - start).count();
+                    };
+
+                    std::ofstream report(networkConfig.e2eReportPath, std::ios::trunc);
+                    if (report) {
+                        report << "{"
+                               << "\"connected\":" << (networkConnected ? "true" : "false") << ","
+                               << "\"character_loaded\":true,"
+                               << "\"connect_ms\":"
+                               << writeMs(e2eSessionStart, e2eConnectDone) << ","
+                               << "\"character_load_ms\":"
+                               << writeMs(e2eConnectRecorded ? e2eConnectDone : e2eSessionStart,
+                                           e2eCharacterDone)
+                               << ","
+                               << "\"session_seconds\":" << elapsedSeconds << "}";
+                    }
+                    e2eReportWritten = true;
+                    LOG_INFO_FMT("Main", "E2E report written to %s", networkConfig.e2eReportPath.c_str());
+                    mainWindow.setShouldClose(true);
+                }
             }
             
             if (mainWindow.getShouldClose()) break;

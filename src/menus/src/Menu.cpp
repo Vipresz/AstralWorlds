@@ -1,17 +1,30 @@
 #include "Menu.h"
 
 #include "Logger.h"
+#include "ManifestTradeConfig.h"
 #include "character/CharacterPaperdollRenderer.h"
+#include "character/SkillCatalog.h"
+#include "core/ecs/components/PlayerTradeComponent.h"
+#include "core/network/TradeSession.h"
 #include "render/Shader.h"
+#include "render/Window.h"
+#include "systems/inventory/InventoryComponent.h"
+#include "systems/inventory/InventoryBagLog.h"
 #include "ui/OverlayWindow.h"
+#include "ui/ItemTooltip.h"
 
 #define NK_INCLUDE_FIXED_TYPES
 #define NK_INCLUDE_DEFAULT_ALLOCATOR
+#define NK_INCLUDE_FONT_BAKING
 #include "nuklear.h"
 
+#include <GLFW/glfw3.h>
+
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cctype>
+#include <cstring>
 #include <cstdlib>
 #include <fstream>
 #include <sstream>
@@ -144,6 +157,32 @@ bool JsonTryGetInt(const std::string& json, const char* key, int& out) {
     }
     out = static_cast<int>(value);
     return true;
+}
+
+bool JsonTryParseBoolToken(const std::string& value, bool& out) {
+    if (value == "true" || value == "1" || value == "yes") {
+        out = true;
+        return true;
+    }
+    if (value == "false" || value == "0" || value == "no") {
+        out = false;
+        return true;
+    }
+    return false;
+}
+
+bool JsonTryGetBool(const std::string& json, const char* key, bool& out) {
+    float numeric = 0.0f;
+    if (JsonTryGetFloat(json, key, numeric)) {
+        out = numeric != 0.0f;
+        return true;
+    }
+
+    std::string token;
+    if (!JsonTryGetString(json, key, token)) {
+        return false;
+    }
+    return JsonTryParseBoolToken(token, out);
 }
 
 std::string JsonExtractObject(const std::string& json, const char* objectKey) {
@@ -360,6 +399,25 @@ bool LoadCloseButtonPlacementFromObject(const std::string& objectJson,
     return found;
 }
 
+void LoadBagItemGridFromObject(const std::string& itemGridJson,
+                               const char* root,
+                               BagItemGridConfig& out) {
+    std::string slotTextureRelative;
+    if (JsonTryGetString(itemGridJson, "slot_texture", slotTextureRelative)) {
+        out.slotTexturePath = JoinPath(root, slotTextureRelative);
+    }
+    JsonTryGetInt(itemGridJson, "columns", out.columns);
+    JsonTryGetInt(itemGridJson, "rows", out.rows);
+    JsonTryGetFloat(itemGridJson, "width_fraction", out.widthFraction);
+    JsonTryGetFloat(itemGridJson, "height_fraction", out.heightFraction);
+    JsonTryGetFloat(itemGridJson, "center_x_fraction", out.centerXFraction);
+    JsonTryGetFloat(itemGridJson, "center_y_fraction", out.centerYFraction);
+    JsonTryGetFloat(itemGridJson, "gap_x_fraction", out.gapXFraction);
+    JsonTryGetFloat(itemGridJson, "gap_y_fraction", out.gapYFraction);
+    JsonTryGetFloat(itemGridJson, "slot_alpha", out.slotAlpha);
+    JsonTryGetFloat(itemGridJson, "drop_snap_fraction", out.dropSnapFraction);
+}
+
 bool LoadOverlayPanelFromObject(const std::string& objectJson,
                               const char* root,
                               OverlayPanelConfig& out) {
@@ -398,6 +456,30 @@ bool LoadOverlayPanelFromObject(const std::string& objectJson,
     } else if (out.buttonId == "char") {
         out.hasCharacterPreview = true;
     }
+
+    const std::string itemGridJson = JsonExtractObject(objectJson, "item_grid");
+    if (!itemGridJson.empty()) {
+        out.hasItemGrid = true;
+        LoadBagItemGridFromObject(itemGridJson, root, out.itemGrid);
+        out.dragFromEdgesOnly = true;
+    }
+
+    const std::string selfTradeGridJson = JsonExtractObject(objectJson, "self_item_grid");
+    const std::string partnerTradeGridJson = JsonExtractObject(objectJson, "partner_item_grid");
+    if (!selfTradeGridJson.empty() && !partnerTradeGridJson.empty()) {
+        out.hasTradeGrids = true;
+        LoadBagItemGridFromObject(selfTradeGridJson, root, out.selfTradeGrid);
+        LoadBagItemGridFromObject(partnerTradeGridJson, root, out.partnerTradeGrid);
+        out.dragFromEdgesOnly = true;
+    }
+
+    JsonTryGetFloat(objectJson, "drag_edge_fraction", out.dragEdgeFraction);
+    std::string dragFromEdgesOnly;
+    if (JsonTryGetString(objectJson, "drag_from_edges_only", dragFromEdgesOnly)) {
+        out.dragFromEdgesOnly =
+            dragFromEdgesOnly == "true" || dragFromEdgesOnly == "1" || dragFromEdgesOnly == "yes";
+    }
+    JsonTryGetBool(objectJson, "movable", out.movable);
 
     return !out.buttonId.empty();
 }
@@ -515,6 +597,7 @@ bool CharacterMenu::LoadConfig(CharacterMenuConfig& out, const char* manifestPat
         JsonTryGetFloat(characterHudJson, "x_fraction", out.characterHud.xFraction);
         JsonTryGetFloat(characterHudJson, "y_fraction", out.characterHud.yFraction);
         JsonTryGetString(characterHudJson, "anchor", out.characterHud.anchor);
+        JsonTryGetBool(characterHudJson, "movable", out.characterHud.movable);
 
         out.characterHud.bars.clear();
         for (const std::string& barJson : JsonExtractArrayObjects(characterHudJson, "bars")) {
@@ -527,6 +610,33 @@ bool CharacterMenu::LoadConfig(CharacterMenuConfig& out, const char* manifestPat
             if (!bar.id.empty()) {
                 out.characterHud.bars.push_back(std::move(bar));
             }
+        }
+    }
+
+    const std::string chatJson = JsonExtractObject(json, "chat");
+    if (!chatJson.empty()) {
+        std::string chatRelative;
+        if (JsonTryGetString(chatJson, "texture", chatRelative)) {
+            out.chat.texturePath = JoinPath(CharacterMenuConfig::kRoot, chatRelative);
+        }
+        JsonTryGetInt(chatJson, "width", out.chat.width);
+        JsonTryGetInt(chatJson, "height", out.chat.height);
+        JsonTryGetFloat(chatJson, "x_fraction", out.chat.xFraction);
+        JsonTryGetFloat(chatJson, "y_fraction", out.chat.yFraction);
+        JsonTryGetString(chatJson, "anchor", out.chat.anchor);
+        JsonTryGetFloat(chatJson, "padding_pixels", out.chat.paddingPixels);
+        JsonTryGetFloat(chatJson, "input_row_height", out.chat.inputRowHeight);
+        JsonTryGetFloat(chatJson, "log_row_height", out.chat.logRowHeight);
+        JsonTryGetFloat(chatJson, "scroll_lines_per_wheel", out.chat.scrollLinesPerWheel);
+        JsonTryGetFloat(chatJson, "idle_alpha", out.chat.idleAlpha);
+        JsonTryGetBool(chatJson, "movable", out.chat.movable);
+        const std::string contentJson = JsonExtractObject(chatJson, "content");
+        if (!contentJson.empty()) {
+            JsonTryGetFloat(contentJson, "x_fraction", out.chat.content.xFraction);
+            JsonTryGetFloat(contentJson, "y_fraction", out.chat.content.yFraction);
+            JsonTryGetFloat(contentJson, "width_fraction", out.chat.content.widthFraction);
+            JsonTryGetFloat(contentJson, "height_fraction", out.chat.content.heightFraction);
+            JsonTryGetFloat(contentJson, "input_height_fraction", out.chat.content.inputHeightFraction);
         }
     }
 
@@ -648,6 +758,27 @@ bool CharacterMenu::LoadConfig(CharacterMenuConfig& out, const char* manifestPat
         }
     }
 
+    const std::string actionBarJson = JsonExtractObject(json, "action_bar");
+    if (!actionBarJson.empty()) {
+        JsonTryGetFloat(actionBarJson, "x_fraction", out.actionBar.xFraction);
+        JsonTryGetFloat(actionBarJson, "y_fraction", out.actionBar.yFraction);
+        JsonTryGetFloat(actionBarJson, "slot_size_pixels", out.actionBar.slotSizePixels);
+        JsonTryGetFloat(actionBarJson, "slot_spacing_pixels", out.actionBar.slotSpacingPixels);
+        out.actionBar.slots.clear();
+        for (const std::string& slotJson : JsonExtractArrayObjects(actionBarJson, "slots")) {
+            ActionBarSlotConfig slot;
+            JsonTryGetString(slotJson, "skill_id", slot.skillId);
+            if (!slot.skillId.empty()) {
+                out.actionBar.slots.push_back(std::move(slot));
+            }
+        }
+    }
+
+    ManifestTradeConfig tradeConfig;
+    if (LoadManifestTradeConfig(tradeConfig, path)) {
+        out.tradeMaxDistance = tradeConfig.maxDistance;
+    }
+
     LOG_INFO_FMT("CharacterMenu", "Manifest loaded: bottom_bar=%s", out.bottomBarTexturePath.c_str());
     return true;
 }
@@ -681,6 +812,28 @@ bool CharacterMenu::Initialize(const CharacterMenuConfig* config) {
                             panelConfig.buttonId.c_str(),
                             panelConfig.texturePath.c_str());
             continue;
+        }
+        if (panelConfig.hasItemGrid && !panelConfig.itemGrid.slotTexturePath.empty()) {
+            loaded.slotTexture = std::make_unique<Engine::Platform::Render::Texture>(
+                panelConfig.itemGrid.slotTexturePath.c_str());
+            if (!loaded.slotTexture->LoadTextureUI(512)) {
+                LOG_WARNING_FMT("CharacterMenu",
+                                "Bag slot texture not loaded for '%s' (%s)",
+                                panelConfig.buttonId.c_str(),
+                                panelConfig.itemGrid.slotTexturePath.c_str());
+                loaded.slotTexture.reset();
+            }
+        } else if (panelConfig.hasTradeGrids &&
+                   !panelConfig.selfTradeGrid.slotTexturePath.empty()) {
+            loaded.slotTexture = std::make_unique<Engine::Platform::Render::Texture>(
+                panelConfig.selfTradeGrid.slotTexturePath.c_str());
+            if (!loaded.slotTexture->LoadTextureUI(512)) {
+                LOG_WARNING_FMT("CharacterMenu",
+                                "Trade slot texture not loaded for '%s' (%s)",
+                                panelConfig.buttonId.c_str(),
+                                panelConfig.selfTradeGrid.slotTexturePath.c_str());
+                loaded.slotTexture.reset();
+            }
         }
         m_overlayPanels.push_back(std::move(loaded));
     }
@@ -786,6 +939,10 @@ void CharacterMenu::Shutdown() {
             panel.texture->ClearTexture();
             panel.texture.reset();
         }
+        if (panel.slotTexture) {
+            panel.slotTexture->ClearTexture();
+            panel.slotTexture.reset();
+        }
     }
     m_overlayPanels.clear();
     if (m_closeDarkTexture) {
@@ -823,6 +980,27 @@ void CharacterMenu::Shutdown() {
         }
     }
     m_barButtons.clear();
+    for (LoadedActionBarSlot& slot : m_actionBarSlots) {
+        if (slot.unpressedTexture) {
+            slot.unpressedTexture->ClearTexture();
+            slot.unpressedTexture.reset();
+        }
+        if (slot.pressedTexture) {
+            slot.pressedTexture->ClearTexture();
+            slot.pressedTexture.reset();
+        }
+    }
+    m_actionBarSlots.clear();
+    m_actionBarHighlightSkillId.clear();
+    m_actionBarKeyHeld.fill(false);
+    m_actionBarMouseHeld.fill(false);
+    for (auto& iconEntry : m_itemIconTextures) {
+        if (iconEntry.second) {
+            iconEntry.second->ClearTexture();
+        }
+    }
+    m_itemIconTextures.clear();
+    m_gameItemCatalog = nullptr;
     m_overlayPanels.clear();
     if (m_paperdollRenderer) {
         m_paperdollRenderer->Shutdown();
@@ -868,6 +1046,24 @@ OverlayPanelLayout ComputeOverlayPanelLayout(const MenuScreenLayout& layout,
 
 struct nk_rect PanelBoundsFromCenter(float centerX, float centerY, float panelW, float panelH) {
     return nk_rect(centerX - panelW * 0.5f, centerY - panelH * 0.5f, panelW, panelH);
+}
+
+bool IsMouseOnPanelDragEdge(const struct nk_rect& bounds,
+                            float mouseX,
+                            float mouseY,
+                            float edgeFraction) {
+    if (mouseX < bounds.x || mouseX > bounds.x + bounds.w || mouseY < bounds.y ||
+        mouseY > bounds.y + bounds.h) {
+        return false;
+    }
+
+    const float edgeThickness =
+        std::min(bounds.w, bounds.h) * std::clamp(edgeFraction, 0.03f, 0.45f);
+    const bool onLeft = mouseX - bounds.x < edgeThickness;
+    const bool onRight = bounds.x + bounds.w - mouseX < edgeThickness;
+    const bool onTop = mouseY - bounds.y < edgeThickness;
+    const bool onBottom = bounds.y + bounds.h - mouseY < edgeThickness;
+    return onLeft || onRight || onTop || onBottom;
 }
 
 struct nk_rect CharacterPreviewBoundsFromPanel(const struct nk_rect& panelBounds,
@@ -1046,6 +1242,311 @@ float NormalizeYawDegrees(float yaw) {
     return yaw;
 }
 
+struct BagGridLayout {
+    int columns = 0;
+    int rows = 0;
+    int slotCount = 0;
+    float slotSize = 0.0f;
+    struct nk_rect contentBounds{};
+    std::vector<struct nk_rect> slotBounds;
+};
+
+BagGridLayout ComputeBagGridLayout(const struct nk_rect& panelBounds, const BagItemGridConfig& grid) {
+    BagGridLayout layout;
+    layout.columns = std::max(1, grid.columns);
+    layout.rows = std::max(1, grid.rows);
+    layout.slotCount = layout.columns * layout.rows;
+
+    const float widthFraction = std::clamp(grid.widthFraction, 0.05f, 1.0f);
+    const float heightFraction = std::clamp(grid.heightFraction, 0.05f, 1.0f);
+    const float centerXFraction = std::clamp(grid.centerXFraction, 0.0f, 1.0f);
+    const float centerYFraction = std::clamp(grid.centerYFraction, 0.0f, 1.0f);
+    const float areaW = panelBounds.w * widthFraction;
+    const float areaH = panelBounds.h * heightFraction;
+    layout.contentBounds =
+        nk_rect(panelBounds.x + panelBounds.w * centerXFraction - areaW * 0.5f,
+                panelBounds.y + panelBounds.h * centerYFraction - areaH * 0.5f,
+                areaW,
+                areaH);
+
+    const float gapX =
+        layout.contentBounds.w * std::clamp(grid.gapXFraction, 0.0f, 0.2f);
+    const float gapY =
+        layout.contentBounds.h * std::clamp(grid.gapYFraction, 0.0f, 0.2f);
+    layout.slotSize = std::max(
+        8.0f,
+        std::min((layout.contentBounds.w - gapX * static_cast<float>(layout.columns - 1)) /
+                     static_cast<float>(layout.columns),
+                 (layout.contentBounds.h - gapY * static_cast<float>(layout.rows - 1)) /
+                     static_cast<float>(layout.rows)));
+    const float gridW =
+        static_cast<float>(layout.columns) * layout.slotSize +
+        gapX * static_cast<float>(layout.columns - 1);
+    const float gridH =
+        static_cast<float>(layout.rows) * layout.slotSize +
+        gapY * static_cast<float>(layout.rows - 1);
+    const float gridOriginX = layout.contentBounds.x + (layout.contentBounds.w - gridW) * 0.5f;
+    const float gridOriginY = layout.contentBounds.y + (layout.contentBounds.h - gridH) * 0.5f;
+
+    layout.slotBounds.resize(static_cast<size_t>(layout.slotCount));
+    for (int slotIndex = 0; slotIndex < layout.slotCount; ++slotIndex) {
+        const int column = slotIndex % layout.columns;
+        const int row = slotIndex / layout.columns;
+        layout.slotBounds[static_cast<size_t>(slotIndex)] =
+            nk_rect(gridOriginX + static_cast<float>(column) * (layout.slotSize + gapX),
+                    gridOriginY + static_cast<float>(row) * (layout.slotSize + gapY),
+                    layout.slotSize,
+                    layout.slotSize);
+    }
+
+    return layout;
+}
+
+struct TradeChromeLayout {
+    struct nk_rect selfAcceptButton{};
+    struct nk_rect partnerAcceptButton{};
+};
+
+TradeChromeLayout ComputeTradeChromeLayout(const struct nk_rect& panelBounds,
+                                           Engine::ECS::TradePhase phase) {
+    TradeChromeLayout chrome{};
+    if (phase != Engine::ECS::TradePhase::Open) {
+        return chrome;
+    }
+
+    // Align with the built-in accept buttons on trade_window_circle.png (one per side).
+    const float buttonW = std::clamp(panelBounds.w * 0.11f, 48.0f, 90.0f);
+    const float buttonH = std::clamp(panelBounds.h * 0.055f, 22.0f, 32.0f);
+    const float buttonY = panelBounds.y + panelBounds.h - buttonH - panelBounds.h * 0.025f;
+
+    const float selfCenterX = panelBounds.x + panelBounds.w * 0.365f;
+    chrome.selfAcceptButton =
+        nk_rect(selfCenterX - buttonW * 0.5f, buttonY, buttonW, buttonH);
+
+    const float partnerCenterX = panelBounds.x + panelBounds.w * 0.635f;
+    chrome.partnerAcceptButton =
+        nk_rect(partnerCenterX - buttonW * 0.5f, buttonY, buttonW, buttonH);
+    return chrome;
+}
+
+bool PointInRect(const struct nk_rect& rect, float x, float y) {
+    return x >= rect.x && x <= rect.x + rect.w && y >= rect.y && y <= rect.y + rect.h;
+}
+
+int FindNearestBagSlot(float mouseX,
+                       float mouseY,
+                       const std::vector<struct nk_rect>& slotBounds,
+                       float maxCenterDistance) {
+    int bestSlot = -1;
+    float bestDistance = maxCenterDistance;
+    for (size_t slotIndex = 0; slotIndex < slotBounds.size(); ++slotIndex) {
+        const struct nk_rect& bounds = slotBounds[slotIndex];
+        const float centerX = bounds.x + bounds.w * 0.5f;
+        const float centerY = bounds.y + bounds.h * 0.5f;
+        const float dx = mouseX - centerX;
+        const float dy = mouseY - centerY;
+        const float distance = std::sqrt(dx * dx + dy * dy);
+        if (distance <= bestDistance) {
+            bestDistance = distance;
+            bestSlot = static_cast<int>(slotIndex);
+        }
+    }
+    return bestSlot;
+}
+
+bool InventoryIsEmpty(const Engine::Systems::Inventory::InventoryComponent* inventory) {
+    if (!inventory) {
+        return true;
+    }
+    for (const Engine::Systems::Inventory::ItemSlot& slot : inventory->slots) {
+        if (!slot.isEmpty) {
+            return false;
+        }
+    }
+    return true;
+}
+
+void DrawBagItemGrid(struct nk_context* ctx,
+                     struct nk_command_buffer* canvas,
+                     const struct nk_rect& panelBounds,
+                     const BagItemGridConfig& grid,
+                     const Engine::Platform::Render::Texture* slotTexture,
+                     Engine::ECS::Registry* inventoryRegistry,
+                     Engine::EntityID inventoryEntity,
+                     CharacterMenu& menu,
+                     const CharacterMenu::BagDragState& dragState,
+                     int screenWidth,
+                     int screenHeight) {
+    if (!ctx || !canvas) {
+        return;
+    }
+
+    const BagGridLayout layout = ComputeBagGridLayout(panelBounds, grid);
+
+    const Engine::Systems::Inventory::InventoryComponent* inventory = nullptr;
+    if (inventoryRegistry && inventoryEntity != Engine::INVALID_ENTITY) {
+        inventory = inventoryRegistry->GetComponent<Engine::Systems::Inventory::InventoryComponent>(
+            inventoryEntity);
+    }
+
+    const struct nk_color slotFill = nk_rgba(18, 22, 34, 170);
+    const struct nk_color slotBorder = nk_rgba(95, 110, 145, 200);
+    const struct nk_color dropHighlight = nk_rgba(120, 200, 255, 220);
+    const struct nk_color useSelectedHighlight = nk_rgba(255, 204, 77, 255);
+    const struct nk_color textColor = nk_rgba(225, 232, 245, 255);
+    const struct nk_color qtyColor = nk_rgba(170, 190, 230, 255);
+    const struct nk_color transparent = nk_rgba(0, 0, 0, 0);
+    const struct nk_user_font* font = ctx->style.font;
+    const bool drawSlotTexture = slotTexture && slotTexture->IsLoaded();
+    const float slotAlpha = std::clamp(grid.slotAlpha, 0.0f, 1.0f);
+    const unsigned char slotAlphaByte =
+        static_cast<unsigned char>(std::lround(slotAlpha * 255.0f));
+
+    for (int slotIndex = 0; slotIndex < layout.slotCount; ++slotIndex) {
+        const struct nk_rect slotBounds = layout.slotBounds[static_cast<size_t>(slotIndex)];
+
+        if (drawSlotTexture && slotAlphaByte > 0) {
+            Engine::Platform::UI::DrawTexture(
+                canvas, *slotTexture, slotBounds, nk_rgba(255, 255, 255, slotAlphaByte));
+        } else {
+            nk_fill_rect(canvas, slotBounds, 4.0f, slotFill);
+            nk_stroke_rect(canvas, slotBounds, 4.0f, 1.0f, slotBorder);
+        }
+
+        if (dragState.active && dragState.hoverDropSlot == slotIndex) {
+            nk_stroke_rect(canvas, slotBounds, 4.0f, 2.5f, dropHighlight);
+        }
+
+        if (!inventory || slotIndex >= static_cast<int>(inventory->slots.size()) ||
+            inventory->slots[static_cast<size_t>(slotIndex)].isEmpty) {
+            continue;
+        }
+
+        if (dragState.active && dragState.sourceSlot == slotIndex) {
+            continue;
+        }
+
+        const Engine::Systems::Inventory::Item& item =
+            inventory->slots[static_cast<size_t>(slotIndex)].item;
+
+        const Engine::Platform::Render::Texture* iconTexture =
+            menu.GetItemIconTexture(item.id);
+
+        if (iconTexture) {
+            const float iconPad = slotBounds.w * 0.10f;
+            const struct nk_rect iconBounds = nk_rect(
+                slotBounds.x + iconPad,
+                slotBounds.y + iconPad,
+                slotBounds.w - iconPad * 2.0f,
+                slotBounds.h - iconPad * 2.0f);
+            Engine::Platform::UI::DrawTexture(
+                canvas, *iconTexture, iconBounds, nk_rgba(255, 255, 255, 255));
+        }
+
+        if (!font) {
+            continue;
+        }
+
+        if (!iconTexture) {
+            const std::string& label = item.name.empty() ? "Item" : item.name;
+            const int labelLen = static_cast<int>(std::min(label.size(), size_t{24}));
+            const float textW =
+                font->width(font->userdata, font->height, label.c_str(), labelLen);
+            const float textX =
+                slotBounds.x + std::max(2.0f, (slotBounds.w - textW) * 0.5f);
+            const float textY = slotBounds.y + slotBounds.h * 0.58f;
+            nk_draw_text(canvas,
+                         nk_rect(textX, textY, textW, font->height),
+                         label.c_str(),
+                         labelLen,
+                         font,
+                         transparent,
+                         textColor);
+        }
+
+        if (item.quantity >= 1) {
+            const std::string qty = std::to_string(item.quantity);
+            const int qtyLen = static_cast<int>(qty.size());
+            const float qtyW = font->width(font->userdata, font->height, qty.c_str(), qtyLen);
+            nk_draw_text(canvas,
+                         nk_rect(slotBounds.x + slotBounds.w - qtyW - 4.0f,
+                                 slotBounds.y + slotBounds.h - font->height - 4.0f,
+                                 qtyW,
+                                 font->height),
+                         qty.c_str(),
+                         qtyLen,
+                         font,
+                         transparent,
+                         qtyColor);
+        }
+
+        if (!dragState.active && menu.IsBagUseSlotSelected(slotIndex)) {
+            nk_stroke_rect(canvas, slotBounds, 4.0f, 3.0f, useSelectedHighlight);
+        }
+    }
+
+    if (dragState.active && dragState.item.quantity > 0) {
+        const float ghostSize = layout.slotSize * 0.82f;
+        const struct nk_rect ghostBounds =
+            nk_rect(ctx->input.mouse.pos.x - ghostSize * 0.5f,
+                    ctx->input.mouse.pos.y - ghostSize * 0.5f,
+                    ghostSize,
+                    ghostSize);
+        const Engine::Platform::Render::Texture* dragTexture =
+            menu.GetItemIconTexture(dragState.item.id);
+        if (dragTexture) {
+            Engine::Platform::UI::DrawTexture(
+                canvas, *dragTexture, ghostBounds, nk_rgba(255, 255, 255, 230));
+        }
+
+        if (font && dragState.item.quantity > 1) {
+            const std::string qty = std::to_string(dragState.item.quantity);
+            const int qtyLen = static_cast<int>(qty.size());
+            const float qtyW = font->width(font->userdata, font->height, qty.c_str(), qtyLen);
+            nk_draw_text(canvas,
+                         nk_rect(ghostBounds.x + ghostBounds.w - qtyW - 3.0f,
+                                 ghostBounds.y + ghostBounds.h - font->height - 3.0f,
+                                 qtyW,
+                                 font->height),
+                         qty.c_str(),
+                         qtyLen,
+                         font,
+                         transparent,
+                         qtyColor);
+        }
+    }
+
+    if (!dragState.active && inventory && font && screenWidth > 0 && screenHeight > 0 &&
+        !menu.IsBagItemActionPanelOpen()) {
+        const float mouseX = ctx->input.mouse.pos.x;
+        const float mouseY = ctx->input.mouse.pos.y;
+        for (int slotIndex = 0; slotIndex < layout.slotCount; ++slotIndex) {
+            if (slotIndex >= static_cast<int>(inventory->slots.size()) ||
+                inventory->slots[static_cast<size_t>(slotIndex)].isEmpty) {
+                continue;
+            }
+
+            const struct nk_rect& slotBounds = layout.slotBounds[static_cast<size_t>(slotIndex)];
+            if (!PointInRect(slotBounds, mouseX, mouseY)) {
+                continue;
+            }
+
+            const Engine::Systems::Inventory::Item& hoveredItem =
+                inventory->slots[static_cast<size_t>(slotIndex)].item;
+            const Engine::Platform::UI::ItemTooltipContent tooltipContent =
+                menu.BuildItemTooltipContent(hoveredItem);
+            Engine::Platform::UI::PresentItemTooltip(
+                ctx,
+                canvas,
+                slotBounds,
+                screenWidth,
+                screenHeight,
+                tooltipContent);
+            break;
+        }
+    }
+}
+
 } // namespace
 
 CharacterMenu::LoadedBarButton* CharacterMenu::FindBarButton(const std::string& id) {
@@ -1055,6 +1556,1486 @@ CharacterMenu::LoadedBarButton* CharacterMenu::FindBarButton(const std::string& 
         }
     }
     return nullptr;
+}
+
+void CharacterMenu::BindActionBarSkills(const Game::Character::SkillCatalog& catalog) {
+    m_actionBarSlots.clear();
+    m_actionBarSlots.reserve(m_config.actionBar.slots.size());
+
+    for (const ActionBarSlotConfig& slotConfig : m_config.actionBar.slots) {
+        const Game::Character::SkillDefinition* skill = catalog.Find(slotConfig.skillId);
+        if (!skill) {
+            LOG_WARNING_FMT("CharacterMenu",
+                              "Action bar slot references unknown skill '%s'",
+                              slotConfig.skillId.c_str());
+            continue;
+        }
+
+        LoadedActionBarSlot loaded;
+        loaded.skillId = skill->id;
+
+        if (!skill->iconUnpressed.empty()) {
+            const std::string path = JoinPath(CharacterMenuConfig::kRoot, skill->iconUnpressed);
+            loaded.unpressedTexture = std::make_unique<Engine::Platform::Render::Texture>(path.c_str());
+            if (!loaded.unpressedTexture->LoadTextureUI(256)) {
+                LOG_WARNING_FMT("CharacterMenu", "Action bar icon not loaded (%s)", path.c_str());
+                loaded.unpressedTexture.reset();
+            }
+        }
+
+        if (!skill->iconPressed.empty()) {
+            const std::string path = JoinPath(CharacterMenuConfig::kRoot, skill->iconPressed);
+            loaded.pressedTexture = std::make_unique<Engine::Platform::Render::Texture>(path.c_str());
+            if (!loaded.pressedTexture->LoadTextureUI(256)) {
+                LOG_WARNING_FMT("CharacterMenu", "Action bar pressed icon not loaded (%s)", path.c_str());
+                loaded.pressedTexture.reset();
+            }
+        }
+
+        m_actionBarSlots.push_back(std::move(loaded));
+    }
+
+    LOG_INFO_FMT("CharacterMenu", "Action bar loaded %zu/%zu skill slot(s)",
+                 m_actionBarSlots.size(),
+                 m_config.actionBar.slots.size());
+}
+
+const std::string* CharacterMenu::GetActionBarSkillId(size_t slotIndex) const {
+    if (slotIndex >= m_actionBarSlots.size()) {
+        return nullptr;
+    }
+    return &m_actionBarSlots[slotIndex].skillId;
+}
+
+CharacterMenu::LoadedOverlayPanel* CharacterMenu::FindOverlayPanel(const std::string& buttonId) {
+    for (LoadedOverlayPanel& panel : m_overlayPanels) {
+        if (panel.config.buttonId == buttonId) {
+            return &panel;
+        }
+    }
+    return nullptr;
+}
+
+void CharacterMenu::SetTradeCommandCallback(
+    std::function<void(const Engine::Net::TradeCommand&)> callback) {
+    m_tradeCommandCallback = std::move(callback);
+}
+
+void CharacterMenu::OpenTradePanel() {
+    m_tradePanelDismissedByUser = false;
+    m_tradePanelOpen = true;
+    OpenBagPanel();
+    LoadedOverlayPanel* tradePanel = FindOverlayPanel("trade");
+    if (tradePanel && !tradePanel->positionInitialized) {
+        tradePanel->positionInitialized = false;
+    }
+}
+
+void CharacterMenu::CloseTradePanel() {
+    m_tradePanelOpen = false;
+    CloseTradeQuantityPanel();
+}
+
+void CharacterMenu::DeclineAndCloseTradePanel() {
+    m_tradePanelDismissedByUser = true;
+    if (m_tradeCommandCallback && m_tradeRegistry && m_tradeEntity != Engine::INVALID_ENTITY) {
+        const auto* trade =
+            m_tradeRegistry->GetComponent<Engine::ECS::PlayerTradeComponent>(m_tradeEntity);
+        if (trade && trade->IsActive()) {
+            Engine::Net::TradeCommand command;
+            command.targetUserId = trade->partnerUserId;
+            command.action = Engine::Net::TradeAction::Cancel;
+            m_tradeCommandCallback(command);
+        }
+    }
+    m_bagActionPanelOpen = false;
+    m_bagActionPanelSlot = -1;
+    CloseTradePanel();
+}
+
+void CharacterMenu::OpenBagPanel() {
+    if (LoadedBarButton* bagButton = FindBarButton("bag")) {
+        bagButton->pressed = true;
+    }
+}
+
+void CharacterMenu::SyncTradeState(Engine::ECS::Registry* registry, Engine::EntityID entity) {
+    m_tradeRegistry = registry;
+    m_tradeEntity = entity;
+    if (!registry || entity == Engine::INVALID_ENTITY) {
+        return;
+    }
+
+    const auto* trade = registry->GetComponent<Engine::ECS::PlayerTradeComponent>(entity);
+    if (trade && trade->phase == Engine::ECS::TradePhase::Open) {
+        if (!m_tradePanelOpen && !m_tradePanelDismissedByUser) {
+            OpenTradePanel();
+        }
+    } else {
+        if (m_tradePanelOpen) {
+            CloseTradePanel();
+        }
+        if (!trade || !trade->IsActive()) {
+            m_tradePanelDismissedByUser = false;
+            m_tradeSelfDisplayName.clear();
+            m_tradePartnerDisplayName.clear();
+        }
+    }
+}
+
+void CharacterMenu::SetTradeDisplayNames(const std::string& selfName,
+                                         const std::string& partnerName) {
+    m_tradeSelfDisplayName = selfName;
+    m_tradePartnerDisplayName = partnerName;
+}
+
+void CharacterMenu::SendTradeOfferUpdate(
+    const Engine::ECS::PlayerTradeComponent* trade,
+    std::vector<Engine::ECS::TradeOfferItem> offer) {
+    if (!m_tradeCommandCallback || !trade) {
+        return;
+    }
+
+    if (m_tradeRegistry && m_tradeEntity != Engine::INVALID_ENTITY) {
+        if (auto* localTrade =
+                m_tradeRegistry->GetComponent<Engine::ECS::PlayerTradeComponent>(m_tradeEntity)) {
+            localTrade->selfOffer = offer;
+            localTrade->selfLocked = false;
+            localTrade->partnerLocked = false;
+        }
+    }
+
+    Engine::Net::TradeCommand command;
+    command.action = Engine::Net::TradeAction::SetOffer;
+    command.targetUserId = trade->partnerUserId;
+    command.offer = std::move(offer);
+    m_tradeCommandCallback(command);
+    m_inventorySyncPending = true;
+}
+
+bool CharacterMenu::CanModifyTradeOffer() const {
+    if (!m_tradePanelOpen || !m_tradeRegistry || m_tradeEntity == Engine::INVALID_ENTITY) {
+        return false;
+    }
+    const auto* trade =
+        m_tradeRegistry->GetComponent<Engine::ECS::PlayerTradeComponent>(m_tradeEntity);
+    return trade && trade->phase == Engine::ECS::TradePhase::Open && !trade->selfLocked;
+}
+
+bool CharacterMenu::CanShowTradeItemActions() const {
+    if (!m_tradePanelOpen) {
+        return false;
+    }
+    if (!m_tradeRegistry || m_tradeEntity == Engine::INVALID_ENTITY) {
+        return true;
+    }
+    const auto* trade =
+        m_tradeRegistry->GetComponent<Engine::ECS::PlayerTradeComponent>(m_tradeEntity);
+    if (!trade || !trade->IsActive()) {
+        return true;
+    }
+    return !trade->selfLocked;
+}
+
+void CharacterMenu::OpenTradeQuantityPanel(int bagSlotIndex) {
+    if (!CanModifyTradeOffer() || !m_inventoryRegistry ||
+        m_inventoryEntity == Engine::INVALID_ENTITY || bagSlotIndex < 0) {
+        return;
+    }
+
+    const auto* inventory =
+        m_inventoryRegistry->GetComponent<Engine::Systems::Inventory::InventoryComponent>(
+            m_inventoryEntity);
+    if (!inventory || bagSlotIndex >= static_cast<int>(inventory->slots.size()) ||
+        inventory->slots[static_cast<size_t>(bagSlotIndex)].isEmpty) {
+        return;
+    }
+
+    const uint32_t ownedQty =
+        std::max(1u, inventory->slots[static_cast<size_t>(bagSlotIndex)].item.quantity);
+    m_tradeQuantityPanelOpen = true;
+    m_tradeQuantitySlot = bagSlotIndex;
+    m_tradeQuantityMax = static_cast<int>(ownedQty);
+    m_tradeQuantityValue = m_tradeQuantityMax;
+    m_tradeQuantityAnchorX = m_bagActionPanelAnchorX;
+    m_tradeQuantityAnchorY = m_bagActionPanelAnchorY;
+    m_tradeQuantityAnchorW = m_bagActionPanelAnchorW;
+    m_tradeQuantityAnchorH = m_bagActionPanelAnchorH;
+    m_bagActionPanelOpen = false;
+    m_bagActionPanelSlot = -1;
+}
+
+void CharacterMenu::CloseTradeQuantityPanel() {
+    m_tradeQuantityPanelOpen = false;
+    m_tradeQuantitySlot = -1;
+    m_tradeQuantityValue = 1;
+    m_tradeQuantityMax = 1;
+}
+
+bool CharacterMenu::TryAddBagItemToTradeOffer(int bagSlotIndex, uint32_t quantity) {
+    if (!m_tradePanelOpen || bagSlotIndex < 0 || !m_tradeCommandCallback || !m_gameItemCatalog ||
+        !m_inventoryRegistry || m_inventoryEntity == Engine::INVALID_ENTITY) {
+        return false;
+    }
+
+    const auto* inventory =
+        m_inventoryRegistry->GetComponent<Engine::Systems::Inventory::InventoryComponent>(
+            m_inventoryEntity);
+    const auto* trade =
+        m_tradeRegistry && m_tradeEntity != Engine::INVALID_ENTITY
+            ? m_tradeRegistry->GetComponent<Engine::ECS::PlayerTradeComponent>(m_tradeEntity)
+            : nullptr;
+    if (!inventory || !trade || trade->phase != Engine::ECS::TradePhase::Open || trade->selfLocked) {
+        return false;
+    }
+
+    if (bagSlotIndex >= static_cast<int>(inventory->slots.size()) ||
+        inventory->slots[static_cast<size_t>(bagSlotIndex)].isEmpty) {
+        return false;
+    }
+
+    const Engine::Systems::Inventory::Item& bagItem =
+        inventory->slots[static_cast<size_t>(bagSlotIndex)].item;
+    const std::string* itemId = m_gameItemCatalog->FindItemIdByNumericId(bagItem.id);
+    if (!itemId || itemId->empty()) {
+        return false;
+    }
+
+    if (trade->selfOffer.size() >= Engine::ECS::kMaxTradeOfferSlots) {
+        return false;
+    }
+
+    const uint16_t bagSlot = static_cast<uint16_t>(bagSlotIndex);
+    for (const Engine::ECS::TradeOfferItem& existing : trade->selfOffer) {
+        if (existing.bagSlotIndex == bagSlot) {
+            return false;
+        }
+    }
+
+    const uint32_t ownedQty = std::max(1u, bagItem.quantity);
+    uint32_t offerQty = quantity > 0 ? quantity : ownedQty;
+    offerQty = std::clamp(offerQty, 1u, ownedQty);
+
+    std::vector<Engine::ECS::TradeOfferItem> offer = trade->selfOffer;
+    Engine::ECS::TradeOfferItem entry;
+    entry.itemId = *itemId;
+    entry.quantity = offerQty;
+    entry.instanceId = 0;
+    entry.bagSlotIndex = static_cast<uint16_t>(bagSlotIndex);
+    offer.push_back(entry);
+    SendTradeOfferUpdate(trade, std::move(offer));
+    return true;
+}
+
+bool CharacterMenu::TryRemoveTradeOfferAtSlot(int tradeSlotIndex) {
+    if (!m_tradePanelOpen || tradeSlotIndex < 0 || !m_tradeCommandCallback) {
+        return false;
+    }
+
+    const auto* trade =
+        m_tradeRegistry && m_tradeEntity != Engine::INVALID_ENTITY
+            ? m_tradeRegistry->GetComponent<Engine::ECS::PlayerTradeComponent>(m_tradeEntity)
+            : nullptr;
+    if (!trade || trade->phase != Engine::ECS::TradePhase::Open || trade->selfLocked) {
+        return false;
+    }
+
+    if (tradeSlotIndex >= static_cast<int>(trade->selfOffer.size())) {
+        return false;
+    }
+
+    std::vector<Engine::ECS::TradeOfferItem> offer = trade->selfOffer;
+    offer.erase(offer.begin() + tradeSlotIndex);
+    SendTradeOfferUpdate(trade, std::move(offer));
+    return true;
+}
+
+void CharacterMenu::UpdateTradeInteractions(
+    struct nk_context* ctx,
+    const struct nk_rect& panelBounds,
+    const BagItemGridConfig& selfGrid,
+    const Engine::ECS::PlayerTradeComponent* trade) {
+    if (!ctx || !trade) {
+        return;
+    }
+
+    const BagGridLayout selfLayout = ComputeBagGridLayout(panelBounds, selfGrid);
+    m_selfTradeSlotBounds.clear();
+    m_selfTradeSlotBounds.reserve(selfLayout.slotBounds.size());
+    for (const struct nk_rect& slotBounds : selfLayout.slotBounds) {
+        m_selfTradeSlotBounds.push_back(
+            TradeSlotRect{slotBounds.x, slotBounds.y, slotBounds.w, slotBounds.h});
+    }
+
+    if (trade->phase != Engine::ECS::TradePhase::Open || trade->selfLocked) {
+        // Still allow trade action buttons below.
+    }
+
+    const float mouseX = ctx->input.mouse.pos.x;
+    const float mouseY = ctx->input.mouse.pos.y;
+    const bool mouseReleased = nk_input_is_mouse_released(&ctx->input, NK_BUTTON_LEFT);
+    const TradeChromeLayout chrome = ComputeTradeChromeLayout(panelBounds, trade->phase);
+
+    const auto releasedIn = [&](const struct nk_rect& bounds) {
+        return mouseReleased && PointInRect(bounds, mouseX, mouseY);
+    };
+
+    if (!m_tradeCommandCallback) {
+        return;
+    }
+
+    if (mouseReleased) {
+        if (trade->phase == Engine::ECS::TradePhase::Open) {
+            if (!trade->selfLocked && releasedIn(chrome.selfAcceptButton)) {
+                Engine::Net::TradeCommand command;
+                command.action = Engine::Net::TradeAction::Lock;
+                command.targetUserId = trade->partnerUserId;
+                m_tradeCommandCallback(command);
+                return;
+            }
+
+            if (!trade->selfLocked) {
+                for (size_t slotIndex = 0; slotIndex < selfLayout.slotBounds.size(); ++slotIndex) {
+                    if (!PointInRect(selfLayout.slotBounds[slotIndex], mouseX, mouseY)) {
+                        continue;
+                    }
+                    if (slotIndex < trade->selfOffer.size()) {
+                        TryRemoveTradeOfferAtSlot(static_cast<int>(slotIndex));
+                    }
+                    return;
+                }
+            }
+        }
+    }
+}
+
+void CharacterMenu::DrawTradeGrids(
+    struct nk_context* ctx,
+    struct nk_command_buffer* canvas,
+    const struct nk_rect& panelBounds,
+    const BagItemGridConfig& selfGrid,
+    const BagItemGridConfig& partnerGrid,
+    const Engine::Platform::Render::Texture* slotTexture,
+    const Engine::ECS::PlayerTradeComponent* trade,
+    int screenWidth,
+    int screenHeight) {
+    if (!ctx || !canvas || !trade) {
+        return;
+    }
+
+    const BagGridLayout selfLayout = ComputeBagGridLayout(panelBounds, selfGrid);
+    const BagGridLayout partnerLayout = ComputeBagGridLayout(panelBounds, partnerGrid);
+    const bool drawSlotTexture = slotTexture && slotTexture->IsLoaded();
+    const float slotAlpha = std::clamp(selfGrid.slotAlpha, 0.0f, 1.0f);
+    const unsigned char slotAlphaByte =
+        static_cast<unsigned char>(std::lround(slotAlpha * 255.0f));
+    const struct nk_color slotFill = nk_rgba(18, 22, 34, 170);
+    const struct nk_color slotBorder = nk_rgba(95, 110, 145, 200);
+    const struct nk_color textColor = nk_rgba(225, 232, 245, 255);
+    const struct nk_color qtyColor = nk_rgba(170, 190, 230, 255);
+    const struct nk_color transparent = nk_rgba(0, 0, 0, 0);
+    const struct nk_user_font* font = ctx->style.font;
+
+    auto drawOfferGrid = [&](const BagGridLayout& layout,
+                             const std::vector<Engine::ECS::TradeOfferItem>& offer,
+                             bool interactive) {
+        for (int slotIndex = 0; slotIndex < layout.slotCount; ++slotIndex) {
+            const struct nk_rect slotBounds = layout.slotBounds[static_cast<size_t>(slotIndex)];
+            if (drawSlotTexture && slotAlphaByte > 0) {
+                Engine::Platform::UI::DrawTexture(
+                    canvas, *slotTexture, slotBounds, nk_rgba(255, 255, 255, slotAlphaByte));
+            } else {
+                nk_fill_rect(canvas, slotBounds, 4.0f, slotFill);
+                nk_stroke_rect(canvas, slotBounds, 4.0f, 1.0f, slotBorder);
+            }
+
+            if (slotIndex >= static_cast<int>(offer.size()) || !font || !m_gameItemCatalog) {
+                continue;
+            }
+
+            const Engine::ECS::TradeOfferItem& offerItem =
+                offer[static_cast<size_t>(slotIndex)];
+            const Game::Character::GameItemDefinition* definition =
+                m_gameItemCatalog->Find(offerItem.itemId);
+            if (!definition) {
+                continue;
+            }
+
+            const Engine::Platform::Render::Texture* iconTexture =
+                GetItemIconTexture(definition->numericId);
+            if (iconTexture && iconTexture->IsLoaded()) {
+                const float iconPadding = slotBounds.w * 0.12f;
+                const struct nk_rect iconBounds = nk_rect(slotBounds.x + iconPadding,
+                                                          slotBounds.y + iconPadding,
+                                                          slotBounds.w - iconPadding * 2.0f,
+                                                          slotBounds.h - iconPadding * 2.0f);
+                Engine::Platform::UI::DrawTexture(
+                    canvas, *iconTexture, iconBounds, nk_rgba(255, 255, 255, 255));
+            }
+
+            if (offerItem.quantity > 1) {
+                const std::string qty = std::to_string(offerItem.quantity);
+                const int qtyLen = static_cast<int>(qty.size());
+                const float qtyW = font->width(font->userdata, font->height, qty.c_str(), qtyLen);
+                nk_draw_text(canvas,
+                             nk_rect(slotBounds.x + slotBounds.w - qtyW - 4.0f,
+                                     slotBounds.y + slotBounds.h - font->height - 4.0f,
+                                     qtyW,
+                                     font->height),
+                             qty.c_str(),
+                             qtyLen,
+                             font,
+                             transparent,
+                             qtyColor);
+            }
+
+            if (interactive &&
+                PointInRect(slotBounds, ctx->input.mouse.pos.x, ctx->input.mouse.pos.y) &&
+                font) {
+                const std::string& label = definition->displayName;
+                const int labelLen = static_cast<int>(std::min(label.size(), size_t{24}));
+                const float textW =
+                    font->width(font->userdata, font->height, label.c_str(), labelLen);
+                Engine::Platform::UI::PresentItemTooltip(
+                    ctx,
+                    canvas,
+                    slotBounds,
+                    screenWidth,
+                    screenHeight,
+                    BuildItemTooltipContent(
+                        m_gameItemCatalog->CreateInventoryItem(definition->numericId, 1)));
+            }
+            (void)textColor;
+        }
+    };
+
+    drawOfferGrid(selfLayout, trade->selfOffer, true);
+    drawOfferGrid(partnerLayout, trade->partnerOffer, false);
+
+    if (!font) {
+        return;
+    }
+
+    const TradeChromeLayout chrome = ComputeTradeChromeLayout(panelBounds, trade->phase);
+
+    const struct nk_color buttonText = nk_rgba(230, 236, 248, 255);
+    const struct nk_color buttonTextPressed = nk_rgba(150, 220, 168, 255);
+    const struct nk_color nameColor = nk_rgba(225, 232, 245, 255);
+    const struct nk_color nameAcceptedColor = nk_rgba(150, 220, 168, 255);
+
+    auto drawCenteredLabel = [&](const struct nk_rect& bounds,
+                                 const std::string& text,
+                                 const struct nk_color& color) {
+        if (text.empty()) {
+            return;
+        }
+        const int labelLen = static_cast<int>(std::min(text.size(), size_t{28}));
+        const float textW =
+            font->width(font->userdata, font->height, text.c_str(), labelLen);
+        nk_draw_text(canvas,
+                     nk_rect(bounds.x + (bounds.w - textW) * 0.5f,
+                             bounds.y + (bounds.h - font->height) * 0.5f,
+                             textW,
+                             font->height),
+                     text.c_str(),
+                     labelLen,
+                     font,
+                     transparent,
+                     color);
+    };
+
+    auto drawLeftLabel = [&](const struct nk_rect& bounds,
+                             const std::string& text,
+                             const struct nk_color& color) {
+        if (text.empty()) {
+            return;
+        }
+        const int labelLen = static_cast<int>(std::min(text.size(), size_t{28}));
+        nk_draw_text(canvas,
+                     nk_rect(bounds.x,
+                             bounds.y + (bounds.h - font->height) * 0.5f,
+                             bounds.w,
+                             font->height),
+                     text.c_str(),
+                     labelLen,
+                     font,
+                     transparent,
+                     color);
+    };
+
+    auto drawRightLabel = [&](const struct nk_rect& bounds,
+                              const std::string& text,
+                              const struct nk_color& color) {
+        if (text.empty()) {
+            return;
+        }
+        const int labelLen = static_cast<int>(std::min(text.size(), size_t{28}));
+        const float textW =
+            font->width(font->userdata, font->height, text.c_str(), labelLen);
+        nk_draw_text(canvas,
+                     nk_rect(bounds.x + bounds.w - textW,
+                             bounds.y + (bounds.h - font->height) * 0.5f,
+                             textW,
+                             font->height),
+                     text.c_str(),
+                     labelLen,
+                     font,
+                     transparent,
+                     color);
+    };
+
+    auto drawTradeButtonLabel = [&](const struct nk_rect& bounds, bool pressed, const char* label) {
+        const float inset = pressed ? 2.0f : 0.0f;
+        const struct nk_rect drawBounds =
+            nk_rect(bounds.x + inset, bounds.y + inset, bounds.w - inset, bounds.h - inset);
+        drawCenteredLabel(drawBounds, label, pressed ? buttonTextPressed : buttonText);
+    };
+
+    const std::string& selfName =
+        m_tradeSelfDisplayName.empty() ? std::string("You") : m_tradeSelfDisplayName;
+    const std::string& partnerName = m_tradePartnerDisplayName.empty()
+                                         ? std::string("Partner")
+                                         : m_tradePartnerDisplayName;
+
+    const float nameLabelH = static_cast<float>(font->height) + 6.0f;
+    const float nameTopY = panelBounds.y + 10.0f;
+    const float namePad = 14.0f;
+    const float nameHalfW = (panelBounds.w - namePad * 2.0f) * 0.5f;
+    const struct nk_rect selfNameBounds =
+        nk_rect(panelBounds.x + namePad, nameTopY, nameHalfW, nameLabelH);
+    const struct nk_rect partnerNameBounds =
+        nk_rect(panelBounds.x + namePad + nameHalfW, nameTopY, nameHalfW, nameLabelH);
+    drawLeftLabel(selfNameBounds,
+                  selfName,
+                  trade->selfLocked ? nameAcceptedColor : nameColor);
+    drawRightLabel(partnerNameBounds,
+                   partnerName,
+                   trade->partnerLocked ? nameAcceptedColor : nameColor);
+
+    if (trade->phase == Engine::ECS::TradePhase::Open) {
+        drawTradeButtonLabel(chrome.selfAcceptButton, trade->selfLocked, "Accept");
+        drawTradeButtonLabel(chrome.partnerAcceptButton, trade->partnerLocked, "Accept");
+    }
+    (void)slotBorder;
+    (void)textColor;
+}
+
+void CharacterMenu::SetInventoryEntity(Engine::ECS::Registry* registry, Engine::EntityID entity) {
+    m_inventoryRegistry = registry;
+    m_inventoryEntity = entity;
+    m_lastBagLogSnapshot.clear();
+    CancelBagDrag();
+}
+
+void CharacterMenu::SetInventorySyncCallback(std::function<void()> callback) {
+    m_inventorySyncCallback = std::move(callback);
+}
+
+void CharacterMenu::SetInventoryMutationCallback(std::function<void()> callback) {
+    m_inventoryMutationCallback = std::move(callback);
+}
+
+void CharacterMenu::SetInventoryActionCallback(
+    std::function<void(BagItemAction action, int slotIndex)> callback) {
+    m_inventoryActionCallback = std::move(callback);
+}
+
+void CharacterMenu::SetInventoryCombinedUseCallback(
+    std::function<void(int primarySlot, int secondarySlot)> callback) {
+    m_inventoryCombinedUseCallback = std::move(callback);
+}
+
+void CharacterMenu::RequestInventorySync() {
+    m_inventorySyncPending = true;
+}
+
+void CharacterMenu::CancelBagDrag() {
+    if (m_bagDrag.active && m_inventoryRegistry && m_inventoryEntity != Engine::INVALID_ENTITY &&
+        m_bagDrag.sourceSlot >= 0 && m_bagDrag.item.quantity > 0) {
+        auto* inventory =
+            m_inventoryRegistry->GetComponent<Engine::Systems::Inventory::InventoryComponent>(
+                m_inventoryEntity);
+        if (inventory) {
+            inventory->PlaceItemAtSlot(static_cast<size_t>(m_bagDrag.sourceSlot),
+                                         m_bagDrag.item,
+                                         static_cast<size_t>(m_bagDrag.sourceSlot));
+        }
+    }
+
+    m_bagDrag = BagDragState{};
+    m_bagClickPending = false;
+    m_bagPendingClickSlot = -1;
+    ClearBagUseSelection();
+    m_bagActionPanelOpen = false;
+    m_bagActionPanelSlot = -1;
+}
+
+bool CharacterMenu::UpdateBagItemDrag(struct nk_context* ctx,
+                                      float panelX,
+                                      float panelY,
+                                      float panelW,
+                                      float panelH,
+                                      const BagItemGridConfig& grid) {
+    if (!ctx || !m_inventoryRegistry || m_inventoryEntity == Engine::INVALID_ENTITY) {
+        return false;
+    }
+
+    if (m_bagActionPanelOpen || m_tradeQuantityPanelOpen) {
+        return true;
+    }
+
+    const struct nk_rect panelBounds = nk_rect(panelX, panelY, panelW, panelH);
+
+    auto* inventory =
+        m_inventoryRegistry->GetComponent<Engine::Systems::Inventory::InventoryComponent>(
+            m_inventoryEntity);
+    if (!inventory) {
+        return false;
+    }
+
+    if (m_bagSelectedUseSlot >= 0 &&
+        !CanUseItemAtSlot(static_cast<size_t>(m_bagSelectedUseSlot))) {
+        ClearBagUseSelection();
+    }
+
+    const BagGridLayout layout = ComputeBagGridLayout(panelBounds, grid);
+    const float mouseX = ctx->input.mouse.pos.x;
+    const float mouseY = ctx->input.mouse.pos.y;
+    const bool mousePressed = nk_input_is_mouse_pressed(&ctx->input, NK_BUTTON_LEFT);
+    const bool mouseReleased = nk_input_is_mouse_released(&ctx->input, NK_BUTTON_LEFT);
+    const bool rightReleased = nk_input_is_mouse_released(&ctx->input, NK_BUTTON_RIGHT);
+    const float snapRadius =
+        layout.slotSize * std::clamp(grid.dropSnapFraction, 0.15f, 1.0f);
+    constexpr float kDragStartPixels = 6.0f;
+
+    bool pointerOverGrid = PointInRect(layout.contentBounds, mouseX, mouseY);
+    if (!pointerOverGrid) {
+        for (const struct nk_rect& slotBounds : layout.slotBounds) {
+            if (PointInRect(slotBounds, mouseX, mouseY)) {
+                pointerOverGrid = true;
+                break;
+            }
+        }
+    }
+
+    if (rightReleased && pointerOverGrid) {
+        bool openedPanel = false;
+        for (size_t slotIndex = 0; slotIndex < layout.slotBounds.size(); ++slotIndex) {
+            if (!PointInRect(layout.slotBounds[slotIndex], mouseX, mouseY)) {
+                continue;
+            }
+            if (slotIndex >= inventory->slots.size() || inventory->slots[slotIndex].isEmpty) {
+                continue;
+            }
+            m_bagActionPanelSlot = static_cast<int>(slotIndex);
+            m_bagActionPanelAnchorX = layout.slotBounds[slotIndex].x;
+            m_bagActionPanelAnchorY = layout.slotBounds[slotIndex].y;
+            m_bagActionPanelAnchorW = layout.slotBounds[slotIndex].w;
+            m_bagActionPanelAnchorH = layout.slotBounds[slotIndex].h;
+            m_bagActionPanelOpen = true;
+            ClearBagUseSelection();
+            openedPanel = true;
+            break;
+        }
+        if (!openedPanel) {
+            m_bagActionPanelOpen = false;
+            m_bagActionPanelSlot = -1;
+        }
+        return true;
+    }
+
+    if (m_bagDrag.active) {
+        m_bagDrag.hoverDropSlot =
+            FindNearestBagSlot(mouseX, mouseY, layout.slotBounds, snapRadius);
+
+        if (mouseReleased) {
+            bool placedInTrade = false;
+            if (m_bagDrag.hoverDropSlot < 0 && m_tradePanelOpen) {
+                placedInTrade = TryAddBagItemToTradeOffer(m_bagDrag.sourceSlot);
+            }
+            if (!placedInTrade) {
+                if (m_bagDrag.hoverDropSlot >= 0) {
+                    inventory->PlaceItemAtSlot(static_cast<size_t>(m_bagDrag.hoverDropSlot),
+                                               m_bagDrag.item,
+                                               static_cast<size_t>(m_bagDrag.sourceSlot));
+                } else if (m_bagDrag.sourceSlot >= 0) {
+                    inventory->PlaceItemAtSlot(static_cast<size_t>(m_bagDrag.sourceSlot),
+                                               m_bagDrag.item,
+                                               static_cast<size_t>(m_bagDrag.sourceSlot));
+                }
+                if (m_inventoryMutationCallback) {
+                    m_inventoryMutationCallback();
+                }
+            } else if (m_bagDrag.sourceSlot >= 0) {
+                inventory->PlaceItemAtSlot(static_cast<size_t>(m_bagDrag.sourceSlot),
+                                           m_bagDrag.item,
+                                           static_cast<size_t>(m_bagDrag.sourceSlot));
+            }
+            m_bagDrag = BagDragState{};
+            m_lastBagLogSnapshot.clear();
+        }
+
+        return true;
+    }
+
+    if (m_bagClickPending && nk_input_is_mouse_down(&ctx->input, NK_BUTTON_LEFT)) {
+        const float dragDx = mouseX - m_bagPendingClickMouseX;
+        const float dragDy = mouseY - m_bagPendingClickMouseY;
+        if (dragDx * dragDx + dragDy * dragDy >= kDragStartPixels * kDragStartPixels &&
+            m_bagPendingClickSlot >= 0) {
+            const size_t slotIndex = static_cast<size_t>(m_bagPendingClickSlot);
+            if (slotIndex < inventory->slots.size() && !inventory->slots[slotIndex].isEmpty &&
+                inventory->TakeItemFromSlot(slotIndex, m_bagDrag.item)) {
+                m_bagDrag.active = true;
+                m_bagDrag.sourceSlot = m_bagPendingClickSlot;
+                m_bagDrag.hoverDropSlot = -1;
+                ClearBagUseSelection();
+            }
+            m_bagClickPending = false;
+            m_bagPendingClickSlot = -1;
+            return true;
+        }
+    }
+
+    if (mousePressed && pointerOverGrid) {
+        m_bagClickPending = true;
+        m_bagPendingClickSlot = -1;
+        m_bagPendingClickMouseX = mouseX;
+        m_bagPendingClickMouseY = mouseY;
+
+        for (size_t slotIndex = 0; slotIndex < layout.slotBounds.size(); ++slotIndex) {
+            if (!PointInRect(layout.slotBounds[slotIndex], mouseX, mouseY)) {
+                continue;
+            }
+            if (slotIndex < inventory->slots.size() && !inventory->slots[slotIndex].isEmpty) {
+                m_bagPendingClickSlot = static_cast<int>(slotIndex);
+            }
+            return true;
+        }
+    }
+
+    if (mouseReleased && m_bagClickPending) {
+        m_bagClickPending = false;
+        if (m_bagPendingClickSlot >= 0) {
+            if (!(CanModifyTradeOffer() &&
+                  TryAddBagItemToTradeOffer(m_bagPendingClickSlot))) {
+                HandleBagUseSlotClick(m_bagPendingClickSlot);
+            }
+        } else {
+            ClearBagUseSelection();
+        }
+        m_bagPendingClickSlot = -1;
+        return true;
+    }
+
+    return pointerOverGrid;
+}
+
+bool CharacterMenu::CanUseItemAtSlot(size_t slotIndex) const {
+    if (!m_inventoryRegistry || m_inventoryEntity == Engine::INVALID_ENTITY || !m_gameItemCatalog) {
+        return false;
+    }
+
+    const auto* inventory =
+        m_inventoryRegistry->GetComponent<Engine::Systems::Inventory::InventoryComponent>(
+            m_inventoryEntity);
+    if (!inventory || slotIndex >= inventory->slots.size() || inventory->slots[slotIndex].isEmpty) {
+        return false;
+    }
+
+    return m_gameItemCatalog->CanUseItem(inventory->slots[slotIndex].item.id);
+}
+
+void CharacterMenu::ClearBagUseSelection() {
+    m_bagSelectedUseSlot = -1;
+}
+
+void CharacterMenu::HandleBagUseSlotClick(int slotIndex) {
+    if (slotIndex < 0 || !CanUseItemAtSlot(static_cast<size_t>(slotIndex))) {
+        ClearBagUseSelection();
+        return;
+    }
+
+    if (m_bagSelectedUseSlot == slotIndex) {
+        ClearBagUseSelection();
+        return;
+    }
+
+    if (m_bagSelectedUseSlot >= 0) {
+        const int primarySlot = m_bagSelectedUseSlot;
+        const int secondarySlot = slotIndex;
+        ClearBagUseSelection();
+        PerformCombinedBagItemUse(primarySlot, secondarySlot);
+        return;
+    }
+
+    m_bagSelectedUseSlot = slotIndex;
+}
+
+void CharacterMenu::PerformCombinedBagItemUse(int primarySlot, int secondarySlot) {
+    if (primarySlot < 0 || secondarySlot < 0 || !m_inventoryCombinedUseCallback) {
+        return;
+    }
+
+    CancelBagDrag();
+    m_inventoryCombinedUseCallback(primarySlot, secondarySlot);
+    m_lastBagLogSnapshot.clear();
+}
+
+void CharacterMenu::PerformBagItemAction(BagItemAction action, int slotIndex) {
+    if (slotIndex < 0 || !m_inventoryActionCallback) {
+        return;
+    }
+
+    CancelBagDrag();
+    m_inventoryActionCallback(action, slotIndex);
+    m_lastBagLogSnapshot.clear();
+    if (action == BagItemAction::Drop) {
+        ClearBagUseSelection();
+    }
+}
+
+bool CharacterMenu::BuildBagActionPanelLayout(
+    int screenWidth,
+    int screenHeight,
+    const struct nk_user_font* font,
+    Engine::Platform::UI::ItemActionPanelLayout& outLayout,
+    Engine::Platform::UI::ItemTooltipContent& outContent,
+    bool& outShowUse,
+    bool& outShowTrade,
+    bool& outShowTradeX) const {
+    outLayout = {};
+    outContent = {};
+    outShowUse = false;
+    outShowTrade = false;
+    outShowTradeX = false;
+
+    if (!m_bagActionPanelOpen || m_bagActionPanelSlot < 0 || !m_inventoryRegistry ||
+        m_inventoryEntity == Engine::INVALID_ENTITY) {
+        return false;
+    }
+
+    const auto* inventory =
+        m_inventoryRegistry->GetComponent<Engine::Systems::Inventory::InventoryComponent>(
+            m_inventoryEntity);
+    if (!inventory) {
+        return false;
+    }
+
+    const size_t slotIndex = static_cast<size_t>(m_bagActionPanelSlot);
+    if (slotIndex >= inventory->slots.size() || inventory->slots[slotIndex].isEmpty) {
+        return false;
+    }
+
+    outContent = BuildItemTooltipContent(inventory->slots[slotIndex].item);
+    if (outContent.name.empty()) {
+        return false;
+    }
+
+    if (!font) {
+        return false;
+    }
+
+    outShowUse = CanUseItemAtSlot(slotIndex);
+    outShowTrade = CanShowTradeItemActions();
+    outShowTradeX = outShowTrade;
+
+    const struct nk_rect anchor = nk_rect(m_bagActionPanelAnchorX,
+                                          m_bagActionPanelAnchorY,
+                                          m_bagActionPanelAnchorW,
+                                          m_bagActionPanelAnchorH);
+    outLayout = Engine::Platform::UI::LayoutItemActionPanel(
+        anchor,
+        screenWidth,
+        screenHeight,
+        outContent,
+        outShowUse,
+        outShowTrade,
+        outShowTradeX,
+        font);
+    return outLayout.panelBounds.w > 0.0f && outLayout.panelBounds.h > 0.0f;
+}
+
+bool CharacterMenu::UpdateBagItemActionPanel(struct nk_context* ctx,
+                                           int screenWidth,
+                                           int screenHeight) {
+    if (!ctx || !m_bagActionPanelOpen || m_bagActionPanelSlot < 0) {
+        return false;
+    }
+
+    const struct nk_user_font* font = ctx->style.font;
+    if (!font) {
+        return false;
+    }
+
+    Engine::Platform::UI::ItemActionPanelLayout panelLayout;
+    Engine::Platform::UI::ItemTooltipContent content;
+    bool showUse = false;
+    bool showTrade = false;
+    bool showTradeX = false;
+    if (!BuildBagActionPanelLayout(
+            screenWidth, screenHeight, font, panelLayout, content, showUse, showTrade, showTradeX)) {
+        m_bagActionPanelOpen = false;
+        m_bagActionPanelSlot = -1;
+        return false;
+    }
+
+    const struct nk_rect panelBoundsNk =
+        nk_rect(panelLayout.panelBounds.x,
+                panelLayout.panelBounds.y,
+                panelLayout.panelBounds.w,
+                panelLayout.panelBounds.h);
+    const struct nk_rect useButtonBoundsNk =
+        nk_rect(panelLayout.useButtonBounds.x,
+                panelLayout.useButtonBounds.y,
+                panelLayout.useButtonBounds.w,
+                panelLayout.useButtonBounds.h);
+    const struct nk_rect dropButtonBoundsNk =
+        nk_rect(panelLayout.dropButtonBounds.x,
+                panelLayout.dropButtonBounds.y,
+                panelLayout.dropButtonBounds.w,
+                panelLayout.dropButtonBounds.h);
+    const struct nk_rect tradeButtonBoundsNk =
+        nk_rect(panelLayout.tradeButtonBounds.x,
+                panelLayout.tradeButtonBounds.y,
+                panelLayout.tradeButtonBounds.w,
+                panelLayout.tradeButtonBounds.h);
+    const struct nk_rect tradeXButtonBoundsNk =
+        nk_rect(panelLayout.tradeXButtonBounds.x,
+                panelLayout.tradeXButtonBounds.y,
+                panelLayout.tradeXButtonBounds.w,
+                panelLayout.tradeXButtonBounds.h);
+
+    const float mouseX = ctx->input.mouse.pos.x;
+    const float mouseY = ctx->input.mouse.pos.y;
+    if (PointInRect(panelBoundsNk, mouseX, mouseY) ||
+        nk_input_is_mouse_hovering_rect(&ctx->input, panelBoundsNk)) {
+        // Consume pointer while the action menu is open.
+    }
+
+    if (!nk_input_is_mouse_released(&ctx->input, NK_BUTTON_LEFT)) {
+        return PointInRect(panelBoundsNk, mouseX, mouseY);
+    }
+
+    const size_t slotIndex = static_cast<size_t>(m_bagActionPanelSlot);
+    if (showUse && PointInRect(useButtonBoundsNk, mouseX, mouseY)) {
+        m_bagActionPanelOpen = false;
+        m_bagActionPanelSlot = -1;
+        HandleBagUseSlotClick(static_cast<int>(slotIndex));
+        return true;
+    }
+    if (showTrade && PointInRect(tradeButtonBoundsNk, mouseX, mouseY)) {
+        m_bagActionPanelOpen = false;
+        m_bagActionPanelSlot = -1;
+        if (!TryAddBagItemToTradeOffer(static_cast<int>(slotIndex)) && !CanModifyTradeOffer()) {
+            LOG_INFO("CharacterMenu", "Accept the trade before adding items");
+        }
+        return true;
+    }
+    if (showTradeX && PointInRect(tradeXButtonBoundsNk, mouseX, mouseY)) {
+        if (CanModifyTradeOffer()) {
+            OpenTradeQuantityPanel(static_cast<int>(slotIndex));
+        } else {
+            LOG_INFO("CharacterMenu", "Accept the trade before adding items");
+            m_bagActionPanelOpen = false;
+            m_bagActionPanelSlot = -1;
+        }
+        return true;
+    }
+    if (PointInRect(dropButtonBoundsNk, mouseX, mouseY)) {
+        m_bagActionPanelOpen = false;
+        m_bagActionPanelSlot = -1;
+        PerformBagItemAction(BagItemAction::Drop, static_cast<int>(slotIndex));
+        return true;
+    }
+    if (!PointInRect(panelBoundsNk, mouseX, mouseY)) {
+        m_bagActionPanelOpen = false;
+        m_bagActionPanelSlot = -1;
+    }
+    return PointInRect(panelBoundsNk, mouseX, mouseY);
+}
+
+void CharacterMenu::DrawBagItemActionPanel(struct nk_context* ctx,
+                                           struct nk_command_buffer* canvas,
+                                           int screenWidth,
+                                           int screenHeight) {
+    if (!ctx || !canvas || !m_bagActionPanelOpen || m_bagActionPanelSlot < 0) {
+        return;
+    }
+
+    const struct nk_user_font* font = ctx->style.font;
+    if (!font) {
+        return;
+    }
+
+    Engine::Platform::UI::ItemActionPanelLayout panelLayout;
+    Engine::Platform::UI::ItemTooltipContent content;
+    bool showUse = false;
+    bool showTrade = false;
+    bool showTradeX = false;
+    if (!BuildBagActionPanelLayout(
+            screenWidth, screenHeight, font, panelLayout, content, showUse, showTrade, showTradeX)) {
+        return;
+    }
+
+    const struct nk_rect useButtonBoundsNk =
+        nk_rect(panelLayout.useButtonBounds.x,
+                panelLayout.useButtonBounds.y,
+                panelLayout.useButtonBounds.w,
+                panelLayout.useButtonBounds.h);
+    const struct nk_rect dropButtonBoundsNk =
+        nk_rect(panelLayout.dropButtonBounds.x,
+                panelLayout.dropButtonBounds.y,
+                panelLayout.dropButtonBounds.w,
+                panelLayout.dropButtonBounds.h);
+    const struct nk_rect tradeButtonBoundsNk =
+        nk_rect(panelLayout.tradeButtonBounds.x,
+                panelLayout.tradeButtonBounds.y,
+                panelLayout.tradeButtonBounds.w,
+                panelLayout.tradeButtonBounds.h);
+    const struct nk_rect tradeXButtonBoundsNk =
+        nk_rect(panelLayout.tradeXButtonBounds.x,
+                panelLayout.tradeXButtonBounds.y,
+                panelLayout.tradeXButtonBounds.w,
+                panelLayout.tradeXButtonBounds.h);
+
+    const bool hoverUse =
+        showUse && nk_input_is_mouse_hovering_rect(&ctx->input, useButtonBoundsNk);
+    const bool hoverTrade =
+        showTrade && nk_input_is_mouse_hovering_rect(&ctx->input, tradeButtonBoundsNk);
+    const bool hoverTradeX =
+        showTradeX && nk_input_is_mouse_hovering_rect(&ctx->input, tradeXButtonBoundsNk);
+    const bool hoverDrop =
+        nk_input_is_mouse_hovering_rect(&ctx->input, dropButtonBoundsNk);
+
+    Engine::Platform::UI::DrawItemActionPanel(
+        canvas,
+        panelLayout,
+        content,
+        showUse,
+        showTrade,
+        showTradeX,
+        font,
+        hoverUse,
+        hoverTrade,
+        hoverTradeX,
+        hoverDrop);
+}
+
+bool CharacterMenu::UpdateTradeQuantityPanel(struct nk_context* ctx,
+                                             int screenWidth,
+                                             int screenHeight) {
+    if (!ctx || !m_tradeQuantityPanelOpen || m_tradeQuantitySlot < 0 ||
+        !m_inventoryRegistry || m_inventoryEntity == Engine::INVALID_ENTITY) {
+        return false;
+    }
+
+    const auto* inventory =
+        m_inventoryRegistry->GetComponent<Engine::Systems::Inventory::InventoryComponent>(
+            m_inventoryEntity);
+    if (!inventory) {
+        CloseTradeQuantityPanel();
+        return false;
+    }
+
+    const size_t slotIndex = static_cast<size_t>(m_tradeQuantitySlot);
+    if (slotIndex >= inventory->slots.size() || inventory->slots[slotIndex].isEmpty) {
+        CloseTradeQuantityPanel();
+        return false;
+    }
+
+    const struct nk_user_font* font = ctx->style.font;
+    if (!font) {
+        return false;
+    }
+
+    const int ownedQty = std::max(1, static_cast<int>(inventory->slots[slotIndex].item.quantity));
+    m_tradeQuantityMax = ownedQty;
+    m_tradeQuantityValue = std::clamp(m_tradeQuantityValue, 1, m_tradeQuantityMax);
+
+    const float panelW = 220.0f;
+    const float rowH = static_cast<float>(font->height) + 12.0f;
+    const float panelH = rowH * 4.0f + 28.0f;
+    float panelX = m_tradeQuantityAnchorX + m_tradeQuantityAnchorW * 0.5f - panelW * 0.5f;
+    float panelY = m_tradeQuantityAnchorY - panelH - 8.0f;
+    if (panelY < 8.0f) {
+        panelY = m_tradeQuantityAnchorY + m_tradeQuantityAnchorH + 8.0f;
+    }
+    panelX = std::clamp(panelX, 8.0f, static_cast<float>(screenWidth) - panelW - 8.0f);
+    panelY = std::clamp(panelY, 8.0f, static_cast<float>(screenHeight) - panelH - 8.0f);
+
+    const struct nk_rect panelBounds = nk_rect(panelX, panelY, panelW, panelH);
+    const float controlY = panelBounds.y + rowH + 8.0f;
+    const float buttonW = 28.0f;
+    const float qtyFieldW = 72.0f;
+    const float controlGap = 8.0f;
+    const float controlsTotalW = buttonW + controlGap + qtyFieldW + controlGap + buttonW;
+    const float controlsX = panelBounds.x + (panelBounds.w - controlsTotalW) * 0.5f;
+
+    const struct nk_rect minusBounds = nk_rect(controlsX, controlY, buttonW, rowH);
+    const struct nk_rect qtyBounds =
+        nk_rect(controlsX + buttonW + controlGap, controlY, qtyFieldW, rowH);
+    const struct nk_rect plusBounds =
+        nk_rect(controlsX + buttonW + controlGap + qtyFieldW + controlGap, controlY, buttonW, rowH);
+
+    const float actionY = panelBounds.y + panelH - rowH - 10.0f;
+    const float actionW = (panelBounds.w - 30.0f) * 0.5f;
+    const struct nk_rect confirmBounds = nk_rect(panelBounds.x + 10.0f, actionY, actionW, rowH);
+    const struct nk_rect cancelBounds =
+        nk_rect(panelBounds.x + panelBounds.w - actionW - 10.0f, actionY, actionW, rowH);
+
+    const float mouseX = ctx->input.mouse.pos.x;
+    const float mouseY = ctx->input.mouse.pos.y;
+    if (!nk_input_is_mouse_released(&ctx->input, NK_BUTTON_LEFT)) {
+        return PointInRect(panelBounds, mouseX, mouseY);
+    }
+
+    if (PointInRect(minusBounds, mouseX, mouseY)) {
+        m_tradeQuantityValue = std::max(1, m_tradeQuantityValue - 1);
+        return true;
+    }
+    if (PointInRect(plusBounds, mouseX, mouseY)) {
+        m_tradeQuantityValue = std::min(m_tradeQuantityMax, m_tradeQuantityValue + 1);
+        return true;
+    }
+    if (PointInRect(qtyBounds, mouseX, mouseY)) {
+        m_tradeQuantityValue = std::min(m_tradeQuantityMax, m_tradeQuantityValue + 1);
+        if (m_tradeQuantityValue >= m_tradeQuantityMax) {
+            m_tradeQuantityValue = 1;
+        }
+        return true;
+    }
+    if (PointInRect(confirmBounds, mouseX, mouseY)) {
+        const int slot = m_tradeQuantitySlot;
+        const uint32_t qty = static_cast<uint32_t>(
+            std::clamp(m_tradeQuantityValue, 1, m_tradeQuantityMax));
+        CloseTradeQuantityPanel();
+        TryAddBagItemToTradeOffer(slot, qty);
+        return true;
+    }
+    if (PointInRect(cancelBounds, mouseX, mouseY) ||
+        !PointInRect(panelBounds, mouseX, mouseY)) {
+        CloseTradeQuantityPanel();
+        return true;
+    }
+    return PointInRect(panelBounds, mouseX, mouseY);
+}
+
+void CharacterMenu::DrawTradeQuantityPanel(struct nk_context* ctx,
+                                           struct nk_command_buffer* canvas,
+                                           int screenWidth,
+                                           int screenHeight) {
+    if (!ctx || !canvas || !m_tradeQuantityPanelOpen || m_tradeQuantitySlot < 0 ||
+        !m_inventoryRegistry || m_inventoryEntity == Engine::INVALID_ENTITY) {
+        return;
+    }
+
+    const auto* inventory =
+        m_inventoryRegistry->GetComponent<Engine::Systems::Inventory::InventoryComponent>(
+            m_inventoryEntity);
+    if (!inventory) {
+        CloseTradeQuantityPanel();
+        return;
+    }
+
+    const size_t slotIndex = static_cast<size_t>(m_tradeQuantitySlot);
+    if (slotIndex >= inventory->slots.size() || inventory->slots[slotIndex].isEmpty) {
+        CloseTradeQuantityPanel();
+        return;
+    }
+
+    const Engine::Systems::Inventory::Item& item = inventory->slots[slotIndex].item;
+    const Engine::Platform::UI::ItemTooltipContent content = BuildItemTooltipContent(item);
+    const struct nk_user_font* font = ctx->style.font;
+    if (!font || content.name.empty()) {
+        CloseTradeQuantityPanel();
+        return;
+    }
+
+    const int ownedQty = std::max(1, static_cast<int>(item.quantity));
+    m_tradeQuantityMax = ownedQty;
+    m_tradeQuantityValue = std::clamp(m_tradeQuantityValue, 1, m_tradeQuantityMax);
+
+    const float panelW = 220.0f;
+    const float rowH = static_cast<float>(font->height) + 12.0f;
+    const float panelH = rowH * 4.0f + 28.0f;
+    float panelX = m_tradeQuantityAnchorX + m_tradeQuantityAnchorW * 0.5f - panelW * 0.5f;
+    float panelY = m_tradeQuantityAnchorY - panelH - 8.0f;
+    if (panelY < 8.0f) {
+        panelY = m_tradeQuantityAnchorY + m_tradeQuantityAnchorH + 8.0f;
+    }
+    panelX = std::clamp(panelX, 8.0f, static_cast<float>(screenWidth) - panelW - 8.0f);
+    panelY = std::clamp(panelY, 8.0f, static_cast<float>(screenHeight) - panelH - 8.0f);
+
+    const struct nk_rect panelBounds = nk_rect(panelX, panelY, panelW, panelH);
+    const struct nk_color background = nk_rgba(16, 20, 32, 230);
+    const struct nk_color border = nk_rgba(120, 140, 180, 200);
+    const struct nk_color buttonFill = nk_rgba(34, 42, 58, 230);
+    const struct nk_color buttonHoverFill = nk_rgba(52, 66, 92, 240);
+    const struct nk_color buttonText = nk_rgba(225, 232, 245, 255);
+    const struct nk_color titleColor = nk_rgba(235, 240, 250, 255);
+    const struct nk_color hintColor = nk_rgba(150, 175, 210, 255);
+    const struct nk_color transparent = nk_rgba(0, 0, 0, 0);
+
+    nk_fill_rect(canvas, panelBounds, 6.0f, background);
+    nk_stroke_rect(canvas, panelBounds, 6.0f, 1.0f, border);
+
+    const std::string title = "Trade " + content.name;
+    const int titleLen = static_cast<int>(std::min(title.size(), size_t{32}));
+    nk_draw_text(canvas,
+                 nk_rect(panelBounds.x + 10.0f, panelBounds.y + 8.0f, panelBounds.w - 20.0f, rowH),
+                 title.c_str(),
+                 titleLen,
+                 font,
+                 transparent,
+                 titleColor);
+
+    const float controlY = panelBounds.y + rowH + 8.0f;
+    const float buttonW = 28.0f;
+    const float qtyFieldW = 72.0f;
+    const float controlGap = 8.0f;
+    const float controlsTotalW = buttonW + controlGap + qtyFieldW + controlGap + buttonW;
+    const float controlsX = panelBounds.x + (panelBounds.w - controlsTotalW) * 0.5f;
+
+    const struct nk_rect minusBounds = nk_rect(controlsX, controlY, buttonW, rowH);
+    const struct nk_rect qtyBounds =
+        nk_rect(controlsX + buttonW + controlGap, controlY, qtyFieldW, rowH);
+    const struct nk_rect plusBounds =
+        nk_rect(controlsX + buttonW + controlGap + qtyFieldW + controlGap, controlY, buttonW, rowH);
+
+    const bool hoverMinus = nk_input_is_mouse_hovering_rect(&ctx->input, minusBounds);
+    const bool hoverPlus = nk_input_is_mouse_hovering_rect(&ctx->input, plusBounds);
+
+    const auto drawButton = [&](const struct nk_rect& bounds, const char* label, bool hover) {
+        nk_fill_rect(canvas, bounds, 5.0f, hover ? buttonHoverFill : buttonFill);
+        nk_stroke_rect(canvas, bounds, 5.0f, 1.0f, border);
+        const int labelLen = static_cast<int>(std::strlen(label));
+        const float textW = font->width(font->userdata, font->height, label, labelLen);
+        nk_draw_text(canvas,
+                     nk_rect(bounds.x + (bounds.w - textW) * 0.5f,
+                             bounds.y + (bounds.h - font->height) * 0.5f,
+                             textW,
+                             font->height),
+                     label,
+                     labelLen,
+                     font,
+                     transparent,
+                     buttonText);
+    };
+
+    drawButton(minusBounds, "-", hoverMinus);
+    drawButton(plusBounds, "+", hoverPlus);
+
+    nk_fill_rect(canvas, qtyBounds, 5.0f, nk_rgba(24, 30, 42, 240));
+    nk_stroke_rect(canvas, qtyBounds, 5.0f, 1.0f, border);
+    const std::string qtyText = std::to_string(m_tradeQuantityValue);
+    const int qtyLen = static_cast<int>(qtyText.size());
+    const float qtyTextW = font->width(font->userdata, font->height, qtyText.c_str(), qtyLen);
+    nk_draw_text(canvas,
+                 nk_rect(qtyBounds.x + (qtyBounds.w - qtyTextW) * 0.5f,
+                         qtyBounds.y + (qtyBounds.h - font->height) * 0.5f,
+                         qtyTextW,
+                         font->height),
+                 qtyText.c_str(),
+                 qtyLen,
+                 font,
+                 transparent,
+                 buttonText);
+
+    const std::string maxHint = "Owned: " + std::to_string(m_tradeQuantityMax);
+    const int maxHintLen = static_cast<int>(maxHint.size());
+    const float maxHintW = font->width(font->userdata, font->height, maxHint.c_str(), maxHintLen);
+    nk_draw_text(canvas,
+                 nk_rect(panelBounds.x + (panelBounds.w - maxHintW) * 0.5f,
+                         controlY + rowH + 4.0f,
+                         maxHintW,
+                         font->height),
+                 maxHint.c_str(),
+                 maxHintLen,
+                 font,
+                 transparent,
+                 hintColor);
+
+    const float actionY = panelBounds.y + panelH - rowH - 10.0f;
+    const float actionW = (panelBounds.w - 30.0f) * 0.5f;
+    const struct nk_rect confirmBounds = nk_rect(panelBounds.x + 10.0f, actionY, actionW, rowH);
+    const struct nk_rect cancelBounds =
+        nk_rect(panelBounds.x + panelBounds.w - actionW - 10.0f, actionY, actionW, rowH);
+    const bool hoverConfirm = nk_input_is_mouse_hovering_rect(&ctx->input, confirmBounds);
+    const bool hoverCancel = nk_input_is_mouse_hovering_rect(&ctx->input, cancelBounds);
+    drawButton(confirmBounds, "Trade", hoverConfirm);
+    drawButton(cancelBounds, "Cancel", hoverCancel);
+}
+
+void CharacterMenu::SetGameItemCatalog(const Game::Character::GameItemCatalog* catalog) {
+    m_gameItemCatalog = catalog;
+    m_itemIconTextures.clear();
+    if (!catalog) {
+        return;
+    }
+
+    for (const auto& entry : catalog->Items()) {
+        const Game::Character::GameItemDefinition& definition = entry.second;
+        if (definition.iconPath.empty()) {
+            continue;
+        }
+
+        auto texture = std::make_unique<Engine::Platform::Render::Texture>(definition.iconPath.c_str());
+        if (!texture->LoadTextureUI(512)) {
+            LOG_WARNING_FMT(
+                "CharacterMenu",
+                "Item icon not loaded (%s) for '%s'",
+                definition.iconPath.c_str(),
+                definition.id.c_str());
+            continue;
+        }
+        m_itemIconTextures.emplace(definition.numericId, std::move(texture));
+    }
+
+    LOG_INFO_FMT(
+        "CharacterMenu",
+        "Loaded %zu/%zu item icon texture(s) for bag rendering",
+        m_itemIconTextures.size(),
+        catalog->Items().size());
+}
+
+Engine::Platform::UI::ItemTooltipContent CharacterMenu::BuildItemTooltipContent(
+    const Engine::Systems::Inventory::Item& item) const {
+    Engine::Platform::UI::ItemTooltipContent content;
+    if (m_gameItemCatalog) {
+        const Game::Character::GameItemTooltipInfo catalogInfo =
+            m_gameItemCatalog->BuildTooltipInfo(item.id);
+        content.name = catalogInfo.name.empty() ? item.name : catalogInfo.name;
+        content.typeLabel =
+            catalogInfo.typeLabel.empty()
+                ? Game::Character::GameItemCatalog::ItemTypeDisplayName(item.type)
+                : catalogInfo.typeLabel;
+        content.description = catalogInfo.description;
+    } else {
+        content.name = item.name.empty() ? "Item" : item.name;
+        content.typeLabel = Game::Character::GameItemCatalog::ItemTypeDisplayName(item.type);
+    }
+
+    if (content.name.empty()) {
+        content.name = "Item";
+    }
+    return content;
+}
+
+const Engine::Platform::Render::Texture* CharacterMenu::GetItemIconTexture(uint32_t numericItemId) {
+    const auto cached = m_itemIconTextures.find(numericItemId);
+    if (cached != m_itemIconTextures.end() && cached->second && cached->second->IsLoaded()) {
+        return cached->second.get();
+    }
+
+    if (!m_gameItemCatalog) {
+        return nullptr;
+    }
+
+    const Game::Character::GameItemDefinition* definition =
+        m_gameItemCatalog->FindByNumericId(numericItemId);
+    if (!definition || definition->iconPath.empty()) {
+        return nullptr;
+    }
+
+    auto texture =
+        std::make_unique<Engine::Platform::Render::Texture>(definition->iconPath.c_str());
+    if (!texture->LoadTextureUI(512)) {
+        LOG_WARNING_FMT(
+            "CharacterMenu",
+            "Lazy item icon load failed (%s) for '%s' numeric_id=%u",
+            definition->iconPath.c_str(),
+            definition->id.c_str(),
+            numericItemId);
+        return nullptr;
+    }
+
+    Engine::Platform::Render::Texture* loadedTexture = texture.get();
+    m_itemIconTextures.emplace(numericItemId, std::move(texture));
+    return loadedTexture;
+}
+
+void CharacterMenu::LogBagContentsIfChanged() {
+    if (!m_inventoryRegistry || m_inventoryEntity == Engine::INVALID_ENTITY) {
+        return;
+    }
+
+    const auto* inventory =
+        m_inventoryRegistry->GetComponent<Engine::Systems::Inventory::InventoryComponent>(
+            m_inventoryEntity);
+    if (!inventory) {
+        return;
+    }
+
+    std::ostringstream snapshot;
+    for (size_t slotIndex = 0; slotIndex < inventory->slots.size(); ++slotIndex) {
+        const auto& slot = inventory->slots[slotIndex];
+        if (slot.isEmpty) {
+            continue;
+        }
+        snapshot << Game::Inventory::DescribeInventorySlot(
+            slotIndex, slot.item, m_gameItemCatalog);
+        snapshot << " | ";
+    }
+
+    const std::string snapshotText = snapshot.str();
+    if (snapshotText == m_lastBagLogSnapshot) {
+        return;
+    }
+
+    m_lastBagLogSnapshot = snapshotText;
+    Game::Inventory::LogInventoryContents(*inventory, m_gameItemCatalog, "bag-ui");
+}
+
+bool CharacterMenu::KeyPressed(Engine::Platform::Window& window, int key, bool& wasDown) const {
+    GLFWwindow* glfwWindow = window.GetGLFWWindow();
+    if (!glfwWindow || key < 0 || key >= 512) {
+        return false;
+    }
+    const bool down = glfwGetKey(glfwWindow, key) == GLFW_PRESS;
+    const bool pressed = down && !wasDown;
+    wasDown = down;
+    return pressed;
+}
+
+void CharacterMenu::ToggleBarButton(const std::string& id) {
+    LoadedBarButton* button = FindBarButton(id);
+    if (!button) {
+        return;
+    }
+    button->pressed = !button->pressed;
+    LOG_INFO_FMT("CharacterMenu",
+                 "Bar button '%s' %s (keyboard)",
+                 id.c_str(),
+                 button->pressed ? "pressed" : "released");
+}
+
+void CharacterMenu::UpdateActionBarKeyState(Engine::Platform::Window& window) {
+    m_actionBarKeyHeld.fill(false);
+    if (!m_visible || m_actionBarSlots.empty()) {
+        return;
+    }
+
+    GLFWwindow* glfwWindow = window.GetGLFWWindow();
+    if (!glfwWindow) {
+        return;
+    }
+
+    const size_t slotCount = std::min(m_actionBarSlots.size(), m_actionBarKeyHeld.size());
+    for (size_t index = 0; index < slotCount; ++index) {
+        const int key = GLFW_KEY_1 + static_cast<int>(index);
+        m_actionBarKeyHeld[index] = glfwGetKey(glfwWindow, key) == GLFW_PRESS;
+    }
+}
+
+void CharacterMenu::Update(Engine::Platform::Window& window) {
+    if (!m_visible) {
+        return;
+    }
+    UpdateActionBarKeyState(window);
+    if (KeyPressed(window, GLFW_KEY_B, m_bKeyWasDown)) {
+        ToggleBarButton("bag");
+    }
 }
 
 void CharacterMenu::SetPaperdollCharacter(Engine::ECS::Registry* registry,
@@ -1068,6 +3049,33 @@ void CharacterMenu::SetPaperdollCharacter(Engine::ECS::Registry* registry,
     if (!m_paperdollRenderer) {
         m_paperdollRenderer = std::make_unique<Game::Character::CharacterPaperdollRenderer>();
     }
+}
+
+void CharacterMenu::OpenInspectPaperdoll(Engine::ECS::Registry* registry,
+                                         Engine::EntityID characterEntity,
+                                         Engine::Platform::Render::Shader* shader,
+                                         Game::Character::CharacterInstance* characterInstance,
+                                         const std::string& displayName) {
+    m_inspectPaperdollRegistry = registry;
+    m_inspectCharacterEntity = characterEntity;
+    m_inspectShader = shader;
+    m_inspectCharacterInstance = characterInstance;
+    m_inspectDisplayName = displayName;
+    m_inspectPaperdollOpen = true;
+    if (!m_inspectPaperdollRenderer) {
+        m_inspectPaperdollRenderer = std::make_unique<Game::Character::CharacterPaperdollRenderer>();
+    }
+    if (LoadedOverlayPanel* inspectPanel = FindOverlayPanel("inspect")) {
+        inspectPanel->positionInitialized = false;
+    }
+    LOG_INFO_FMT("CharacterMenu", "Inspect paperdoll opened for '%s'", displayName.c_str());
+}
+
+void CharacterMenu::CloseInspectPaperdoll() {
+    m_inspectPaperdollOpen = false;
+    m_inspectDisplayName.clear();
+    m_inspectCharacterEntity = Engine::INVALID_ENTITY;
+    m_inspectCharacterInstance = nullptr;
 }
 
 CloseButtonConfig CharacterMenu::ResolvePanelCloseButton(const OverlayPanelConfig& panel) const {
@@ -1085,43 +3093,248 @@ CloseButtonConfig CharacterMenu::ResolvePanelCloseButton(const OverlayPanelConfi
 }
 
 void CharacterMenu::Build(struct nk_context* ctx,
-                          const Engine::Platform::UI::MenuStyle& /*style*/,
-                          Engine::Platform::UI::UISystem& /*uiSystem*/,
+                          const Engine::Platform::UI::MenuStyle& style,
+                          Engine::Platform::UI::UISystem& uiSystem,
                           int screenWidth,
                           int screenHeight) {
-    if (!ctx || !m_visible) {
-        return;
-    }
+    BuildHudChrome(ctx, screenWidth, screenHeight);
+    BuildOpenPanels(ctx, style, uiSystem, screenWidth, screenHeight);
+}
 
-    if (screenWidth <= 0 || screenHeight <= 0) {
-        return;
-    }
-
-    if (!m_bottomBarTexture || !m_bottomBarTexture->IsLoaded()) {
-        return;
+bool CharacterMenu::TryGetBottomBarLayout(int screenWidth,
+                                          int screenHeight,
+                                          MenuScreenLayout& outLayout,
+                                          struct nk_rect& outBarBounds,
+                                          float& outDrawW,
+                                          float& outDrawH,
+                                          float& outBarX,
+                                          float& outBarY) const {
+    if (screenWidth <= 0 || screenHeight <= 0 || !m_bottomBarTexture ||
+        !m_bottomBarTexture->IsLoaded()) {
+        return false;
     }
 
     const int texW = m_bottomBarTexture->GetWidth();
     const int texH = m_bottomBarTexture->GetHeight();
     if (texW <= 0 || texH <= 0) {
-        return;
+        return false;
     }
 
     const float widthFraction = std::clamp(m_config.bottomBarWidthFraction, 0.1f, 1.0f);
+    outLayout = MenuScreenLayout::From(screenWidth, screenHeight, m_config.ReferenceScreen());
+    outDrawW = outLayout.ScaledReferenceWidth(widthFraction);
+    outDrawH = outDrawW * (static_cast<float>(texH) / static_cast<float>(texW));
+    outBarX = outLayout.CenteredX(outDrawW);
+    outBarY = outLayout.screenHeight - outDrawH;
+    outBarBounds = nk_rect(outBarX, outBarY, outDrawW, outDrawH);
+    return true;
+}
+
+void CharacterMenu::BuildActionBar(struct nk_context* ctx,
+                                   struct nk_command_buffer* canvas,
+                                   int screenWidth,
+                                   int screenHeight,
+                                   const MenuScreenLayout& layout) {
+    if (!ctx || !canvas || m_actionBarSlots.empty()) {
+        return;
+    }
+
+    const float slotSize = layout.Scale(m_config.actionBar.slotSizePixels);
+    const float slotSpacing = layout.Scale(m_config.actionBar.slotSpacingPixels);
+    const float totalHeight =
+        static_cast<float>(m_actionBarSlots.size()) * slotSize +
+        static_cast<float>(m_actionBarSlots.size() > 0 ? m_actionBarSlots.size() - 1 : 0) *
+            slotSpacing;
+
+    const float anchorX = screenWidth * std::clamp(m_config.actionBar.xFraction, 0.0f, 1.0f);
+    const float anchorY = screenHeight * std::clamp(m_config.actionBar.yFraction, 0.0f, 1.0f);
+    float slotTop = anchorY - totalHeight * 0.5f;
+
+    const struct nk_user_font* font = ctx->style.font;
+    const float labelHeight = font ? font->height * 0.85f : 12.0f;
+
+    for (size_t index = 0; index < m_actionBarSlots.size(); ++index) {
+        const LoadedActionBarSlot& slot = m_actionBarSlots[index];
+        const bool keyHeld =
+            index < m_actionBarKeyHeld.size() && m_actionBarKeyHeld[index];
+        const struct nk_rect slotBounds = nk_rect(anchorX, slotTop, slotSize, slotSize);
+        const bool mouseHeld =
+            nk_input_is_mouse_hovering_rect(&ctx->input, slotBounds) &&
+            ctx->input.mouse.buttons[NK_BUTTON_LEFT].down;
+        if (index < m_actionBarMouseHeld.size()) {
+            m_actionBarMouseHeld[index] = mouseHeld;
+        }
+        const bool skillActive = !m_actionBarHighlightSkillId.empty() &&
+                                 slot.skillId == m_actionBarHighlightSkillId;
+        const bool showPressed = keyHeld || mouseHeld || skillActive;
+        const Engine::Platform::Render::Texture* texture = nullptr;
+        if (showPressed) {
+            texture = slot.pressedTexture && slot.pressedTexture->IsLoaded()
+                          ? slot.pressedTexture.get()
+                          : slot.unpressedTexture.get();
+        } else {
+            texture = slot.unpressedTexture && slot.unpressedTexture->IsLoaded()
+                          ? slot.unpressedTexture.get()
+                          : slot.pressedTexture.get();
+        }
+
+        if (nk_input_is_mouse_hovering_rect(&ctx->input, slotBounds)) {
+            m_pointerOverActionBarUi = true;
+        }
+
+        if (texture && texture->IsLoaded()) {
+            Engine::Platform::UI::DrawTexture(
+                canvas, *texture, slotBounds, nk_rgba(255, 255, 255, 255));
+        } else {
+            nk_fill_rect(canvas, slotBounds, 4.0f, nk_rgba(40, 40, 48, 200));
+            nk_stroke_rect(canvas, slotBounds, 4.0f, 1.0f, nk_rgba(120, 120, 140, 255));
+        }
+
+        if (m_skillCooldownQuery) {
+            const Game::UI::CooldownTimerSnapshot cooldown = m_skillCooldownQuery(slot.skillId);
+            if (cooldown.remainingSeconds > 0.0f) {
+                Game::UI::DrawCooldownOverlay(
+                    canvas,
+                    slotBounds,
+                    cooldown.remainingSeconds,
+                    cooldown.totalSeconds,
+                    font);
+            }
+        }
+
+        if (font) {
+            const std::string label = std::to_string(index + 1);
+            const int labelLen = static_cast<int>(label.size());
+            const float textW =
+                font->width(font->userdata, font->height, label.c_str(), labelLen);
+            const float textX = slotBounds.x + 4.0f;
+            const float textY = slotBounds.y + slotBounds.h - labelHeight - 2.0f;
+            nk_draw_text(canvas,
+                         nk_rect(textX, textY, textW + 4.0f, labelHeight),
+                         label.c_str(),
+                         static_cast<int>(label.size()),
+                         font,
+                         nk_rgba(0, 0, 0, 180),
+                         nk_rgba(255, 255, 255, 230));
+        }
+
+        if (nk_input_is_mouse_click_in_rect(&ctx->input, NK_BUTTON_LEFT, slotBounds) &&
+            m_skillActivateCallback) {
+            m_skillActivateCallback(slot.skillId);
+        }
+
+        slotTop += slotSize + slotSpacing;
+    }
+}
+
+void CharacterMenu::BuildHudChrome(struct nk_context* ctx, int screenWidth, int screenHeight) {
+    if (!ctx || !m_visible) {
+        return;
+    }
+
     const MenuScreenLayout layout =
         MenuScreenLayout::From(screenWidth, screenHeight, m_config.ReferenceScreen());
-    const float drawW = layout.ScaledReferenceWidth(widthFraction);
-    const float drawH = drawW * (static_cast<float>(texH) / static_cast<float>(texW));
-    const float x = layout.CenteredX(drawW);
-    const float y = layout.screenHeight - drawH;
-    const struct nk_rect barBounds = nk_rect(x, y, drawW, drawH);
 
     m_pointerOverBarUi = false;
+    m_pointerOverActionBarUi = false;
+
+    Engine::Platform::UI::OverlayScope overlay(
+        ctx,
+        "CharacterMenuHud",
+        Engine::Platform::UI::OverlayScope::FullScreen(screenWidth, screenHeight));
+    if (!overlay.IsOpen() || !overlay.Canvas()) {
+        return;
+    }
+
+    struct nk_command_buffer* canvas = overlay.Canvas();
+    BuildActionBar(ctx, canvas, screenWidth, screenHeight, layout);
+
+    MenuScreenLayout bottomLayout;
+    struct nk_rect barBounds{};
+    float drawW = 0.0f;
+    float drawH = 0.0f;
+    float barX = 0.0f;
+    float barY = 0.0f;
+    if (!TryGetBottomBarLayout(
+            screenWidth, screenHeight, bottomLayout, barBounds, drawW, drawH, barX, barY)) {
+        return;
+    }
+
+    Engine::Platform::UI::DrawTexture(
+        canvas, *m_bottomBarTexture, barBounds, nk_rgba(255, 255, 255, 255));
+
+    if (nk_input_is_mouse_hovering_rect(&ctx->input, barBounds)) {
+        m_pointerOverBarUi = true;
+    }
+
+    for (LoadedBarButton& button : m_barButtons) {
+        const Engine::Platform::Render::Texture* texture = nullptr;
+        if (button.pressed) {
+            texture = button.lightTexture && button.lightTexture->IsLoaded()
+                          ? button.lightTexture.get()
+                          : button.darkTexture.get();
+        } else {
+            texture = button.darkTexture && button.darkTexture->IsLoaded()
+                          ? button.darkTexture.get()
+                          : button.lightTexture.get();
+        }
+
+        if (!texture || !texture->IsLoaded()) {
+            continue;
+        }
+
+        const float heightFraction =
+            button.heightFraction >= 0.0f ? button.heightFraction : m_config.barButtonHeightFraction;
+        const float iconHeight = drawH * std::clamp(heightFraction, 0.05f, 1.0f);
+        const int iconTexW = texture->GetWidth();
+        const int iconTexH = texture->GetHeight();
+        const float aspect =
+            iconTexH > 0 ? static_cast<float>(iconTexW) / static_cast<float>(iconTexH) : 1.0f;
+        const float iconWidth = iconHeight * aspect;
+        const float yFraction =
+            button.yFraction >= 0.0f ? button.yFraction : m_config.barButtonYFraction;
+        const float iconCenterY = barY + drawH * std::clamp(yFraction, 0.0f, 1.0f);
+        const float iconTop = iconCenterY - iconHeight * 0.5f;
+        const float iconCenterX = barX + drawW * button.xFraction;
+        const float iconLeft = iconCenterX - iconWidth * 0.5f;
+        const struct nk_rect buttonBounds = nk_rect(iconLeft, iconTop, iconWidth, iconHeight);
+
+        if (nk_input_is_mouse_hovering_rect(&ctx->input, buttonBounds)) {
+            m_pointerOverBarUi = true;
+        }
+
+        const bool activated =
+            nk_input_is_mouse_click_in_rect(&ctx->input, NK_BUTTON_LEFT, buttonBounds);
+        if (activated) {
+            button.pressed = !button.pressed;
+            LOG_INFO_FMT("CharacterMenu",
+                         "Bar button '%s' %s",
+                         button.id.c_str(),
+                         button.pressed ? "pressed" : "released");
+        }
+
+        Engine::Platform::UI::DrawTexture(
+            canvas, *texture, buttonBounds, nk_rgba(255, 255, 255, 255));
+    }
+}
+
+void CharacterMenu::BuildOpenPanels(struct nk_context* ctx,
+                                    const Engine::Platform::UI::MenuStyle& style,
+                                    Engine::Platform::UI::UISystem& uiSystem,
+                                    int screenWidth,
+                                    int screenHeight) {
+    if (!ctx || !m_visible || screenWidth <= 0 || screenHeight <= 0) {
+        return;
+    }
+
+    const MenuScreenLayout layout =
+        MenuScreenLayout::From(screenWidth, screenHeight, m_config.ReferenceScreen());
+
     m_pointerOverPanelUi = false;
 
     Engine::Platform::UI::OverlayScope overlay(
         ctx,
-        "CharacterMenu",
+        "CharacterMenuPanels",
         Engine::Platform::UI::OverlayScope::FullScreen(screenWidth, screenHeight));
     if (!overlay.IsOpen() || !overlay.Canvas()) {
         return;
@@ -1135,7 +3348,12 @@ void CharacterMenu::Build(struct nk_context* ctx,
         }
 
         LoadedBarButton* barButton = FindBarButton(panel.config.buttonId);
-        if (!barButton || !barButton->pressed) {
+        const bool tradePanelVisible =
+            panel.config.buttonId == "trade" && m_tradePanelOpen;
+        const bool inspectPanelVisible =
+            panel.config.buttonId == "inspect" && m_inspectPaperdollOpen;
+        const bool barPanelVisible = barButton && barButton->pressed;
+        if (!tradePanelVisible && !inspectPanelVisible && !barPanelVisible) {
             panel.dragging = false;
             continue;
         }
@@ -1198,6 +3416,9 @@ void CharacterMenu::Build(struct nk_context* ctx,
             }
         } else if (nk_input_is_mouse_click_down_in_rect(
                        &ctx->input, NK_BUTTON_LEFT, panelBounds, nk_true)) {
+            if (m_bagDrag.active) {
+                m_pointerOverPanelUi = true;
+            } else {
             panel.dragGrabX = ctx->input.mouse.pos.x - panelBounds.x;
             panel.dragGrabY = ctx->input.mouse.pos.y - panelBounds.y;
 
@@ -1210,9 +3431,42 @@ void CharacterMenu::Build(struct nk_context* ctx,
             const bool overRotateRight =
                 panel.config.hasCharacterPreview &&
                 nk_input_is_mouse_hovering_rect(&ctx->input, rotateBounds.right);
-            if (!overClose && !overRotateLeft && !overRotateRight) {
+            bool canStartPanelDrag = !overClose && !overRotateLeft && !overRotateRight;
+            if (panel.config.hasItemGrid) {
+                const BagGridLayout gridLayout =
+                    ComputeBagGridLayout(panelBounds, panel.config.itemGrid);
+                if (PointInRect(
+                        gridLayout.contentBounds,
+                        ctx->input.mouse.pos.x,
+                        ctx->input.mouse.pos.y)) {
+                    canStartPanelDrag = false;
+                }
+            } else if (panel.config.hasTradeGrids) {
+                const BagGridLayout selfGridLayout =
+                    ComputeBagGridLayout(panelBounds, panel.config.selfTradeGrid);
+                const BagGridLayout partnerGridLayout =
+                    ComputeBagGridLayout(panelBounds, panel.config.partnerTradeGrid);
+                if (PointInRect(selfGridLayout.contentBounds,
+                                ctx->input.mouse.pos.x,
+                                ctx->input.mouse.pos.y) ||
+                    PointInRect(partnerGridLayout.contentBounds,
+                                ctx->input.mouse.pos.x,
+                                ctx->input.mouse.pos.y)) {
+                    canStartPanelDrag = false;
+                }
+            } else if (panel.config.dragFromEdgesOnly) {
+                canStartPanelDrag =
+                    canStartPanelDrag &&
+                    IsMouseOnPanelDragEdge(
+                        panelBounds,
+                        ctx->input.mouse.pos.x,
+                        ctx->input.mouse.pos.y,
+                        panel.config.dragEdgeFraction);
+            }
+            if (canStartPanelDrag && panel.config.movable) {
                 panel.dragging = true;
                 m_pointerOverPanelUi = true;
+            }
             }
         }
 
@@ -1222,52 +3476,172 @@ void CharacterMenu::Build(struct nk_context* ctx,
             panelBounds,
             nk_rgba(255, 255, 255, 255));
 
-        if (panel.config.hasCharacterPreview && m_paperdollRenderer && m_paperdollRegistry &&
-            m_paperdollShader && m_paperdollCharacterInstance &&
-            m_paperdollCharacterEntity != Engine::INVALID_ENTITY) {
-            m_paperdollRenderer->SetYawDegrees(m_paperdollYawDegrees);
-            const struct nk_rect previewBounds =
-                CharacterPreviewBoundsFromPanel(panelBounds, panel.config);
-            DrawCharacterPreviewOnPanel(canvas,
-                                        previewBounds,
-                                        *m_paperdollRenderer,
-                                        *m_paperdollRegistry,
-                                        m_paperdollCharacterEntity,
-                                        *m_paperdollCharacterInstance,
-                                        *m_paperdollShader);
-
-            const PaperdollRotateButtonBounds liveRotateBounds =
-                PaperdollRotateBoundsFromPanel(panelBounds, m_config.paperdollRotate);
-
-            const auto now = std::chrono::steady_clock::now();
-            float deltaSeconds = 1.0f / 60.0f;
-            if (m_hasPaperdollRotateClock) {
-                deltaSeconds = std::chrono::duration<float>(now - m_lastPaperdollRotateTime).count();
-                deltaSeconds = std::clamp(deltaSeconds, 0.0f, 0.05f);
+        if (panel.config.hasItemGrid) {
+            const auto* inventory =
+                m_inventoryRegistry
+                    ? m_inventoryRegistry->GetComponent<
+                          Engine::Systems::Inventory::InventoryComponent>(m_inventoryEntity)
+                    : nullptr;
+            if (m_inventorySyncPending && m_inventorySyncCallback) {
+                CancelBagDrag();
+                m_inventorySyncCallback();
+                m_inventorySyncPending = false;
             }
-            m_lastPaperdollRotateTime = now;
-            m_hasPaperdollRotateClock = true;
 
-            const float speed = std::max(0.0f, m_config.paperdollRotate.degreesPerSecond);
-            const float step = speed * deltaSeconds;
-            // Left arrow: clockwise. Right arrow: anti-clockwise. Hold for smooth spin.
-            if (DrawPaperdollRotateButton(ctx,
-                                          canvas,
-                                          liveRotateBounds.left,
-                                          m_paperdollRotateLeftTexture.get(),
-                                          m_paperdollRotateLeftLightTexture.get(),
-                                          m_pointerOverPanelUi)) {
-                m_paperdollYawDegrees = NormalizeYawDegrees(m_paperdollYawDegrees - step);
-                m_paperdollRenderer->SetYawDegrees(m_paperdollYawDegrees);
+            if (this->UpdateBagItemDrag(ctx,
+                                        panelBounds.x,
+                                        panelBounds.y,
+                                        panelBounds.w,
+                                        panelBounds.h,
+                                        panel.config.itemGrid) ||
+                m_bagDrag.active ||
+                m_bagActionPanelOpen ||
+                m_tradeQuantityPanelOpen) {
+                m_pointerOverPanelUi = true;
             }
-            if (DrawPaperdollRotateButton(ctx,
-                                          canvas,
-                                          liveRotateBounds.right,
-                                          m_paperdollRotateRightTexture.get(),
-                                          m_paperdollRotateRightLightTexture.get(),
-                                          m_pointerOverPanelUi)) {
-                m_paperdollYawDegrees = NormalizeYawDegrees(m_paperdollYawDegrees + step);
-                m_paperdollRenderer->SetYawDegrees(m_paperdollYawDegrees);
+
+            LogBagContentsIfChanged();
+            DrawBagItemGrid(ctx,
+                            canvas,
+                            panelBounds,
+                            panel.config.itemGrid,
+                            panel.slotTexture.get(),
+                            m_inventoryRegistry,
+                            m_inventoryEntity,
+                            *this,
+                            m_bagDrag,
+                            screenWidth,
+                            screenHeight);
+        }
+
+        if (panel.config.hasTradeGrids && m_tradePanelOpen) {
+            const Engine::ECS::PlayerTradeComponent* trade =
+                m_tradeRegistry && m_tradeEntity != Engine::INVALID_ENTITY
+                    ? m_tradeRegistry->GetComponent<Engine::ECS::PlayerTradeComponent>(
+                          m_tradeEntity)
+                    : nullptr;
+            m_tradePanelX = panelBounds.x;
+            m_tradePanelY = panelBounds.y;
+            m_tradePanelW = panelBounds.w;
+            m_tradePanelH = panelBounds.h;
+
+            if (trade) {
+                UpdateTradeInteractions(ctx, panelBounds, panel.config.selfTradeGrid, trade);
+                if (m_bagDrag.active) {
+                    m_pointerOverPanelUi = true;
+                }
+                DrawTradeGrids(ctx,
+                               canvas,
+                               panelBounds,
+                               panel.config.selfTradeGrid,
+                               panel.config.partnerTradeGrid,
+                               panel.slotTexture.get(),
+                               trade,
+                               screenWidth,
+                               screenHeight);
+            }
+        }
+
+        if (panel.config.hasCharacterPreview) {
+            const bool isInspectPanel = panel.config.buttonId == "inspect";
+            Game::Character::CharacterPaperdollRenderer* paperdollRenderer = nullptr;
+            Engine::ECS::Registry* paperdollRegistry = nullptr;
+            Engine::EntityID paperdollEntity = Engine::INVALID_ENTITY;
+            Game::Character::CharacterInstance* paperdollInstance = nullptr;
+            Engine::Platform::Render::Shader* paperdollShader = nullptr;
+            float* paperdollYawDegrees = nullptr;
+            bool* hasRotateClock = nullptr;
+            std::chrono::steady_clock::time_point* lastRotateTime = nullptr;
+
+            if (isInspectPanel) {
+                paperdollRenderer = m_inspectPaperdollRenderer.get();
+                paperdollRegistry = m_inspectPaperdollRegistry;
+                paperdollEntity = m_inspectCharacterEntity;
+                paperdollInstance = m_inspectCharacterInstance;
+                paperdollShader = m_inspectShader;
+                paperdollYawDegrees = &m_inspectPaperdollYawDegrees;
+                hasRotateClock = &m_hasInspectPaperdollRotateClock;
+                lastRotateTime = &m_lastInspectPaperdollRotateTime;
+            } else {
+                paperdollRenderer = m_paperdollRenderer.get();
+                paperdollRegistry = m_paperdollRegistry;
+                paperdollEntity = m_paperdollCharacterEntity;
+                paperdollInstance = m_paperdollCharacterInstance;
+                paperdollShader = m_paperdollShader;
+                paperdollYawDegrees = &m_paperdollYawDegrees;
+                hasRotateClock = &m_hasPaperdollRotateClock;
+                lastRotateTime = &m_lastPaperdollRotateTime;
+            }
+
+            if (isInspectPanel && !m_inspectDisplayName.empty()) {
+                const struct nk_user_font* font = ctx->style.font;
+                if (font) {
+                    const struct nk_color transparent = nk_rgba(0, 0, 0, 0);
+                    const struct nk_color nameColor = nk_rgba(225, 232, 245, 255);
+                    const std::string& name = m_inspectDisplayName;
+                    const int nameLen = static_cast<int>(std::min(name.size(), size_t{32}));
+                    const float textW =
+                        font->width(font->userdata, font->height, name.c_str(), nameLen);
+                    const float nameTopY = panelBounds.y + 10.0f;
+                    nk_draw_text(canvas,
+                                 nk_rect(panelBounds.x + (panelBounds.w - textW) * 0.5f,
+                                         nameTopY,
+                                         textW,
+                                         static_cast<float>(font->height)),
+                                 name.c_str(),
+                                 nameLen,
+                                 font,
+                                 transparent,
+                                 nameColor);
+                }
+            }
+
+            if (paperdollRenderer && paperdollRegistry && paperdollShader && paperdollInstance &&
+                paperdollEntity != Engine::INVALID_ENTITY) {
+                paperdollRenderer->SetYawDegrees(*paperdollYawDegrees);
+                const struct nk_rect previewBounds =
+                    CharacterPreviewBoundsFromPanel(panelBounds, panel.config);
+                DrawCharacterPreviewOnPanel(canvas,
+                                            previewBounds,
+                                            *paperdollRenderer,
+                                            *paperdollRegistry,
+                                            paperdollEntity,
+                                            *paperdollInstance,
+                                            *paperdollShader);
+
+                const PaperdollRotateButtonBounds liveRotateBounds =
+                    PaperdollRotateBoundsFromPanel(panelBounds, m_config.paperdollRotate);
+
+                const auto now = std::chrono::steady_clock::now();
+                float deltaSeconds = 1.0f / 60.0f;
+                if (*hasRotateClock) {
+                    deltaSeconds =
+                        std::chrono::duration<float>(now - *lastRotateTime).count();
+                    deltaSeconds = std::clamp(deltaSeconds, 0.0f, 0.05f);
+                }
+                *lastRotateTime = now;
+                *hasRotateClock = true;
+
+                const float speed = std::max(0.0f, m_config.paperdollRotate.degreesPerSecond);
+                const float step = speed * deltaSeconds;
+                if (DrawPaperdollRotateButton(ctx,
+                                              canvas,
+                                              liveRotateBounds.left,
+                                              m_paperdollRotateLeftTexture.get(),
+                                              m_paperdollRotateLeftLightTexture.get(),
+                                              m_pointerOverPanelUi)) {
+                    *paperdollYawDegrees = NormalizeYawDegrees(*paperdollYawDegrees - step);
+                    paperdollRenderer->SetYawDegrees(*paperdollYawDegrees);
+                }
+                if (DrawPaperdollRotateButton(ctx,
+                                              canvas,
+                                              liveRotateBounds.right,
+                                              m_paperdollRotateRightTexture.get(),
+                                              m_paperdollRotateRightLightTexture.get(),
+                                              m_pointerOverPanelUi)) {
+                    *paperdollYawDegrees = NormalizeYawDegrees(*paperdollYawDegrees + step);
+                    paperdollRenderer->SetYawDegrees(*paperdollYawDegrees);
+                }
             }
         }
 
@@ -1283,73 +3657,115 @@ void CharacterMenu::Build(struct nk_context* ctx,
                                  m_closeDarkTexture.get(),
                                  m_closeLightTexture.get(),
                                  m_pointerOverPanelUi)) {
-            barButton->pressed = false;
+            if (barButton) {
+                barButton->pressed = false;
+            }
+            if (panel.config.buttonId == "trade") {
+                DeclineAndCloseTradePanel();
+            }
+            if (panel.config.buttonId == "inspect") {
+                CloseInspectPaperdoll();
+            }
             panel.dragging = false;
             LOG_INFO_FMT("CharacterMenu", "Panel '%s' closed", panel.config.buttonId.c_str());
         }
     }
 
-    Engine::Platform::UI::DrawTexture(
-        canvas,
-        *m_bottomBarTexture,
-        barBounds,
-        nk_rgba(255, 255, 255, 255));
+    DrawSettingsMenu(ctx, style, uiSystem, screenWidth, screenHeight);
+}
 
-    if (nk_input_is_mouse_hovering_rect(&ctx->input, barBounds)) {
-        m_pointerOverBarUi = true;
+void CharacterMenu::BuildPopups(struct nk_context* ctx, int screenWidth, int screenHeight) {
+    if (!ctx || !m_visible) {
+        return;
     }
 
-    for (LoadedBarButton& button : m_barButtons) {
-        const Engine::Platform::Render::Texture* texture = nullptr;
-        if (button.pressed) {
-            texture = button.lightTexture && button.lightTexture->IsLoaded()
-                          ? button.lightTexture.get()
-                          : button.darkTexture.get();
-        } else {
-            texture = button.darkTexture && button.darkTexture->IsLoaded()
-                          ? button.darkTexture.get()
-                          : button.lightTexture.get();
-        }
-
-        if (!texture || !texture->IsLoaded()) {
-            continue;
-        }
-
-        const float heightFraction =
-            button.heightFraction >= 0.0f ? button.heightFraction : m_config.barButtonHeightFraction;
-        const float iconHeight = drawH * std::clamp(heightFraction, 0.05f, 1.0f);
-        const int texW = texture->GetWidth();
-        const int texH = texture->GetHeight();
-        const float aspect = texH > 0 ? static_cast<float>(texW) / static_cast<float>(texH) : 1.0f;
-        const float iconWidth = iconHeight * aspect;
-        const float yFraction =
-            button.yFraction >= 0.0f ? button.yFraction : m_config.barButtonYFraction;
-        const float iconCenterY = y + drawH * std::clamp(yFraction, 0.0f, 1.0f);
-        const float iconTop = iconCenterY - iconHeight * 0.5f;
-        const float iconCenterX = x + drawW * button.xFraction;
-        const float iconLeft = iconCenterX - iconWidth * 0.5f;
-        const struct nk_rect buttonBounds = nk_rect(iconLeft, iconTop, iconWidth, iconHeight);
-
-        if (nk_input_is_mouse_hovering_rect(&ctx->input, buttonBounds)) {
-            m_pointerOverBarUi = true;
-        }
-
-        const bool activated =
-            nk_input_is_mouse_click_in_rect(&ctx->input, NK_BUTTON_LEFT, buttonBounds);
-        if (activated) {
-            button.pressed = !button.pressed;
-            LOG_INFO_FMT("CharacterMenu",
-                         "Bar button '%s' %s",
-                         button.id.c_str(),
-                         button.pressed ? "pressed" : "released");
-        }
-
-        Engine::Platform::UI::DrawTexture(
-            canvas,
-            *texture,
-            buttonBounds,
-            nk_rgba(255, 255, 255, 255));
+    if (m_bagActionPanelOpen) {
+        UpdateBagItemActionPanel(ctx, screenWidth, screenHeight);
     }
+    if (m_tradeQuantityPanelOpen) {
+        UpdateTradeQuantityPanel(ctx, screenWidth, screenHeight);
+    }
+    if (m_bagActionPanelOpen || m_tradeQuantityPanelOpen) {
+        m_pointerOverPanelUi = true;
+    }
+
+    if (!m_bagActionPanelOpen && !m_tradeQuantityPanelOpen) {
+        return;
+    }
+
+    Engine::Platform::UI::OverlayScope overlay(
+        ctx,
+        "CharacterMenuPopups",
+        Engine::Platform::UI::OverlayScope::FullScreen(screenWidth, screenHeight));
+    if (!overlay.IsOpen() || !overlay.Canvas()) {
+        return;
+    }
+
+    struct nk_command_buffer* canvas = overlay.Canvas();
+    DrawBagItemActionPanel(ctx, canvas, screenWidth, screenHeight);
+    DrawTradeQuantityPanel(ctx, canvas, screenWidth, screenHeight);
+}
+
+void CharacterMenu::DrawSettingsMenu(struct nk_context* ctx,
+                                     const Engine::Platform::UI::MenuStyle& style,
+                                     Engine::Platform::UI::UISystem& uiSystem,
+                                     int screenWidth,
+                                     int screenHeight) {
+    if (!ctx || screenWidth <= 0 || screenHeight <= 0) {
+        return;
+    }
+
+    LoadedBarButton* settingsButton = FindBarButton("settings");
+    if (!settingsButton || !settingsButton->pressed) {
+        return;
+    }
+
+    const float panelW = style.metrics.menuButtonWidth + style.metrics.windowPaddingX * 2.0f + 80.0f;
+    const float panelH = style.metrics.menuButtonHeight * 5.0f + style.metrics.itemSpacing * 4.0f +
+                         style.metrics.titleHeight + 48.0f;
+    const float x = std::max(16.0f, static_cast<float>(screenWidth) * 0.5f - panelW * 0.5f);
+    const float y = std::max(16.0f, static_cast<float>(screenHeight) * 0.5f - panelH * 0.5f);
+
+    if (nk_begin(
+            ctx,
+            "Settings",
+            nk_rect(x, y, panelW, panelH),
+            NK_WINDOW_BORDER | NK_WINDOW_TITLE | NK_WINDOW_MOVABLE | NK_WINDOW_CLOSABLE |
+                NK_WINDOW_SCALABLE)) {
+        m_pointerOverPanelUi = true;
+
+        nk_layout_row_dynamic(ctx, style.metrics.menuButtonHeight, 1);
+        static int showFps = 1;
+        nk_checkbox_label(ctx, "Show FPS", &showFps);
+
+        nk_layout_row_dynamic(ctx, style.metrics.itemSpacing, 1);
+        nk_spacing(ctx, 1);
+
+        static int masterVolumeEnabled = 1;
+        nk_checkbox_label(ctx, "Master volume", &masterVolumeEnabled);
+
+        nk_layout_row_dynamic(ctx, style.metrics.menuButtonHeight, 1);
+        static float masterVolume = 0.75f;
+        nk_slider_float(ctx, 0.0f, &masterVolume, 1.0f, 0.01f);
+
+        nk_layout_row_dynamic(ctx, style.metrics.itemSpacing, 1);
+        nk_spacing(ctx, 1);
+
+        static int qualityIndex = 1;
+        static const char* qualityOptions[] = {"Low", "Medium", "High"};
+        nk_combo(ctx, qualityOptions, 3, qualityIndex, 24, nk_vec2(180, 200));
+
+        nk_layout_row_dynamic(ctx, style.metrics.itemSpacing, 1);
+        nk_spacing(ctx, 1);
+
+        if (uiSystem.MenuButton(ctx, "Apply")) {
+            LOG_INFO("CharacterMenu", "Settings apply clicked (placeholder)");
+        }
+    } else {
+        settingsButton->pressed = false;
+        LOG_INFO("CharacterMenu", "Settings menu closed");
+    }
+    nk_end(ctx);
 }
 
 } // namespace UI

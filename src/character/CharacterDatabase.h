@@ -20,8 +20,11 @@ public:
 
     bool FetchLoadout(const CharacterLoginContext& context, CharacterLoadout& out) override;
 
+    const std::string& GetLoadoutsDirectory() const { return m_loadoutsDir; }
+
 private:
     bool LoadFromFile(const std::string& path, CharacterLoadout& out) const;
+    std::string ResolveLoadoutFilePath(const std::string& fileName) const;
 
     std::string m_loadoutsDir;
 };

@@ -9,10 +9,31 @@ inputs:
 runs:
   using: composite
   steps:
+    - name: Enable Git long paths
+      shell: python
+      run: |
+        import subprocess
+        subprocess.check_call(["git", "config", "--global", "core.longpaths", "true"])
+
     - name: Resolve RenderingEngine submodule commit
       id: rendering_engine
-      shell: bash
-      run: echo "sha=$(git ls-tree HEAD RenderingEngine | awk '{print $3}')" >> "$GITHUB_OUTPUT"
+      shell: python
+      run: |
+        import os
+        import subprocess
+
+        line = subprocess.check_output(
+            ["git", "ls-tree", "HEAD", "RenderingEngine"],
+            text=True,
+        ).strip()
+        if not line:
+            raise SystemExit("RenderingEngine submodule gitlink missing from HEAD")
+        parts = line.split()
+        if len(parts) < 3:
+            raise SystemExit(f"Could not parse RenderingEngine commit from: {line}")
+        sha = parts[2]
+        with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as out:
+            out.write(f"sha={sha}\n")
 
     - name: Checkout RenderingEngine
       uses: actions/checkout@v4
@@ -21,4 +42,5 @@ runs:
         path: RenderingEngine
         ref: ${{ steps.rendering_engine.outputs.sha }}
         token: ${{ inputs.token }}
-        submodules: recursive
+        # Libs are bootstrapped in CI (zip) to avoid MAX_PATH under deep _work paths.
+        submodules: false

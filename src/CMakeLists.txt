@@ -29,6 +29,8 @@ if(NOT GAME_SOURCES)
     set(GAME_SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/main.cpp")
 endif()
 
+list(FILTER GAME_SOURCES EXCLUDE REGEX ".*/CharacterInventoryDatabase\\.cpp$")
+
 # Create game executable
 add_executable(Game ${GAME_SOURCES})
 
@@ -147,6 +149,16 @@ if(EXISTS "${CHARACTER_SOURCE_DIR}")
     message(STATUS "Character directory found: ${CHARACTER_SOURCE_DIR}")
 endif()
 
+set(SCENES_SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/scenes")
+if(EXISTS "${SCENES_SOURCE_DIR}")
+    add_custom_command(TARGET Game POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:Game>/scenes"
+        COMMAND ${CMAKE_COMMAND} -E copy_directory "${SCENES_SOURCE_DIR}" "$<TARGET_FILE_DIR:Game>/scenes"
+        COMMENT "Copying scene data to build directory"
+    )
+    message(STATUS "Scenes directory found: ${SCENES_SOURCE_DIR}")
+endif()
+
 set(GAME_AUDIO_SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/audio/files")
 if(EXISTS "${GAME_AUDIO_SOURCE_DIR}")
     add_custom_command(TARGET Game POST_BUILD
@@ -178,3 +190,4 @@ if(EXISTS "${MENU_SOURCE_DIR}")
 endif()
 
 add_subdirectory(server)
+add_subdirectory(gateway)

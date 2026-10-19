@@ -3,24 +3,35 @@
 #ifdef PLATFORM_HAS_NUKLEAR
 
 #include "ui/MenuStyle.h"
+#include "ui/ItemTooltip.h"
+#include "ui/CooldownOverlay.h"
 #include "ui/UISystem.h"
 #include "render/Texture.h"
 #include "MenuLayout.h"
 #include "character/CharacterPaperdollRenderer.h"
+#include "character/GameItemCatalog.h"
 #include "core/Types.h"
+#include "systems/inventory/InventoryComponent.h"
 
+#include <array>
 #include <chrono>
+#include <functional>
 #include <memory>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
-struct nk_context;
-
 namespace Engine {
+namespace Net {
+struct TradeCommand;
+}
 namespace ECS {
 class Registry;
+struct PlayerTradeComponent;
+struct TradeOfferItem;
 }
 namespace Platform {
+class Window;
 namespace Render {
 class Shader;
 }
@@ -30,6 +41,7 @@ class Shader;
 namespace Game {
 namespace Character {
 class CharacterInstance;
+class SkillCatalog;
 } // namespace Character
 
 namespace UI {
@@ -41,6 +53,18 @@ struct BarButtonConfig {
     float xFraction = -1.0f;
     float yFraction = -1.0f;
     float heightFraction = -1.0f;
+};
+
+struct ActionBarSlotConfig {
+    std::string skillId;
+};
+
+struct ActionBarConfig {
+    float xFraction = 0.012f;
+    float yFraction = 0.5f;
+    float slotSizePixels = 52.0f;
+    float slotSpacingPixels = 6.0f;
+    std::vector<ActionBarSlotConfig> slots;
 };
 
 struct MinimapHudConfig {
@@ -69,7 +93,52 @@ struct CharacterHudConfig {
     float xFraction = 0.015f;
     float yFraction = 0.02f;
     std::string anchor = "top_left";
+    bool movable = true;
     std::vector<CharacterHudBarConfig> bars;
+};
+
+// Text/input region inside the background image (fractions of panel width/height).
+struct ChatContentLayoutConfig {
+    float xFraction = 0.03f;
+    float yFraction = 0.10f;
+    float widthFraction = 0.94f;
+    float heightFraction = 0.82f;
+    float inputHeightFraction = 0.15f;
+};
+
+struct ChatHudConfig {
+    std::string texturePath = "menus/chat/chatbackground.png";
+    // On-screen size in design pixels (1280x720 reference). Texture scales to fit.
+    int width = 420;
+    int height = 145;
+    float xFraction = 0.012f;
+    float yFraction = 0.18f;
+    std::string anchor = "bottom_left";
+    // Extra inset inside the content region (design pixels).
+    float paddingPixels = 2.0f;
+    ChatContentLayoutConfig content;
+    float inputRowHeight = 14.0f;
+    float logRowHeight = 11.0f;
+    float scrollLinesPerWheel = 1.0f;
+    // Opacity when the mouse is not over the chat (0 = invisible, 1 = opaque).
+    float idleAlpha = 0.5f;
+    bool movable = true;
+};
+
+struct BagItemGridConfig {
+    std::string slotTexturePath;
+    int columns = 4;
+    int rows = 6;
+    // Maximum grid region as fractions of the panel.
+    float widthFraction = 0.80f;
+    float heightFraction = 0.80f;
+    // Grid center within the panel (0.5 = centered).
+    float centerXFraction = 0.5f;
+    float centerYFraction = 0.5f;
+    float gapXFraction = 0.028f;
+    float gapYFraction = 0.018f;
+    float slotAlpha = 1.0f;
+    float dropSnapFraction = 0.45f;
 };
 
 struct OverlayPanelConfig {
@@ -88,6 +157,14 @@ struct OverlayPanelConfig {
     float characterPreviewSizeFraction = 0.5f;
     float characterPreviewXFraction = 0.5f;
     float characterPreviewYFraction = 0.4f;
+    bool hasItemGrid = false;
+    BagItemGridConfig itemGrid;
+    bool hasTradeGrids = false;
+    BagItemGridConfig selfTradeGrid;
+    BagItemGridConfig partnerTradeGrid;
+    bool dragFromEdgesOnly = false;
+    float dragEdgeFraction = 0.10f;
+    bool movable = true;
 };
 
 struct CloseButtonConfig {
@@ -128,13 +205,16 @@ struct CharacterMenuConfig {
     float barButtonFirstXFraction = 0.4485308173773625628217642848642f;
     float barButtonYFraction = 0.5f;
     std::vector<BarButtonConfig> barButtons;
+    ActionBarConfig actionBar;
     MinimapHudConfig minimap;
     CharacterHudConfig characterHud;
+    ChatHudConfig chat;
     std::vector<OverlayPanelConfig> panels;
     CloseButtonConfig closeButton;
     PaperdollRotateButtonConfig paperdollRotate;
     int minScreenWidth = 1280;
     int minScreenHeight = 720;
+    float tradeMaxDistance = 8.0f;
 
     MenuReferenceScreen ReferenceScreen() const {
         return MenuReferenceScreen{minScreenWidth, minScreenHeight};
@@ -144,6 +224,18 @@ struct CharacterMenuConfig {
 // Bottom HUD overlay on the character screen (after main menu PLAY).
 class CharacterMenu {
 public:
+    enum class BagItemAction {
+        Use,
+        Drop,
+    };
+
+    struct BagDragState {
+        bool active = false;
+        int sourceSlot = -1;
+        int hoverDropSlot = -1;
+        Engine::Systems::Inventory::Item item;
+    };
+
     static bool LoadConfig(CharacterMenuConfig& out, const char* manifestPath = CharacterMenuConfig::kManifestPath);
 
     bool Initialize(const CharacterMenuConfig* config = nullptr);
@@ -152,20 +244,107 @@ public:
     void Show() { m_visible = true; }
     void Hide() { m_visible = false; }
     bool IsVisible() const { return m_visible; }
-    bool BlocksGameInput() const { return m_visible && (m_pointerOverBarUi || m_pointerOverPanelUi); }
+    bool BlocksGameInput() const {
+        return m_visible &&
+               (m_pointerOverBarUi || m_pointerOverActionBarUi || m_pointerOverPanelUi ||
+                m_tradePanelOpen || m_inspectPaperdollOpen);
+    }
 
     const CharacterMenuConfig& GetConfig() const { return m_config; }
+
+    void BindActionBarSkills(const Game::Character::SkillCatalog& catalog);
+    const std::string* GetActionBarSkillId(size_t slotIndex) const;
+    void SetSkillActivateCallback(std::function<void(const std::string& skillId)> callback) {
+        m_skillActivateCallback = std::move(callback);
+    }
+    void SetSkillCooldownQuery(
+        std::function<Game::UI::CooldownTimerSnapshot(const std::string& skillId)> query) {
+        m_skillCooldownQuery = std::move(query);
+    }
+    void SetActionBarHighlightSkill(const std::string& skillId) {
+        m_actionBarHighlightSkillId = skillId;
+    }
+    void UpdateActionBarKeyState(Engine::Platform::Window& window);
 
     void SetPaperdollCharacter(Engine::ECS::Registry* registry,
                                Engine::EntityID characterEntity,
                                Engine::Platform::Render::Shader* shader,
                                Game::Character::CharacterInstance* characterInstance);
 
+    void OpenInspectPaperdoll(Engine::ECS::Registry* registry,
+                              Engine::EntityID characterEntity,
+                              Engine::Platform::Render::Shader* shader,
+                              Game::Character::CharacterInstance* characterInstance,
+                              const std::string& displayName);
+    void CloseInspectPaperdoll();
+    bool IsInspectPaperdollOpen() const { return m_inspectPaperdollOpen; }
+
+    void SetInventoryEntity(Engine::ECS::Registry* registry, Engine::EntityID entity);
+
+    void SetInventorySyncCallback(std::function<void()> callback);
+
+    void SetInventoryMutationCallback(std::function<void()> callback);
+
+    void SetInventoryActionCallback(
+        std::function<void(BagItemAction action, int slotIndex)> callback);
+
+    void SetInventoryCombinedUseCallback(
+        std::function<void(int primarySlot, int secondarySlot)> callback);
+
+    void RequestInventorySync();
+
+    void CancelBagDrag();
+
+    bool IsBagItemActionPanelOpen() const {
+        return m_bagActionPanelOpen || m_tradeQuantityPanelOpen;
+    }
+
+    bool IsBagUseSlotSelected(int slotIndex) const {
+        return slotIndex >= 0 && slotIndex == m_bagSelectedUseSlot;
+    }
+
+    void SetGameItemCatalog(const Game::Character::GameItemCatalog* catalog);
+
+    void SetTradeCommandCallback(std::function<void(const Engine::Net::TradeCommand&)> callback);
+
+    void OpenTradePanel();
+    void CloseTradePanel();
+    bool IsTradePanelOpen() const { return m_tradePanelOpen; }
+
+    void SyncTradeState(Engine::ECS::Registry* registry, Engine::EntityID entity);
+
+    void SetTradeDisplayNames(const std::string& selfName, const std::string& partnerName);
+
+    const Engine::Platform::Render::Texture* GetItemIconTexture(uint32_t numericItemId);
+
+    Engine::Platform::UI::ItemTooltipContent BuildItemTooltipContent(
+        const Engine::Systems::Inventory::Item& item) const;
+
+    void Update(Engine::Platform::Window& window);
+
     void Build(struct nk_context* ctx,
                const Engine::Platform::UI::MenuStyle& style,
                Engine::Platform::UI::UISystem& uiSystem,
                int screenWidth,
                int screenHeight);
+
+    // UILayerId::Hud — bottom action bar and bar buttons (always visible in-game).
+    void BuildHudChrome(struct nk_context* ctx, int screenWidth, int screenHeight);
+    void BuildActionBar(struct nk_context* ctx,
+                        struct nk_command_buffer* canvas,
+                        int screenWidth,
+                        int screenHeight,
+                        const MenuScreenLayout& layout);
+
+    // UILayerId::Panels — opened manifest panels (paperdoll, bag, trade) and settings.
+    void BuildOpenPanels(struct nk_context* ctx,
+                         const Engine::Platform::UI::MenuStyle& style,
+                         Engine::Platform::UI::UISystem& uiSystem,
+                         int screenWidth,
+                         int screenHeight);
+
+    // UILayerId::Popups — bag/trade item action menus above opened panels.
+    void BuildPopups(struct nk_context* ctx, int screenWidth, int screenHeight);
 
 private:
     struct LoadedBarButton {
@@ -179,11 +358,86 @@ private:
     };
 
     LoadedBarButton* FindBarButton(const std::string& id);
+
+    struct LoadedActionBarSlot {
+        std::string skillId;
+        std::unique_ptr<Engine::Platform::Render::Texture> unpressedTexture;
+        std::unique_ptr<Engine::Platform::Render::Texture> pressedTexture;
+    };
+    bool TryGetBottomBarLayout(int screenWidth,
+                               int screenHeight,
+                               MenuScreenLayout& outLayout,
+                               struct nk_rect& outBarBounds,
+                               float& outDrawW,
+                               float& outDrawH,
+                               float& outBarX,
+                               float& outBarY) const;
+    void LogBagContentsIfChanged();
+    bool UpdateBagItemDrag(struct nk_context* ctx,
+                           float panelX,
+                           float panelY,
+                           float panelW,
+                           float panelH,
+                           const BagItemGridConfig& grid);
+    bool UpdateBagItemActionPanel(struct nk_context* ctx, int screenWidth, int screenHeight);
+    void DrawBagItemActionPanel(struct nk_context* ctx,
+                                struct nk_command_buffer* canvas,
+                                int screenWidth,
+                                int screenHeight);
+    bool UpdateTradeQuantityPanel(struct nk_context* ctx, int screenWidth, int screenHeight);
+    void DrawTradeQuantityPanel(struct nk_context* ctx,
+                                struct nk_command_buffer* canvas,
+                                int screenWidth,
+                                int screenHeight);
+    bool BuildBagActionPanelLayout(int screenWidth,
+                                   int screenHeight,
+                                   const struct nk_user_font* font,
+                                   Engine::Platform::UI::ItemActionPanelLayout& outLayout,
+                                   Engine::Platform::UI::ItemTooltipContent& outContent,
+                                   bool& outShowUse,
+                                   bool& outShowTrade,
+                                   bool& outShowTradeX) const;
+    void DrawSettingsMenu(struct nk_context* ctx,
+                          const Engine::Platform::UI::MenuStyle& style,
+                          Engine::Platform::UI::UISystem& uiSystem,
+                          int screenWidth,
+                          int screenHeight);
+    bool CanUseItemAtSlot(size_t slotIndex) const;
+    void ClearBagUseSelection();
+    void HandleBagUseSlotClick(int slotIndex);
+    void PerformCombinedBagItemUse(int primarySlot, int secondarySlot);
+    void PerformBagItemAction(BagItemAction action, int slotIndex);
+    void ToggleBarButton(const std::string& id);
+    void OpenBagPanel();
+    bool CanModifyTradeOffer() const;
+    bool CanShowTradeItemActions() const;
+    bool TryAddBagItemToTradeOffer(int bagSlotIndex, uint32_t quantity = 0);
+    void OpenTradeQuantityPanel(int bagSlotIndex);
+    void CloseTradeQuantityPanel();
+    void DeclineAndCloseTradePanel();
+    bool TryRemoveTradeOfferAtSlot(int tradeSlotIndex);
+    void SendTradeOfferUpdate(const Engine::ECS::PlayerTradeComponent* trade,
+                              std::vector<Engine::ECS::TradeOfferItem> offer);
+    void UpdateTradeInteractions(struct nk_context* ctx,
+                                 const struct nk_rect& panelBounds,
+                                 const BagItemGridConfig& selfGrid,
+                                 const Engine::ECS::PlayerTradeComponent* trade);
+    void DrawTradeGrids(struct nk_context* ctx,
+                        struct nk_command_buffer* canvas,
+                        const struct nk_rect& panelBounds,
+                        const BagItemGridConfig& selfGrid,
+                        const BagItemGridConfig& partnerGrid,
+                        const Engine::Platform::Render::Texture* slotTexture,
+                        const Engine::ECS::PlayerTradeComponent* trade,
+                        int screenWidth,
+                        int screenHeight);
+    bool KeyPressed(Engine::Platform::Window& window, int key, bool& wasDown) const;
     CloseButtonConfig ResolvePanelCloseButton(const OverlayPanelConfig& panel) const;
 
     struct LoadedOverlayPanel {
         OverlayPanelConfig config;
         std::unique_ptr<Engine::Platform::Render::Texture> texture;
+        std::unique_ptr<Engine::Platform::Render::Texture> slotTexture;
         bool positionInitialized = false;
         bool dragging = false;
         float centerX = 0.0f;
@@ -191,6 +445,8 @@ private:
         float dragGrabX = 0.0f;
         float dragGrabY = 0.0f;
     };
+
+    LoadedOverlayPanel* FindOverlayPanel(const std::string& buttonId);
 
     CharacterMenuConfig m_config;
     std::unique_ptr<Engine::Platform::Render::Texture> m_bottomBarTexture;
@@ -201,17 +457,83 @@ private:
     std::unique_ptr<Engine::Platform::Render::Texture> m_paperdollRotateLeftLightTexture;
     std::unique_ptr<Engine::Platform::Render::Texture> m_paperdollRotateRightLightTexture;
     std::vector<LoadedBarButton> m_barButtons;
+    std::vector<LoadedActionBarSlot> m_actionBarSlots;
+    std::function<void(const std::string& skillId)> m_skillActivateCallback;
+    std::function<Game::UI::CooldownTimerSnapshot(const std::string& skillId)> m_skillCooldownQuery;
+    std::string m_actionBarHighlightSkillId;
+    std::array<bool, 9> m_actionBarKeyHeld{};
+    std::array<bool, 9> m_actionBarMouseHeld{};
     std::vector<LoadedOverlayPanel> m_overlayPanels;
     std::unique_ptr<Game::Character::CharacterPaperdollRenderer> m_paperdollRenderer;
     Engine::ECS::Registry* m_paperdollRegistry = nullptr;
     Engine::EntityID m_paperdollCharacterEntity = Engine::INVALID_ENTITY;
     Engine::Platform::Render::Shader* m_paperdollShader = nullptr;
     Game::Character::CharacterInstance* m_paperdollCharacterInstance = nullptr;
+    std::unique_ptr<Game::Character::CharacterPaperdollRenderer> m_inspectPaperdollRenderer;
+    Engine::ECS::Registry* m_inspectPaperdollRegistry = nullptr;
+    Engine::EntityID m_inspectCharacterEntity = Engine::INVALID_ENTITY;
+    Engine::Platform::Render::Shader* m_inspectShader = nullptr;
+    Game::Character::CharacterInstance* m_inspectCharacterInstance = nullptr;
+    std::string m_inspectDisplayName;
+    float m_inspectPaperdollYawDegrees = 0.0f;
+    bool m_inspectPaperdollOpen = false;
+    bool m_hasInspectPaperdollRotateClock = false;
+    std::chrono::steady_clock::time_point m_lastInspectPaperdollRotateTime{};
+    Engine::ECS::Registry* m_inventoryRegistry = nullptr;
+    Engine::EntityID m_inventoryEntity = Engine::INVALID_ENTITY;
+    const Game::Character::GameItemCatalog* m_gameItemCatalog = nullptr;
+    std::unordered_map<uint32_t, std::unique_ptr<Engine::Platform::Render::Texture>> m_itemIconTextures;
+    std::string m_lastBagLogSnapshot;
+    std::function<void()> m_inventorySyncCallback;
+    std::function<void()> m_inventoryMutationCallback;
+    std::function<void(BagItemAction, int)> m_inventoryActionCallback;
+    std::function<void(int, int)> m_inventoryCombinedUseCallback;
+    std::function<void(const Engine::Net::TradeCommand&)> m_tradeCommandCallback;
+    bool m_inventorySyncPending = false;
+    BagDragState m_bagDrag;
+    bool m_bagClickPending = false;
+    int m_bagPendingClickSlot = -1;
+    float m_bagPendingClickMouseX = 0.0f;
+    float m_bagPendingClickMouseY = 0.0f;
+    int m_bagSelectedUseSlot = -1;
+    bool m_bagActionPanelOpen = false;
+    int m_bagActionPanelSlot = -1;
+    float m_bagActionPanelAnchorX = 0.0f;
+    float m_bagActionPanelAnchorY = 0.0f;
+    float m_bagActionPanelAnchorW = 0.0f;
+    float m_bagActionPanelAnchorH = 0.0f;
+    bool m_tradeQuantityPanelOpen = false;
+    int m_tradeQuantitySlot = -1;
+    int m_tradeQuantityValue = 1;
+    int m_tradeQuantityMax = 1;
+    float m_tradeQuantityAnchorX = 0.0f;
+    float m_tradeQuantityAnchorY = 0.0f;
+    float m_tradeQuantityAnchorW = 0.0f;
+    float m_tradeQuantityAnchorH = 0.0f;
     float m_paperdollYawDegrees = 0.0f;
+    bool m_bKeyWasDown = false;
+    bool m_tradePanelOpen = false;
+    bool m_tradePanelDismissedByUser = false;
+    Engine::ECS::Registry* m_tradeRegistry = nullptr;
+    Engine::EntityID m_tradeEntity = Engine::INVALID_ENTITY;
+    struct TradeSlotRect {
+        float x = 0.0f;
+        float y = 0.0f;
+        float w = 0.0f;
+        float h = 0.0f;
+    };
+    std::vector<TradeSlotRect> m_selfTradeSlotBounds;
+    float m_tradePanelX = 0.0f;
+    float m_tradePanelY = 0.0f;
+    float m_tradePanelW = 0.0f;
+    float m_tradePanelH = 0.0f;
+    std::string m_tradeSelfDisplayName;
+    std::string m_tradePartnerDisplayName;
     bool m_hasPaperdollRotateClock = false;
     std::chrono::steady_clock::time_point m_lastPaperdollRotateTime{};
     bool m_visible = false;
     mutable bool m_pointerOverBarUi = false;
+    mutable bool m_pointerOverActionBarUi = false;
     mutable bool m_pointerOverPanelUi = false;
 };
 

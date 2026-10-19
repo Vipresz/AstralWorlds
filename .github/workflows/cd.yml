@@ -19,9 +19,14 @@ concurrency:
 
 jobs:
   release-windows:
-    runs-on: windows-latest
+    # Same self-hosted runner as AstralWorlds CI (actions-runner-vipresz).
+    runs-on: [self-hosted, Windows, X64]
     timeout-minutes: 120
     steps:
+      - name: Enable Git long paths
+        shell: powershell
+        run: git config --global core.longpaths true
+
       - name: Checkout
         uses: actions/checkout@v4
         with:
@@ -32,8 +37,12 @@ jobs:
         with:
           token: ${{ secrets.REPO_PAT }}
 
+      - name: Bootstrap RenderingEngine libs
+        shell: powershell
+        run: ./tools/ci/bootstrap_game_libs.ps1 -GameLibsPath RenderingEngine/libs
+
       - name: Verify engine libs
-        shell: pwsh
+        shell: powershell
         run: |
           foreach ($p in @(
             "RenderingEngine/libs/glm-1.0.2/glm/glm.hpp",
@@ -54,7 +63,7 @@ jobs:
         run: cmake --build build --config Release --target Game GameServer --parallel
 
       - name: Package Windows build
-        shell: pwsh
+        shell: powershell
         run: ./tools/ci/package_windows_game.ps1 -BuildDir build -Config Release -OutputZip dist/astral-worlds-windows.zip
 
       - name: Publish GitHub release
