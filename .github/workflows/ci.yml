@@ -6,9 +6,9 @@ name: AstralWorlds CI
 
 on:
   push:
-    branches: [main, master, rgrigorii/menu]
+    branches: [main, master, rgrigorii/menu, feat/concurrent-player-scale]
   pull_request:
-    branches: [main, master, rgrigorii/menu]
+    branches: [main, master, rgrigorii/menu, feat/concurrent-player-scale]
   workflow_dispatch:
 
 concurrency:
@@ -17,7 +17,8 @@ concurrency:
 
 jobs:
   build-game-windows:
-    runs-on: windows-latest
+    # Vipresz org runner: actions-runner-vipresz (DESKTOP-HF590QG-vipresz). GPU + MSVC toolchain.
+    runs-on: [self-hosted, Windows, X64]
     timeout-minutes: 90
     steps:
       - name: Checkout
@@ -66,6 +67,13 @@ jobs:
           $proc = Start-Process -FilePath ".\game.exe" -ArgumentList "--smoke-test" -PassThru -Wait -NoNewWindow
           if ($proc.ExitCode -ne 0) { throw "game.exe --smoke-test failed with exit code $($proc.ExitCode)" }
           Write-Host "game.exe smoke test passed."
+
+      - name: Game unit tests
+        shell: pwsh
+        working-directory: build/bin/Release
+        run: |
+          ctest --test-dir ../.. -C Release --output-on-failure --exclude-regex "GameNetworkE2ETest"
+          if ($LASTEXITCODE -ne 0) { throw "Game unit tests failed with exit code $LASTEXITCODE" }
 
       - name: Game e2e tests
         shell: pwsh

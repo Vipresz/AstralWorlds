@@ -19,7 +19,8 @@ concurrency:
 
 jobs:
   release-windows:
-    runs-on: windows-latest
+    # Same self-hosted runner as AstralWorlds CI (actions-runner-vipresz).
+    runs-on: [self-hosted, Windows, X64]
     timeout-minutes: 120
     steps:
       - name: Checkout
