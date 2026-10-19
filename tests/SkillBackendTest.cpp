@@ -16,6 +16,7 @@
 #include "systems/character/SkillExecutionSystem.h"
 
 #include <cmath>
+#include <string>
 #include <vector>
 
 using Engine::ECS::Registry;
@@ -318,6 +319,16 @@ TEST(SkillExecutionSystemTest, ActivatesExecutesAppliesDelayedDamageAndFinishes)
     EXPECT_TRUE(SkillActivator::TryActivate(registry, caster, catalog, *punch));
 }
 
+namespace {
+
+std::string g_overlayBoneName;
+
+bool OverlayBoneMatches(const std::string& nodeName) {
+    return nodeName == g_overlayBoneName;
+}
+
+} // namespace
+
 TEST(SkeletonLayeredTransformsTest, MergesOverlayBoneTransformsWhenPredicateMatches) {
     ASSERT_TRUE(Game::Tests::SetWorkingDirectoryToTestRuntime());
 
@@ -342,10 +353,11 @@ TEST(SkeletonLayeredTransformsTest, MergesOverlayBoneTransformsWhenPredicateMatc
         overlayTransforms[entry.first] = glm::mat4(2.0f);
     }
 
+    g_overlayBoneName = targetBoneName;
     skeleton.UpdateBoneTransformsLayered(
         primaryTransforms,
         overlayTransforms,
-        [&](const std::string& nodeName) { return nodeName == targetBoneName; });
+        &OverlayBoneMatches);
     EXPECT_FALSE(skeleton.IsBindPoseActive());
 
     std::vector<glm::mat4> layeredMatrices;
